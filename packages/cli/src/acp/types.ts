@@ -76,6 +76,7 @@ export function parseInitializeParams(raw: unknown): ValidationResult<Initialize
 export interface AgentCapabilities {
   loadSession: boolean
   promptCapabilities: { image: boolean; audio: boolean; embeddedContext: boolean }
+  mcpCapabilities: { http: boolean; sse: boolean }
 }
 
 export interface AgentInfo {
@@ -300,3 +301,5 @@ export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refu
 
 
 export const ACP_AUTH_REQUIRED = -32000
+
+export const ACP_SESSION_BUSY = -32001

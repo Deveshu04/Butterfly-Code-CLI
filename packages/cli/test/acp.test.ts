@@ -1,8 +1,15 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { ProviderPort, TurnEvent, TurnRequest, Usage } from "@butterfly/core"
+import {
+  McpHub,
+  type McpServerConfig,
+  type ProviderPort,
+  type TurnEvent,
+  type TurnRequest,
+  type Usage,
+} from "@butterfly/core"
 import { connectAcpAgent } from "../src/acp/agent"
 
 
@@ -33,9 +40,18 @@ function gitCwd(prefix: string): string {
   return cwd
 }
 
-function makeAgent(provider: ProviderPort, opts: { model?: string; home: string }) {
+function makeAgent(
+  provider: ProviderPort,
+  opts: {
+    model?: string
+    home: string
+    permissionTimeoutMs?: number
+    mcpConnect?: (configs: Record<string, McpServerConfig>) => Promise<McpHub>
+  },
+) {
   const sent: string[] = []
-  const peer = connectAcpAgent(
+  const logs: string[] = []
+  const { peer, agent } = connectAcpAgent(
     (line) => {
       sent.push(line)
     },
@@ -43,9 +59,33 @@ function makeAgent(provider: ProviderPort, opts: { model?: string; home: string 
       provider,
       ...(opts.model ? { model: opts.model } : {}),
       home: opts.home,
+      ...(opts.permissionTimeoutMs !== undefined
+        ? { permissionTimeoutMs: opts.permissionTimeoutMs }
+        : {}),
+      ...(opts.mcpConnect ? { mcpConnect: opts.mcpConnect } : {}),
+      onLog: (message: string) => {
+        logs.push(message)
+      },
     },
   )
-  return { peer, sent }
+  return { peer, agent, sent, logs }
+}
+
+/** Provider script pair for "one tool call, then a plain text finish". */
+function oneToolCallThenText(
+  call: { callId: string; name: string; input: unknown },
+  text = "done",
+): TurnEvent[][] {
+  return [
+    [
+      { type: "tool-call", ...call },
+      { type: "finish", reason: "tool-calls", usage: zeroUsage },
+    ],
+    [
+      { type: "text-delta", text },
+      { type: "finish", reason: "stop", usage: zeroUsage },
+    ],
+  ]
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: test-only JSON-RPC frame inspection
@@ -91,6 +131,8 @@ test("initialize: negotiates protocol version 1 and advertises honest capabiliti
     audio: false,
     embeddedContext: true,
   })
+  // McpHub does stdio (mandatory) + streamable HTTP, and no legacy SSE.
+  expect(response.result.agentCapabilities.mcpCapabilities).toEqual({ http: true, sse: false })
   expect(response.result.agentInfo.name).toBe("butterfly")
   expect(response.result.authMethods).toEqual([])
 })
@@ -335,4 +377,314 @@ test("session/cancel mid-turn resolves stopReason cancelled without hanging", as
   const messages = parsed(sent)
   const finalResponse = messages.find((m) => m.id === 2)
   expect(finalResponse.result.stopReason).toBe("cancelled")
+}, 20_000)
+
+
+test("a second session/prompt while one is in flight is rejected, and the first still completes", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(
+    join(cwd, "butterfly.jsonc"),
+    JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
+  )
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "edit",
+      input: { file_path: "a.txt", old_string: "", new_string: "hi" },
+    }),
+  )
+  const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+
+  const first = peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "create a.txt" }] },
+    }),
+  )
+  const permissionRequest = await waitFor(() =>
+    parsed(sent).find((m) => m.method === "session/request_permission"),
+  )
+
+  // ...second prompt lands while the first turn is parked on the permission.
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "and again" }] },
+    }),
+  )
+  const rejection = parsed(sent).find((m) => m.id === 3)
+  expect(rejection.error.code).toBe(-32001)
+  expect(rejection.error.message).toContain(sessionId)
+  expect(rejection.error.data.sessionId).toBe(sessionId)
+
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: permissionRequest.id,
+      result: { outcome: { outcome: "selected", optionId: "allow-once" } },
+    }),
+  )
+  await first
+
+  const finalResponse = parsed(sent).find((m) => m.id === 2)
+  expect(finalResponse.result.stopReason).toBe("end_turn")
+  expect(existsSync(join(cwd, "a.txt"))).toBe(true)
+}, 20_000)
+
+
+test("a permission request the client never answers times out and fails safe (deny)", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(
+    join(cwd, "butterfly.jsonc"),
+    JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
+  )
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "edit",
+      input: { file_path: "a.txt", old_string: "", new_string: "hi" },
+    }),
+  )
+  const { peer, sent, logs } = makeAgent(provider, {
+    model: "mock/model",
+    home,
+    permissionTimeoutMs: 50,
+  })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+
+  // Never answer the permission request — a live-but-silent client.
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "create a.txt" }] },
+    }),
+  )
+
+  const messages = parsed(sent)
+  expect(messages.find((m) => m.method === "session/request_permission")).toBeDefined()
+  expect(messages.find((m) => m.id === 2).result.stopReason).toBe("end_turn")
+  const failed = messages.find(
+    (m) =>
+      m.params?.update?.sessionUpdate === "tool_call_update" && m.params.update.status === "failed",
+  )
+  expect(failed).toBeDefined()
+  expect(logs.join("\n")).toContain("timed out")
+  expect(existsSync(join(cwd, "a.txt"))).toBe(false)
+}, 20_000)
+
+test("a client disconnect denies every pending permission instead of hanging the turn", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(
+    join(cwd, "butterfly.jsonc"),
+    JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
+  )
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "edit",
+      input: { file_path: "a.txt", old_string: "", new_string: "hi" },
+    }),
+  )
+  // A generous timeout, so nothing but the disconnect can resolve this ask.
+  const { peer, sent, logs } = makeAgent(provider, {
+    model: "mock/model",
+    home,
+    permissionTimeoutMs: 600_000,
+  })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+
+  const prompt = peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "create a.txt" }] },
+    }),
+  )
+  await waitFor(() => parsed(sent).find((m) => m.method === "session/request_permission"))
+
+  // stdin EOF: the client is gone, nothing will ever answer.
+  peer.abandonAll("client disconnected")
+  await prompt
+
+  expect(parsed(sent).find((m) => m.id === 2).result.stopReason).toBe("end_turn")
+  expect(logs.join("\n")).toContain("client disconnected")
+  expect(existsSync(join(cwd, "a.txt"))).toBe(false)
+}, 20_000)
+
+
+test("client-supplied mcpServers are converted, connected fail-soft, and reachable via the mcp tool", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ permissions: { "*": "allow" } }))
+
+  const seen: Record<string, McpServerConfig>[] = []
+  let closed = 0
+  const provider = new MockProvider(
+    oneToolCallThenText({ callId: "c1", name: "mcp", input: { op: "list" } }),
+  )
+  const { peer, agent, sent } = makeAgent(provider, {
+    model: "mock/model",
+    home,
+    mcpConnect: async (configs) => {
+      seen.push(configs)
+      const hub = await McpHub.connect(configs, {
+        transportFactory: () => {
+          throw new Error("test transport")
+        },
+      })
+      const realClose = hub.close.bind(hub)
+      hub.close = async () => {
+        closed += 1
+        await realClose()
+      }
+      return hub
+    },
+  })
+
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "session/new",
+      params: {
+        cwd,
+        mcpServers: [
+          {
+            name: "docs",
+            command: "/path/to/mcp-server",
+            args: ["--stdio"],
+            env: [{ name: "TOKEN", value: "t" }],
+          },
+        ],
+      },
+    }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  expect(sessionId).toBeDefined()
+  expect(seen[0]).toEqual({
+    docs: { command: "/path/to/mcp-server", args: ["--stdio"], env: { TOKEN: "t" } },
+  })
+
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "list mcp tools" }] },
+    }),
+  )
+
+  const completed = parsed(sent).find(
+    (m) =>
+      m.params?.update?.sessionUpdate === "tool_call_update" &&
+      m.params.update.toolCallId === "c1" &&
+      (m.params.update.status === "completed" || m.params.update.status === "failed"),
+  )
+  // The mcp tool is registered for this session and its lazy L0 index is what
+  // reaches the model — including the fail-soft "unavailable" marker.
+  expect(JSON.stringify(completed.params.update.content)).toContain("docs")
+  expect(JSON.stringify(completed.params.update.content)).toContain("unavailable")
+
+  await agent.shutdown("test over")
+  expect(closed).toBe(1)
+}, 20_000)
+
+
+test("with no configured permissions, bash asks (interactive posture) instead of just running", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-") // no butterfly.jsonc at all
+
+  const provider = new MockProvider(
+    oneToolCallThenText({ callId: "c1", name: "bash", input: { command: "echo hi" } }),
+  )
+  const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+
+  const prompt = peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "say hi" }] },
+    }),
+  )
+  const permissionRequest = await waitFor(() =>
+    parsed(sent).find((m) => m.method === "session/request_permission"),
+  )
+  expect(permissionRequest.params.toolCall.toolCallId).toBe("c1")
+
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: permissionRequest.id,
+      result: { outcome: { outcome: "selected", optionId: "reject-once" } },
+    }),
+  )
+  await prompt
+  expect(parsed(sent).find((m) => m.id === 2).result.stopReason).toBe("end_turn")
+}, 20_000)
+
+test("butterfly.jsonc permissions override the interactive defaults entirely", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ permissions: { "*": "allow" } }))
+
+  const provider = new MockProvider(
+    oneToolCallThenText({ callId: "c1", name: "bash", input: { command: "echo hi" } }),
+  )
+  const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "say hi" }] },
+    }),
+  )
+
+  const messages = parsed(sent)
+  expect(messages.find((m) => m.method === "session/request_permission")).toBeUndefined()
+  const completed = messages.find(
+    (m) =>
+      m.params?.update?.sessionUpdate === "tool_call_update" &&
+      m.params.update.status === "completed",
+  )
+  expect(JSON.stringify(completed.params.update.content)).toContain("hi")
+  expect(messages.find((m) => m.id === 2).result.stopReason).toBe("end_turn")
 }, 20_000)

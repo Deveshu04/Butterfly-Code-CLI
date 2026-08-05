@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path"
 import {
   bashTool,
   buildSystem,
+  createMcpTool,
   createMemoryTool,
   createSkillTool,
   createSnapshot,
@@ -20,6 +21,8 @@ import {
   loadMemory,
   MAX_IMAGE_BYTES,
   MAX_IMAGES_PER_TURN,
+  McpHub,
+  type McpServerConfig,
   memoryPaths,
   type PermissionDecision,
   type PermissionRules,
@@ -43,8 +46,10 @@ import {
 } from "./jsonrpc"
 import {
   ACP_AUTH_REQUIRED,
+  ACP_SESSION_BUSY,
   type AgentInfo,
   type ContentBlock,
+  type McpServerConfigAcp,
   type PermissionOption,
   PROTOCOL_VERSION,
   parseInitializeParams,
@@ -68,8 +73,12 @@ interface AskRequest {
 
 const DEFAULT_RULES: PermissionRules = {
   "*": "allow",
-  edit: { "**/.env*": "deny", ".env*": "deny" },
+  bash: "ask",
+  edit: { "*": "ask", "**/.env*": "deny", ".env*": "deny" },
+  web: "ask",
 }
+
+const PERMISSION_TIMEOUT_MS = 120_000
 
 export interface AcpAgentOptions {
   /** Single provider instance shared by every session (mirrors run.ts). */
@@ -78,6 +87,10 @@ export interface AcpAgentOptions {
   /** Home directory for config/memory/skills resolution. */
   home: string
   agentInfo?: AgentInfo
+  /** Override for `PERMISSION_TIMEOUT_MS` (tests use a short one). */
+  permissionTimeoutMs?: number
+  onLog?: (message: string) => void
+  mcpConnect?: (configs: Record<string, McpServerConfig>) => Promise<McpHub>
 }
 
 interface AcpSession {
@@ -92,6 +105,36 @@ interface AcpSession {
   episodic: EpisodicIndex
   pendingCalls: Map<string, { name: string; input: unknown }>
   abortController?: AbortController
+  /** Connected MCP servers for this session (client-supplied + config). */
+  mcpHub?: McpHub
+}
+
+function toHubConfigs(
+  servers: McpServerConfigAcp[],
+  log: (message: string) => void,
+): Record<string, McpServerConfig> {
+  const pairs = (list: { name: string; value: string }[] | undefined) =>
+    list && list.length > 0
+      ? Object.fromEntries(list.map((entry) => [entry.name, entry.value]))
+      : undefined
+  const configs: Record<string, McpServerConfig> = {}
+  for (const server of servers) {
+    if (server.command) {
+      configs[server.name] = {
+        command: server.command,
+        ...(server.args ? { args: server.args } : {}),
+        ...(pairs(server.env) ? { env: pairs(server.env) } : {}),
+      }
+    } else if (server.url) {
+      configs[server.name] = {
+        url: server.url,
+        ...(pairs(server.headers) ? { headers: pairs(server.headers) } : {}),
+      }
+    } else {
+      log(`mcp server "${server.name}" has neither command nor url — skipped`)
+    }
+  }
+  return configs
 }
 
 const TOOL_KINDS: Record<string, ToolKind> = {
@@ -178,8 +221,23 @@ export class AcpAgent {
   /** Set immediately after construction by `connectAcpAgent` — never used before then. */
   peer!: JsonRpcPeer
   private readonly sessions = new Map<string, AcpSession>()
+  /** Turns currently running, so `shutdown` can wait for them to unwind. */
+  private readonly inFlight = new Set<Promise<unknown>>()
 
   constructor(private readonly opts: AcpAgentOptions) {}
+
+  /** stderr by default — stdout carries protocol frames and nothing else. */
+  private log(message: string): void {
+    if (this.opts.onLog) this.opts.onLog(message)
+    else process.stderr.write(`acp: ${message}\n`)
+  }
+
+  async shutdown(reason = "client disconnected"): Promise<void> {
+    this.peer?.abandonAll(reason)
+    for (const session of this.sessions.values()) session.abortController?.abort()
+    await Promise.allSettled([...this.inFlight])
+    await Promise.allSettled([...this.sessions.values()].map((session) => session.mcpHub?.close()))
+  }
 
   async onRequest(method: string, params: unknown): Promise<unknown> {
     switch (method) {
@@ -208,13 +266,15 @@ export class AcpAgent {
       agentCapabilities: {
         loadSession: false,
         promptCapabilities: { image: true, audio: false, embeddedContext: true },
+        // McpHub speaks stdio (mandatory) + streamable HTTP; no legacy SSE.
+        mcpCapabilities: { http: true, sse: false },
       },
       agentInfo: this.opts.agentInfo ?? { name: "butterfly", title: "Butterfly Code" },
       authMethods: [],
     }
   }
 
-  private handleSessionNew(rawParams: unknown): { sessionId: string } {
+  private async handleSessionNew(rawParams: unknown): Promise<{ sessionId: string }> {
     const parsed = parseSessionNewParams(rawParams)
     if (!parsed.ok) throw new JsonRpcError(JSON_RPC_INVALID_PARAMS, parsed.message)
     const cwd = resolve(parsed.data.cwd)
@@ -234,11 +294,31 @@ export class AcpAgent {
       })
     }
 
+    const mcpConfigs = {
+      ...(config.mcp ?? {}),
+      ...toHubConfigs(parsed.data.mcpServers, (message) => this.log(message)),
+    }
+    let mcpHub: McpHub | undefined
+    if (Object.keys(mcpConfigs).length > 0) {
+      const connect = this.opts.mcpConnect ?? ((configs) => McpHub.connect(configs))
+      mcpHub = await connect(mcpConfigs).catch((error: unknown) => {
+        this.log(`mcp connect failed: ${error instanceof Error ? error.message : String(error)}`)
+        return undefined
+      })
+      for (const server of mcpHub?.status() ?? []) {
+        this.log(
+          server.error
+            ? `mcp "${server.name}" unavailable — ${server.error}`
+            : `mcp "${server.name}" connected — ${server.toolCount} tools (lazy: ${mcpHub?.indexTokens() ?? 0} index tokens vs ${mcpHub?.eagerTokens() ?? 0} eager)`,
+        )
+      }
+    }
+
     const sessionId = `sess_${randomUUID()}`
     const sessionsDir = join(cwd, ".butterfly", "sessions")
     const journal = SessionJournal.create(sessionsDir)
     const episodic = EpisodicIndex.open(join(cwd, ".butterfly", "index.db"))
-    const registry = this.buildRegistry(cwd, home, modelRef, sessionsDir, episodic)
+    const registry = this.buildRegistry(cwd, home, modelRef, sessionsDir, episodic, mcpHub)
     const memory = loadMemory(memoryPaths(cwd, home))
     const skillDirs = [
       join(cwd, ".butterfly", "skills"),
@@ -264,6 +344,7 @@ export class AcpAgent {
       state: {},
       episodic,
       pendingCalls: new Map(),
+      ...(mcpHub ? { mcpHub } : {}),
     })
     return { sessionId }
   }
@@ -274,6 +355,7 @@ export class AcpAgent {
     modelRef: string,
     sessionsDir: string,
     episodic: EpisodicIndex,
+    mcpHub: McpHub | undefined,
   ): ToolRegistry {
     const registry = new ToolRegistry()
     const frecencyStore = frecencyStorePath(cwd)
@@ -310,6 +392,7 @@ export class AcpAgent {
         },
       }),
     )
+    if (mcpHub) registry.register(createMcpTool({ hub: () => mcpHub }))
     return registry
   }
 
@@ -330,11 +413,35 @@ export class AcpAgent {
         `Unknown sessionId "${parsed.data.sessionId}"`,
       )
     }
+    if (session.abortController) {
+      throw new JsonRpcError(
+        ACP_SESSION_BUSY,
+        `Session "${session.id}" is already processing a prompt — await its response, or send session/cancel first.`,
+        { sessionId: session.id },
+      )
+    }
 
     const { text, images } = this.flattenPrompt(parsed.data.prompt, session.cwd)
     const abortController = new AbortController()
     session.abortController = abortController
     session.pendingCalls.clear()
+
+    const turn = this.runTurn(session, text, images, abortController)
+    this.inFlight.add(turn)
+    try {
+      return await turn
+    } finally {
+      this.inFlight.delete(turn)
+    }
+  }
+
+  private async runTurn(
+    session: AcpSession,
+    text: string,
+    images: ImageRef[],
+    abortController: AbortController,
+  ): Promise<{ stopReason: StopReason }> {
+    const timeoutMs = this.opts.permissionTimeoutMs ?? PERMISSION_TIMEOUT_MS
 
     const ask = async (request: AskRequest): Promise<"allow" | "deny"> => {
       const front = session.pendingCalls.keys().next()
@@ -345,17 +452,29 @@ export class AcpAgent {
         { optionId: "reject-once", name: "Reject", kind: "reject_once" },
         { optionId: "reject-always", name: `Never allow ${request.tool}`, kind: "reject_always" },
       ]
+      const { id, promise } = this.peer.requestWithId("session/request_permission", {
+        sessionId: session.id,
+        toolCall: { toolCallId },
+        options,
+      })
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const answered = Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`permission request timed out after ${timeoutMs}ms`)),
+            timeoutMs,
+          )
+        }),
+      ])
+      answered.catch(() => {})
       try {
-        const raw = await raceAbort(
-          this.peer.request("session/request_permission", {
-            sessionId: session.id,
-            toolCall: { toolCallId },
-            options,
-          }),
-          abortController.signal,
-        )
+        const raw = await raceAbort(answered, abortController.signal)
         const parsedOutcome = parseRequestPermissionResult(raw)
-        if (!parsedOutcome.ok) return "deny"
+        if (!parsedOutcome.ok) {
+          this.log(`auto-denied ${request.tool} — malformed session/request_permission result`)
+          return "deny"
+        }
         const { outcome } = parsedOutcome.data
         if (outcome.outcome === "cancelled") return "deny"
         switch (outcome.optionId) {
@@ -370,8 +489,16 @@ export class AcpAgent {
           default:
             return "deny"
         }
-      } catch {
+      } catch (error) {
+        this.peer.abandon(id, "permission request abandoned") // no-op if already answered
+        this.log(
+          `auto-denied ${request.tool}${request.target ? ` on "${request.target}"` : ""} — ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
         return "deny"
+      } finally {
+        if (timer) clearTimeout(timer)
       }
     }
 
@@ -595,7 +722,15 @@ export class AcpAgent {
   }
 }
 
-export function connectAcpAgent(send: (line: string) => void, opts: AcpAgentOptions): JsonRpcPeer {
+/**
+ * Construct an AcpAgent and wire it to a fresh JsonRpcPeer over `send`. Both
+ * come back: the peer to feed lines into, the agent so the caller can
+ * `shutdown()` it when the client's stream ends.
+ */
+export function connectAcpAgent(
+  send: (line: string) => void,
+  opts: AcpAgentOptions,
+): { peer: JsonRpcPeer; agent: AcpAgent } {
   const agent = new AcpAgent(opts)
   const peer = new JsonRpcPeer({
     send,
@@ -603,5 +738,5 @@ export function connectAcpAgent(send: (line: string) => void, opts: AcpAgentOpti
     onNotification: (method, params) => agent.onNotification(method, params),
   })
   agent.peer = peer
-  return peer
+  return { peer, agent }
 }

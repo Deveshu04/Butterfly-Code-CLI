@@ -20,7 +20,7 @@ export async function runAcpCommand(argv: string[]): Promise<number> {
   const provider = new AiSdkProvider(createModelResolver(config))
   const modelRef = values.model ?? config.model
 
-  const peer = connectAcpAgent(
+  const { peer, agent } = connectAcpAgent(
     (line) => {
       process.stdout.write(line)
     },
@@ -49,5 +49,6 @@ export async function runAcpCommand(argv: string[]): Promise<number> {
       newlineIndex = buffer.indexOf("\n")
     }
   }
+  await agent.shutdown("client disconnected (stdin closed)")
   return 0
 }

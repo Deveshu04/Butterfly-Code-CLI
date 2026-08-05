@@ -36,7 +36,7 @@ export interface JsonRpcPeerOptions {
 
 interface PendingCall {
   resolve: (value: unknown) => void
-  reject: (error: JsonRpcError) => void
+  reject: (error: Error) => void
 }
 
 export class JsonRpcPeer {
@@ -65,8 +65,12 @@ export class JsonRpcPeer {
 
   /** Send a request to the peer (e.g. Agent→Client `session/request_permission`). */
   request(method: string, params?: unknown): Promise<unknown> {
+    return this.requestWithId(method, params).promise
+  }
+
+  requestWithId(method: string, params?: unknown): { id: JsonRpcId; promise: Promise<unknown> } {
     const id = this.nextId++
-    return new Promise((resolve, reject) => {
+    const promise = new Promise<unknown>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
       this.writeMessage({
         jsonrpc: "2.0",
@@ -75,6 +79,19 @@ export class JsonRpcPeer {
         ...(params !== undefined ? { params } : {}),
       })
     })
+    return { id, promise }
+  }
+
+  abandon(id: JsonRpcId, reason: string): void {
+    const pending = this.pending.get(id)
+    if (!pending) return
+    this.pending.delete(id)
+    pending.reject(new Error(reason))
+  }
+
+  /** Stop waiting on EVERY outbound request — the peer is gone (stdin EOF). */
+  abandonAll(reason: string): void {
+    for (const id of [...this.pending.keys()]) this.abandon(id, reason)
   }
 
   /** Send a notification — no response is expected, ever (e.g. `session/update`). */
