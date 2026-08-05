@@ -1,0 +1,16 @@
+{
+  "name": "@butterfly/tui",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./launch": "./src/launch.ts"
+  },
+  "dependencies": {
+    "@butterfly/core": "workspace:*",
+    "@opentui/core": "0.4.5",
+    "@opentui/solid": "0.4.5",
+    "solid-js": "1.9.12"
+  }
+}

@@ -1,0 +1,40 @@
+import { SyntaxStyle } from "@opentui/core"
+
+export const T = {
+  text: "#e8e8e8",
+  textMuted: "#8b8b8b",
+  accent: "#c9a7ff",
+  error: "#ff8080",
+  warn: "#ffcc66",
+  heading: "#ffffff",
+  strong: "#ffffff",
+  emph: "#d8d8d8",
+  codeInline: "#a8d7a8",
+  codeBlock: "#c8e0c8",
+  link: "#8ab4ff",
+  keyword: "#c586c0",
+  string: "#ce9178",
+  comment: "#6a9955",
+  func: "#dcdcaa",
+  number: "#b5cea8",
+  type: "#4ec9b0",
+} as const
+
+export const SYNTAX = SyntaxStyle.fromTheme([
+  { scope: ["default"], style: { foreground: T.text } },
+  { scope: ["markup.heading"], style: { foreground: T.heading, bold: true } },
+  { scope: ["markup.bold", "markup.strong"], style: { foreground: T.strong, bold: true } },
+  { scope: ["markup.italic"], style: { foreground: T.emph, italic: true } },
+  { scope: ["markup.raw.inline"], style: { foreground: T.codeInline } },
+  { scope: ["markup.raw", "markup.raw.block"], style: { foreground: T.codeBlock } },
+  { scope: ["markup.link.url"], style: { foreground: T.link, underline: true } },
+  { scope: ["markup.link", "markup.link.label"], style: { foreground: T.link } },
+  { scope: ["markup.list"], style: { foreground: T.accent } },
+  { scope: ["markup.quote"], style: { foreground: T.textMuted, italic: true } },
+  { scope: ["keyword"], style: { foreground: T.keyword } },
+  { scope: ["string"], style: { foreground: T.string } },
+  { scope: ["comment"], style: { foreground: T.comment, italic: true } },
+  { scope: ["function"], style: { foreground: T.func } },
+  { scope: ["number"], style: { foreground: T.number } },
+  { scope: ["type"], style: { foreground: T.type } },
+])

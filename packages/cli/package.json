@@ -1,0 +1,13 @@
+{
+  "name": "@butterfly/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "butterfly": "./src/index.ts"
+  },
+  "dependencies": {
+    "@butterfly/core": "workspace:*",
+    "@butterfly/tui": "workspace:*"
+  }
+}
