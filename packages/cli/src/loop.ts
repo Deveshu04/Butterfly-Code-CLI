@@ -224,7 +224,12 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
             sessionsDir: paths.sessions,
             handoffPath: paths.handoff,
             ...(config.small_model ? { smallModel: config.small_model } : {}),
-            onEvent: (message) => console.log(message),
+            onEvent: (event) => {
+              if (event.type === "task.closed") console.log(`✓ ${event.title}`)
+              else if (event.type === "task.failed") {
+                console.log(`✗ ${event.title} (attempt ${event.attempts})`)
+              }
+            },
           })
         } finally {
           queue.closeDb()

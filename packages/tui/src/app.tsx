@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { basename, isAbsolute, join } from "node:path"
 import {
@@ -32,12 +32,14 @@ import {
   forkSession,
   formatUSD,
   frecencyStorePath,
+  type Gate,
   GraphDb,
   generateCommitMessage,
   globTool,
   grepTool,
   type ImageRef,
   journalReview,
+  type LoopEvent,
   listMentionCandidates,
   listSessions,
   listUntracked,
@@ -69,6 +71,7 @@ import {
   reviewTurn,
   runHandoffTurn,
   runHooks,
+  runLoop,
   runReview,
   runUserTurn,
   SessionJournal,
@@ -85,6 +88,7 @@ import {
   ToolRegistry,
   todoTool,
   touchFrecency,
+  WorkQueue,
   withFrecencyTouch,
   writeCommitMessageFile,
 } from "@butterfly/core"
@@ -108,6 +112,13 @@ import {
   type SlashCommand,
 } from "./commands"
 import { formatToolResult, stripThink } from "./format"
+import {
+  applyLoopEvent,
+  INITIAL_LOOP_CARD,
+  type LoopCardState,
+  loopCardText,
+  loopSummaryText,
+} from "./loop-card"
 import { buildPagerDoc, type PagerDoc, searchPagerLines, stepLine } from "./pager"
 import { PagerView } from "./pager-view"
 import {
@@ -299,6 +310,25 @@ const PLAN_RULES: PermissionRules = {
 const PLAN_PREFIX =
   "[PLAN MODE — read-only. Investigate with read/glob/grep/explore, then produce a concrete numbered implementation plan (files to change, exact steps, risks, verification). Do NOT modify anything; edit/bash are disabled.]"
 
+const LOOP_TUI_RULES: PermissionRules = {
+  "*": "allow",
+  edit: { "**/.env*": "deny", ".env*": "deny" },
+}
+
+const LOOP_PLANNER_PROMPT = `You are the planning stage of an autonomous coding loop. Break the specification into 2-10 SMALL, independently verifiable tasks. Each task must be completable in one focused session and checkable by the project's test/build gates.
+
+Reply with ONLY a JSON array, no prose:
+[{"title":"short imperative title","spec":"exact, self-contained instructions","blockedBy":[0]}]
+"blockedBy" lists 0-based indexes of tasks that must finish first. Prefer independent tasks; add dependencies only when strictly required. Implement nothing yourself.`
+
+function loopPaths(cwd: string): { queue: string; handoff: string; sessions: string } {
+  return {
+    queue: join(cwd, ".butterfly", "queue.db"),
+    handoff: join(cwd, ".butterfly", "handoff.json"),
+    sessions: join(cwd, ".butterfly", "sessions"),
+  }
+}
+
 export function App(props: { cwd: string; config: ButterflyConfig; home?: string }) {
   const home = props.home ?? homedir()
   const dimensions = useTerminalDimensions()
@@ -375,6 +405,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   let scroll: ScrollBoxRenderable | undefined
   let abort: AbortController | undefined
   let firstTurn = true
+  const [loopCard, setLoopCard] = createSignal<LoopCardState | null>(null)
+  let loopAbort: AbortController | undefined
 
   const cmdList = (): SlashCommand[] =>
     !setup() && !picker() && !busy() ? commandMatches(draft()) : []
@@ -505,6 +537,20 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     makeMutatingRegistry: () => mutatingSubagentRegistry(subagentExtras),
   }
   registry.register(createTaskTool(taskToolOpts))
+  const buildLoopRegistry = (): ToolRegistry => {
+    const sub = new ToolRegistry()
+    sub.register(bashTool)
+    sub.register(readTool)
+    sub.register(editTool)
+    sub.register(globTool)
+    sub.register(grepTool)
+    sub.register(todoTool)
+    sub.register(createExploreTool({ db: () => graph, cwd: props.cwd }))
+    sub.register(createMemoryTool({ paths, episodic: () => episodic }))
+    sub.register(createSkillTool({ dirs: skillDirs }))
+    sub.register(createWebTool({ config: () => config().web }))
+    return sub
+  }
   if (props.config.hooks?.length) {
     void runHooks(
       props.config.hooks,
@@ -1133,6 +1179,160 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         tail === "" ? "(no output yet)" : tail,
       ].join("\n")
     },
+    loopPlan: async (goal) => {
+      const ref = modelRef()
+      if (!ref) {
+        push({ kind: "error", text: "no model configured — run /setup first" })
+        return
+      }
+      push({ kind: "info", text: "planning…" })
+      try {
+        const planRegistry = new ToolRegistry()
+        const journal = SessionJournal.create(join(props.cwd, ".butterfly", "sessions"))
+        const outcome = await runUserTurn(
+          {
+            provider: freshProvider(),
+            registry: planRegistry,
+            journal,
+            rules: { "*": "deny" },
+            model: ref,
+            system: LOOP_PLANNER_PROMPT,
+            cwd: props.cwd,
+            maxSteps: 1,
+          },
+          goal,
+        )
+        const start = outcome.text.indexOf("[")
+        const end = outcome.text.lastIndexOf("]")
+        if (start < 0 || end <= start) {
+          push({
+            kind: "error",
+            text: `planner did not return JSON:\n${outcome.text.slice(0, 400)}`,
+          })
+          return
+        }
+        let tasks: { title: string; spec: string; blockedBy?: number[] }[]
+        try {
+          tasks = JSON.parse(outcome.text.slice(start, end + 1))
+        } catch (error) {
+          push({ kind: "error", text: `planner JSON parse failed: ${String(error)}` })
+          return
+        }
+        const queue = WorkQueue.open(loopPaths(props.cwd).queue)
+        const ids: string[] = []
+        for (const task of tasks) {
+          const blockedBy = (task.blockedBy ?? [])
+            .map((index) => ids[index])
+            .filter((id): id is string => id !== undefined)
+          ids.push(queue.addTask({ title: task.title, spec: task.spec, blockedBy }))
+        }
+        const counts = queue.counts()
+        queue.closeDb()
+        push({
+          kind: "info",
+          text: [
+            `planned ${ids.length} task(s) — queue: ${JSON.stringify(counts)}`,
+            ...tasks.map((t, i) => {
+              const after = t.blockedBy?.length
+                ? `  (after ${t.blockedBy.map((b) => ids[b]).join(", ")})`
+                : ""
+              return `  ${ids[i]}  ${t.title}${after}`
+            }),
+            "/loop run to start the supervisor",
+          ].join("\n"),
+        })
+      } catch (error) {
+        push({
+          kind: "error",
+          text: `planning failed: ${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
+    },
+    loopRun: async () => {
+      if (planMode()) {
+        push({
+          kind: "error",
+          text: "/loop run is denied in plan mode — it edits files and commits. /plan to exit plan mode, or /loop plan to stage tasks read-only.",
+        })
+        return
+      }
+      const ref = modelRef()
+      if (!ref) {
+        push({ kind: "error", text: "no model configured — run /setup first" })
+        return
+      }
+      const gates: Gate[] = config().gates ?? []
+      if (gates.length === 0) {
+        push({
+          kind: "error",
+          text: 'no gates configured — refusing to loop blind. Add e.g. "gates": [{"name":"test","command":"bun test"}] to butterfly.jsonc',
+        })
+        return
+      }
+      setBusy(true)
+      loopAbort = new AbortController()
+      setLoopCard(INITIAL_LOOP_CARD)
+      const attentionState = () => ({
+        focus: focused() ? ("focused" as const) : ("blurred" as const),
+        cwd: props.cwd,
+      })
+      const attentionConfig = () => ({ notifications: config().notifications ?? true })
+      applyAttention(decideAttention({ kind: "turn.start" }, attentionState(), attentionConfig()))
+      let loopDetail: string | undefined
+      let queue: WorkQueue | undefined
+      try {
+        const queuePaths = loopPaths(props.cwd)
+        queue = WorkQueue.open(queuePaths.queue)
+        const outcome = await runLoop({
+          queue,
+          provider: freshProvider(),
+          makeRegistry: buildLoopRegistry,
+          rules: config().permissions ?? LOOP_TUI_RULES,
+          model: ref,
+          system: frozenSystem(ref),
+          cwd: props.cwd,
+          gates,
+          sessionsDir: queuePaths.sessions,
+          handoffPath: queuePaths.handoff,
+          signal: loopAbort.signal,
+          ...(config().small_model ? { smallModel: config().small_model } : {}),
+          onEvent: (event: LoopEvent) =>
+            setLoopCard((prev) => applyLoopEvent(prev ?? INITIAL_LOOP_CARD, event)),
+        })
+        loopDetail = `${outcome.stopReason}: ${outcome.closed} closed, ${outcome.blocked} blocked`
+        push({ kind: "info", text: loopSummaryText(outcome) })
+      } catch (error) {
+        loopDetail = error instanceof Error ? error.message : String(error)
+        push({ kind: "error", text: `loop failed: ${loopDetail}` })
+      } finally {
+        queue?.closeDb()
+        applyAttention(
+          decideAttention(
+            { kind: "turn.end", detail: loopDetail },
+            attentionState(),
+            attentionConfig(),
+          ),
+        )
+        setLoopCard(null)
+        setBusy(false)
+        loopAbort = undefined
+        drainQueue()
+      }
+    },
+    loopStatusText: () => {
+      const queuePaths = loopPaths(props.cwd)
+      const queue = WorkQueue.open(queuePaths.queue)
+      const counts = queue.counts()
+      const ready = queue.ready()
+      queue.closeDb()
+      const lines = [`loop queue: ${JSON.stringify(counts)}`]
+      for (const task of ready) lines.push(`  ready: ${task.id}  ${task.title}`)
+      try {
+        lines.push(`handoff: ${readFileSync(queuePaths.handoff, "utf8").trim()}`)
+      } catch {
+      }
+      return lines.join("\n")
+    },
     initProject: () => {
       submit(
         "Analyze this repository: read the README, package manifests, build/test scripts, and the main entry points (use glob/read/explore — stay efficient). Then use the memory tool with scope 'project' to store up to 5 terse durable facts: exact build/test/lint commands, architecture invariants, and conventions. Finish with a one-paragraph orientation summary.",
@@ -1662,11 +1862,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   useKeyboard((key) => {
     if (key.ctrl && key.name === "c") {
       key.preventDefault()
-      if (busy() && abort && !interruptArmed) {
+      if (busy() && (abort || loopAbort) && !interruptArmed) {
         interruptArmed = true
-        abort.abort()
+        const wasLoop = loopAbort !== undefined
+        abort?.abort()
+        loopAbort?.abort()
         pendingAsk()?.resolve("deny")
-        push({ kind: "info", text: "(turn interrupted — Ctrl+C again to quit)" })
+        push({
+          kind: "info",
+          text: wasLoop
+            ? "(loop interrupted — Ctrl+C again to quit)"
+            : "(turn interrupted — Ctrl+C again to quit)",
+        })
         setTimeout(() => {
           interruptArmed = false
         }, 3_000)
@@ -2073,6 +2280,22 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           </Show>
         </Show>
       </box>
+
+      <Show when={loopCard()}>
+        {(card: Accessor<LoopCardState>) => (
+          <box
+            flexShrink={0}
+            border
+            borderStyle="rounded"
+            borderColor={ACCENT}
+            paddingLeft={1}
+            flexDirection="column"
+          >
+            <text fg={ACCENT}>{"loop running — Ctrl+C to interrupt"}</text>
+            <text>{loopCardText(card())}</text>
+          </box>
+        )}
+      </Show>
 
       <Show when={pendingAsk()}>
         {(ask: Accessor<PendingAsk>) => (

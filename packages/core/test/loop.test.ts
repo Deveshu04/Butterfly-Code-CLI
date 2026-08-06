@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { z } from "zod"
 import { runGates } from "../src/loop/gates"
 import { MAX_ATTEMPTS, WorkQueue } from "../src/loop/queue"
+import type { LoopEvent } from "../src/loop/supervisor"
 import { runLoop } from "../src/loop/supervisor"
 import { ToolRegistry } from "../src/tool/registry"
 import { MockProvider } from "./helpers/mock-provider"
@@ -164,6 +165,90 @@ test("budget ceiling stops the loop between iterations", async () => {
   const outcome = await runLoop(deps as Parameters<typeof runLoop>[0])
   expect(outcome.stopReason).toBe("budget")
   expect(outcome.iterations).toBe(1)
+})
+
+
+test("onEvent streams the structured, typed event sequence for a green task", async () => {
+  const { queue, deps } = loopFixture({
+    provider: new MockProvider([doneScript("did it")]),
+    gates: [{ name: "ok", command: "exit 0" }],
+  })
+  queue.addTask({ title: "solo", spec: "just do it" })
+  const seen: LoopEvent[] = []
+
+  const outcome = await runLoop({
+    ...deps,
+    onEvent: (event) => seen.push(event),
+  } as Parameters<typeof runLoop>[0])
+
+  expect(outcome.stopReason).toBe("drained")
+  expect(seen.map((e) => e.type)).toEqual([
+    "loop.started",
+    "task.claimed",
+    "gate.result",
+    "task.closed",
+    "loop.stopped",
+  ])
+  const claimed = seen[1]
+  if (claimed?.type !== "task.claimed") throw new Error("expected task.claimed")
+  expect(claimed.title).toBe("solo")
+  expect(claimed.progress.iterations).toBe(1)
+  expect(claimed.progress.counts.claimed).toBe(1)
+  const closed = seen[3]
+  if (closed?.type !== "task.closed") throw new Error("expected task.closed")
+  expect(closed.committed).toBe(true)
+  expect(closed.progress.counts.closed).toBe(1)
+  expect(closed.progress.usage.input).toBe(1_000)
+  const stopped = seen[4]
+  if (stopped?.type !== "loop.stopped") throw new Error("expected loop.stopped")
+  expect(stopped.reason).toBe("drained")
+  expect(stopped.progress.iterations).toBe(1)
+})
+
+test("a signal aborted before the loop starts stops immediately, task untouched", async () => {
+  const { queue, deps } = loopFixture({
+    provider: new MockProvider([doneScript("never runs")]),
+  })
+  const id = queue.addTask({ title: "untouched", spec: "should not start" })
+  const controller = new AbortController()
+  controller.abort()
+
+  const outcome = await runLoop({
+    ...deps,
+    signal: controller.signal,
+  } as Parameters<typeof runLoop>[0])
+
+  expect(outcome.stopReason).toBe("interrupted")
+  expect(outcome.iterations).toBe(0)
+  expect(queue.get(id)?.status).toBe("open")
+})
+
+test("a signal aborted mid-iteration abandons that iteration (no commit) and leaves it claimed for resume", async () => {
+  const { queue, deps } = loopFixture({
+    provider: new MockProvider([doneScript("first")]),
+    gates: [{ name: "ok", command: "exit 0" }],
+  })
+  const first = queue.addTask({ title: "first", spec: "do first" })
+  const second = queue.addTask({ title: "second", spec: "should not start" })
+  const controller = new AbortController()
+  const seen: LoopEvent[] = []
+
+  const outcome = await runLoop({
+    ...deps,
+    signal: controller.signal,
+    onEvent: (event) => {
+      seen.push(event)
+      if (event.type === "task.claimed") controller.abort()
+    },
+  } as Parameters<typeof runLoop>[0])
+
+  expect(outcome.stopReason).toBe("interrupted")
+  expect(outcome.iterations).toBe(1)
+  expect(outcome.closed).toBe(0)
+  expect(queue.get(first)?.status).toBe("claimed")
+  // The second task was never even reached.
+  expect(queue.get(second)?.status).toBe("open")
+  expect(seen.map((e) => e.type)).toEqual(["loop.started", "task.claimed", "loop.stopped"])
 })
 
 test("the task prompt carries prior gate feedback on retry", async () => {

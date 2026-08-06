@@ -40,6 +40,9 @@ export interface CommandActions {
   tasksText(): string
   killTask(id: string): void
   showTask(id: string): string
+  loopPlan(goal: string): Promise<void>
+  loopRun(): Promise<void>
+  loopStatusText(): string
 }
 
 export interface SlashCommand {
@@ -251,6 +254,31 @@ export const COMMANDS: SlashCommand[] = [
         return
       }
       a.error("usage: /tasks | /tasks kill <id> | /tasks show <id>")
+    },
+  },
+  {
+    name: "loop",
+    args: "plan <goal> | run | status",
+    description:
+      "autonomous multi-task loop: plan tasks, run the supervisor, or check queue status",
+    run: (arg, a) => {
+      const trimmed = arg.trim()
+      if (trimmed === "" || trimmed === "status") {
+        a.info(a.loopStatusText())
+        return
+      }
+      if (trimmed === "run") {
+        return a.loopRun()
+      }
+      if (trimmed === "plan" || trimmed.startsWith("plan ")) {
+        const goal = trimmed.slice(4).trim()
+        if (goal === "") {
+          a.error("usage: /loop plan <goal>")
+          return
+        }
+        return a.loopPlan(goal)
+      }
+      a.error("usage: /loop plan <goal> | /loop run | /loop status")
     },
   },
   {

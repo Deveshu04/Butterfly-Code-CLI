@@ -174,6 +174,72 @@ test("/tasks with an unrecognized sub-verb reports usage via error, not a crash"
   expect(errors[0]).toContain("/tasks")
 })
 
+test("/loop with no arg (or 'status') shows loopStatusText via info", () => {
+  expect(COMMANDS.some((c) => c.name === "loop")).toBe(true)
+  const bare = findCommand("/loop")
+  expect(bare && "command" in bare ? bare.command.name : "").toBe("loop")
+
+  const calls: string[] = []
+  const actions = {
+    loopStatusText: () => "loop queue: {}",
+    info: (text: string) => calls.push(text),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (bare && "command" in bare) void bare.command.run(bare.arg, actions)
+
+  const status = findCommand("/loop status")
+  if (status && "command" in status) void status.command.run(status.arg, actions)
+
+  expect(calls).toEqual(["loop queue: {}", "loop queue: {}"])
+})
+
+test("/loop plan <goal> dispatches to CommandActions.loopPlan with the goal text", () => {
+  const match = findCommand("/loop plan fix the flaky test")
+  expect(match && "command" in match ? match.arg : "").toBe("plan fix the flaky test")
+
+  const calls: string[] = []
+  const actions = {
+    loopPlan: async (goal: string) => {
+      calls.push(goal)
+    },
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["fix the flaky test"])
+})
+
+test("/loop plan with no goal reports usage via error, not a crash", () => {
+  const match = findCommand("/loop plan")
+  const errors: string[] = []
+  const actions = {
+    error: (text: string) => errors.push(text),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(errors.length).toBe(1)
+  expect(errors[0]).toContain("/loop plan")
+})
+
+test("/loop run dispatches to CommandActions.loopRun", () => {
+  const match = findCommand("/loop run")
+  let called = 0
+  const actions = {
+    loopRun: async () => {
+      called += 1
+    },
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(called).toBe(1)
+})
+
+test("/loop with an unrecognized sub-verb reports usage via error, not a crash", () => {
+  const match = findCommand("/loop frobnicate")
+  const errors: string[] = []
+  const actions = {
+    error: (text: string) => errors.push(text),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(errors.length).toBe(1)
+  expect(errors[0]).toContain("/loop")
+})
+
 test("/paste-img is registered and invokes CommandActions.pasteImage", () => {
   expect(COMMANDS.some((c) => c.name === "paste-img")).toBe(true)
   const match = findCommand("/paste-img")

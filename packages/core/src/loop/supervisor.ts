@@ -8,9 +8,15 @@ import { runUserTurn } from "../session/runner"
 import type { ToolRegistry } from "../tool/registry"
 import { runCommand } from "../tool/shell"
 import { type Gate, runGates } from "./gates"
-import type { LoopTask, WorkQueue } from "./queue"
+import type { LoopTask, TaskStatus, WorkQueue } from "./queue"
 
-export type StopReason = "drained" | "budget" | "max-iterations" | "all-blocked" | "no-progress"
+export type StopReason =
+  | "drained"
+  | "budget"
+  | "max-iterations"
+  | "all-blocked"
+  | "no-progress"
+  | "interrupted"
 
 export interface LoopDeps {
   queue: WorkQueue
@@ -31,7 +37,8 @@ export interface LoopDeps {
   /** Where handoff.json lives (loop.jsonl sits beside it). */
   handoffPath: string
   smallModel?: string
-  onEvent?: (message: string) => void
+  onEvent?: (event: LoopEvent) => void
+  signal?: AbortSignal
   /** Commit hook override (tests). Defaults to git add+commit. */
   commit?: (title: string) => Promise<boolean>
 }
@@ -43,6 +50,21 @@ export interface LoopOutcome {
   blocked: number
   usage: Usage
 }
+
+export interface LoopProgress {
+  counts: Record<TaskStatus, number>
+  usage: Usage
+  iterations: number
+}
+
+export type LoopEvent =
+  | { type: "loop.started"; model: string }
+  | { type: "task.claimed"; id: string; title: string; progress: LoopProgress }
+  | { type: "gate.result"; task: string; gate: string; exitCode: number }
+  | { type: "task.closed"; id: string; title: string; committed: boolean; progress: LoopProgress }
+  | { type: "task.failed"; id: string; title: string; attempts: number; progress: LoopProgress }
+  | { type: "task.blocked"; id: string; title: string; progress: LoopProgress }
+  | { type: "loop.stopped"; reason: StopReason; progress: LoopProgress }
 
 export const DEFAULT_LOOP_ITERATIONS = 25
 const ITERATION_MAX_STEPS = 30
@@ -115,8 +137,18 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
   let stopReason: StopReason
 
   logEvent(deps.handoffPath, { type: "loop.started", model: deps.model })
+  deps.onEvent?.({ type: "loop.started", model: deps.model })
+  const progress = (): LoopProgress => ({
+    counts: deps.queue.counts(),
+    usage: totals,
+    iterations,
+  })
 
   for (;;) {
+    if (deps.signal?.aborted) {
+      stopReason = "interrupted"
+      break
+    }
     if (iterations >= maxIterations) {
       stopReason = "max-iterations"
       break
@@ -143,6 +175,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
     if (!task || !deps.queue.claim(task.id)) continue
     iterations += 1
     logEvent(deps.handoffPath, { type: "task.claimed", id: task.id, title: task.title })
+    deps.onEvent?.({ type: "task.claimed", id: task.id, title: task.title, progress: progress() })
 
     const journal = SessionJournal.create(deps.sessionsDir)
     const handoff = readHandoff(deps.handoffPath)
@@ -163,6 +196,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
             ? { budgetTokens: Math.max(1, deps.budgetTokens - spent) }
             : {}),
           ...(deps.smallModel ? { smallModel: deps.smallModel } : {}),
+          signal: deps.signal,
         },
         renderTaskPrompt(task, handoff),
       )
@@ -176,6 +210,11 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
     }
     lastIterationTokens = turnTokens
 
+    if (deps.signal?.aborted) {
+      stopReason = "interrupted"
+      break
+    }
+
     let taskClosed = false
     if (agentError) {
       deps.queue.release(task.id, `agent error: ${agentError}`)
@@ -183,6 +222,12 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
       const gateRun = await runGates(deps.gates, deps.cwd)
       for (const result of gateRun.results) {
         logEvent(deps.handoffPath, {
+          type: "gate.result",
+          task: task.id,
+          gate: result.name,
+          exitCode: result.exitCode,
+        })
+        deps.onEvent?.({
           type: "gate.result",
           task: task.id,
           gate: result.name,
@@ -198,7 +243,13 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
         closed += 1
         failStreak = 0
         logEvent(deps.handoffPath, { type: "task.closed", id: task.id, committed })
-        deps.onEvent?.(`✓ ${task.title}`)
+        deps.onEvent?.({
+          type: "task.closed",
+          id: task.id,
+          title: task.title,
+          committed,
+          progress: progress(),
+        })
       } else {
         const failure = gateRun.results
           .map((r) => `[gate ${r.name} exit ${r.exitCode}]\n${r.output}`)
@@ -206,12 +257,21 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
           .slice(0, 4_000)
         deps.queue.release(task.id, failure)
         failStreak += 1
-        deps.onEvent?.(`✗ ${task.title} (attempt ${task.attempts + 1})`)
+        const attempts = task.attempts + 1
+        logEvent(deps.handoffPath, { type: "task.failed", id: task.id, attempts })
+        deps.onEvent?.({
+          type: "task.failed",
+          id: task.id,
+          title: task.title,
+          attempts,
+          progress: progress(),
+        })
       }
     }
     if (deps.queue.get(task.id)?.status === "blocked") {
       blocked += 1
       logEvent(deps.handoffPath, { type: "task.blocked", id: task.id })
+      deps.onEvent?.({ type: "task.blocked", id: task.id, title: task.title, progress: progress() })
     }
 
     writeHandoff(deps.handoffPath, {
@@ -224,5 +284,6 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
   }
 
   logEvent(deps.handoffPath, { type: "loop.stopped", reason: stopReason, iterations, closed })
+  deps.onEvent?.({ type: "loop.stopped", reason: stopReason, progress: progress() })
   return { stopReason, iterations, closed, blocked, usage: totals }
 }

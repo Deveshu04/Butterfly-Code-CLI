@@ -99,7 +99,9 @@ export { type LoopTask, MAX_ATTEMPTS, type TaskStatus, WorkQueue } from "./loop/
 export {
   DEFAULT_LOOP_ITERATIONS,
   type LoopDeps,
+  type LoopEvent,
   type LoopOutcome,
+  type LoopProgress,
   runLoop,
   type StopReason,
 } from "./loop/supervisor"

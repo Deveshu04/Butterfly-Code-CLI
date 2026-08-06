@@ -9,7 +9,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { now, runCommand, SessionJournal, saveHandoff } from "@butterfly/core"
+import { now, runCommand, SessionJournal, saveHandoff, WorkQueue } from "@butterfly/core"
 import { testRender } from "@opentui/solid"
 import { App, clearTerminalProgress, timelineToMessages } from "../src/app"
 import { NEWLINE_MARKER } from "../src/paste"
@@ -1778,6 +1778,171 @@ test("/handoff is metered like any other turn, and its own session never reinjec
     expect(after).not.toContain("loaded the handoff")
     expect(existsSync(join(cwd, ".butterfly", "handoff.md"))).toBe(true)
     expect(existsSync(join(cwd, ".butterfly", "handoff.md.consumed"))).toBe(false)
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 60_000)
+
+
+test("/loop run renders a live card (iteration/queue/task) and Ctrl+C interrupts it, leaving the task claimed", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const queuePath = join(cwd, ".butterfly", "queue.db")
+  const seed = WorkQueue.open(queuePath)
+  const taskId = seed.addTask({ title: "stall task", spec: "do work" })
+  seed.closeDb()
+  const provider = hangingProvider()
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "hang/model",
+            providers: { hang: { baseURL: provider.baseURL } },
+            gates: [{ name: "ok", command: "exit 0" }],
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 40, exitOnCtrlC: false },
+    )
+    await t.renderOnce()
+
+    t.mockInput.typeText("/loop run")
+    t.mockInput.pressEnter()
+    const running = await waitForFrameSlow(t, (frame) => frame.includes("loop running"))
+    expect(running).toContain("iteration 1")
+    expect(running).toContain("claimed 1")
+    expect(running).toContain("stall task")
+    expect(running).toContain("working")
+
+    t.mockInput.pressKey("c", { ctrl: true })
+    const message = await waitForFrameSlow(t, (frame) => frame.includes("loop interrupted"))
+    expect(message).toContain("Ctrl+C again to quit")
+
+    const settled = await waitForFrameSlow(t, (frame) => frame.includes("describe a task"), 15_000)
+    expect(settled).not.toContain("loop running")
+
+    t.renderer.destroy()
+
+    const check = WorkQueue.open(queuePath)
+    expect(check.get(taskId)?.status).toBe("open")
+    check.closeDb()
+  } finally {
+    provider.stop()
+  }
+}, 30_000)
+
+test("/loop run completes, summarizes the outcome into the transcript, and drains a queued message as an ordinary turn", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const queuePath = join(cwd, ".butterfly", "queue.db")
+  const seed = WorkQueue.open(queuePath)
+  seed.addTask({ title: "solo task", spec: "do the one thing" })
+  seed.closeDb()
+  const server = startFakeChatServer("done")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-loop",
+            providers: { fake: { baseURL: server.baseURL } },
+            gates: [{ name: "ok", command: "exit 0" }],
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 140, height: 40 },
+    )
+    await t.renderOnce()
+
+    t.mockInput.typeText("/loop run")
+    t.mockInput.pressEnter()
+    t.mockInput.typeText("what happened while looping")
+    t.mockInput.pressEnter()
+    const queued = await waitForFrameSlow(t, (frame) => frame.includes("⧗ queued"))
+    expect(queued).toContain("what happened while looping")
+
+    const summary = await waitForFrameSlow(
+      t,
+      (frame) => frame.includes("loop stopped (drained)"),
+      25_000,
+    )
+    expect(summary).toContain("1 closed, 0 blocked, 1 iteration")
+    expect(summary).not.toContain("loop running")
+
+    const drained = await waitForFrameSlow(t, (frame) => frame.includes("in 5 · out 3"), 25_000)
+    expect(drained).toContain("❯ what happened while looping")
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 60_000)
+
+test("/loop status reads an idle queue when nothing has ever run, with no model or network needed", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+
+  t.mockInput.typeText("/loop status")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (f) => f.includes("loop queue:"))
+  expect(frame).toContain('"open":0')
+  expect(frame).toContain('"claimed":0')
+  expect(frame).toContain('"closed":0')
+  expect(frame).toContain('"blocked":0')
+  t.renderer.destroy()
+})
+
+test("plan mode denies /loop run (mutating) but still allows /loop plan (read-only)", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const server = startFakeChatServer(
+    '[{"title":"add tests","spec":"add unit tests for the parser"}]',
+  )
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-plan",
+            providers: { fake: { baseURL: server.baseURL } },
+            gates: [{ name: "ok", command: "exit 0" }],
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 140, height: 40 },
+    )
+    await t.renderOnce()
+
+    t.mockInput.typeText("/plan")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("plan mode ON"))
+
+    t.mockInput.typeText("/loop run")
+    t.mockInput.pressEnter()
+    const denied = await waitForFrameSlow(t, (f) => f.includes("denied in plan mode"))
+    expect(denied).not.toContain("loop running")
+    expect(denied).not.toContain("working")
+
+    t.mockInput.typeText("/loop plan add tests for the parser")
+    t.mockInput.pressEnter()
+    const planned = await waitForFrameSlow(t, (f) => f.includes("planned 1 task(s)"), 25_000)
+    expect(planned).toContain("add tests")
+
+    const queue = WorkQueue.open(join(cwd, ".butterfly", "queue.db"))
+    expect(queue.counts().open).toBe(1)
+    queue.closeDb()
+
     t.renderer.destroy()
   } finally {
     server.stop()
