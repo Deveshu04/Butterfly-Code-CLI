@@ -5,6 +5,7 @@ import {
   bashTool,
   buildSkeleton,
   buildSystem,
+  consumeHandoff,
   createExploreTool,
   createMcpTool,
   createMemoryTool,
@@ -35,6 +36,7 @@ import {
   parseModelRef,
   type RunnerEvent,
   readTool,
+  renderHandoffPreload,
   renderMentionBlock,
   reviewTurn,
   runUserTurn,
@@ -56,6 +58,8 @@ export interface RunOptions {
   cwd?: string
   json: boolean
   maxSteps?: number
+  /** Preload `.butterfly/handoff.md` (if any) into this run's first turn, then consume it. */
+  resumeHandoff?: boolean
 }
 
 /** Headless default: act freely in the workspace, but never touch env files. */
@@ -94,6 +98,12 @@ export function taskToolOptions(deps: {
     // isolation:"worktree" — mutating toolset, rooted at the worktree cwd.
     makeMutatingRegistry: () => mutatingSubagentRegistry(deps.extras),
   }
+}
+
+export function applyResumeHandoff(cwd: string, taskText: string, resumeHandoff: boolean): string {
+  if (!resumeHandoff) return taskText
+  const pending = consumeHandoff(cwd)
+  return pending ? `${renderHandoffPreload(pending)}\n\n${taskText}` : taskText
 }
 
 function makeRegistry(cwd: string): ToolRegistry {
@@ -205,10 +215,11 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     chatFiles: mentions.map((m) => m.path),
   })
   const withMentions = mentionBlock === "" ? opts.task : `${mentionBlock}\n\n${opts.task}`
-  const taskText =
+  const withSkeleton =
     skeleton === ""
       ? withMentions
       : `[repository map — ranked symbols; use explore/read for bodies]\n${skeleton}\n\n${withMentions}`
+  const taskText = applyResumeHandoff(cwd, withSkeleton, opts.resumeHandoff ?? false)
   if (!opts.json && (sync.scanned > 0 || sync.removed > 0)) {
     process.stdout.write(`[graph: ${sync.scanned} scanned, ${sync.skipped} cached]\n`)
   }

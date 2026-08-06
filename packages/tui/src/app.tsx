@@ -10,6 +10,7 @@ import {
   buildSystem,
   clearProgressOsc,
   compactSession,
+  consumeHandoff,
   createExploreTool,
   createMcpTool,
   createMemoryTool,
@@ -61,9 +62,11 @@ import {
   rankByFrecency,
   readTool,
   renderDoctorReport,
+  renderHandoffPreload,
   renderMentionBlock,
   restoreSnapshot,
   reviewTurn,
+  runHandoffTurn,
   runHooks,
   runReview,
   runUserTurn,
@@ -71,6 +74,7 @@ import {
   type SessionSummary,
   safeRewindIndex,
   saveGlobalConfig,
+  saveHandoff,
   setHookEnabled,
   setPermissionRule,
   skillsIndex,
@@ -1285,6 +1289,42 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       ])
       push({ kind: "info", text: `attached ${basename(saved)} from the clipboard` })
     },
+    handoff: async () => {
+      const ref = modelRef()
+      if (!ref) {
+        push({ kind: "error", text: "no model configured" })
+        return
+      }
+      push({ kind: "info", text: "writing handoff…" })
+      setBusy(true)
+      try {
+        const result = await runHandoffTurn({
+          provider: freshProvider(),
+          journal: session.journal,
+          model: ref,
+          system: frozenSystem(ref),
+          cwd: props.cwd,
+        })
+        if (result.doc === "") {
+          push({ kind: "error", text: "handoff failed — the model returned nothing" })
+          return
+        }
+        const saved = saveHandoff(props.cwd, result.doc, result.truncated, session.journal)
+        push({ kind: "assistant", text: result.doc })
+        push({
+          kind: "info",
+          text: `handoff saved — ${saved.path} (+ archived copy)${result.truncated ? " — truncated to fit the cap" : ""}\n/new (or \`butterfly run --resume-handoff\`) will preload it into a fresh session`,
+        })
+      } catch (error) {
+        push({
+          kind: "error",
+          text: `handoff failed: ${error instanceof Error ? error.message : String(error)}`,
+        })
+      } finally {
+        setBusy(false)
+        drainQueue()
+      }
+    },
   }
 
   const handleSetupSubmit = (stage: SetupStage, value: string) => {
@@ -1448,14 +1488,20 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     if (mentionBlock !== "") {
       taskText = `${mentionBlock}\n\n${taskText}`
     }
-    if (firstTurn && graph) {
-      const mentionedWords = task.split(/[^A-Za-z0-9_]+/).filter((word) => word.length >= 3)
-      const skeleton = buildSkeleton(graph, {
-        mentionedIdents: mentionedWords,
-        chatFiles: mentions.map((m) => m.path),
-      })
-      if (skeleton !== "") {
-        taskText = `[repository map — ranked symbols; use explore/read for bodies]\n${skeleton}\n\n${taskText}`
+    if (firstTurn) {
+      const pendingHandoff = consumeHandoff(props.cwd)
+      if (pendingHandoff) {
+        taskText = `${renderHandoffPreload(pendingHandoff)}\n\n${taskText}`
+      }
+      if (graph) {
+        const mentionedWords = task.split(/[^A-Za-z0-9_]+/).filter((word) => word.length >= 3)
+        const skeleton = buildSkeleton(graph, {
+          mentionedIdents: mentionedWords,
+          chatFiles: mentions.map((m) => m.path),
+        })
+        if (skeleton !== "") {
+          taskText = `[repository map — ranked symbols; use explore/read for bodies]\n${skeleton}\n\n${taskText}`
+        }
       }
     }
     firstTurn = false

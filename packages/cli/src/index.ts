@@ -18,12 +18,13 @@ async function main(): Promise<number> {
           cwd: { type: "string" },
           json: { type: "boolean", default: false },
           "max-steps": { type: "string" },
+          "resume-handoff": { type: "boolean", default: false },
         },
       })
       const task = positionals.join(" ").trim()
       if (task === "") {
         console.error(
-          'Usage: butterfly run "<task>" [--model provider/model] [--budget tokens] [--json]',
+          'Usage: butterfly run "<task>" [--model provider/model] [--budget tokens] [--json] [--resume-handoff]',
         )
         return 1
       }
@@ -35,6 +36,7 @@ async function main(): Promise<number> {
         cwd: values.cwd,
         json: values.json ?? false,
         maxSteps: values["max-steps"] ? Number(values["max-steps"]) : undefined,
+        resumeHandoff: values["resume-handoff"] ?? false,
       })
     }
     case "loop": {

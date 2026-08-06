@@ -195,6 +195,22 @@ export {
 } from "./session/compaction"
 export { JournalHeader, now, SessionEvent, type Usage } from "./session/events"
 export {
+  consumeHandoff,
+  HANDOFF_MAX_CHARS,
+  HANDOFF_PROMPT,
+  HANDOFF_TRUNCATION_MARKER,
+  type HandoffJournalSink,
+  type HandoffPaths,
+  type HandoffTurnResult,
+  handoffPaths,
+  type RunHandoffTurnDeps,
+  renderHandoffPreload,
+  runHandoffTurn,
+  type SaveHandoffResult,
+  saveHandoff,
+  truncateHandoffDoc,
+} from "./session/handoff"
+export {
   HOOK_EVENTS,
   type HookConfig,
   type HookEvent,

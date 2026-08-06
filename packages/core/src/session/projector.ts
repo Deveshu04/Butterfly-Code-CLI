@@ -52,6 +52,8 @@ export function foldTimeline(events: SessionEvent[]): {
         break
       case "hook.run":
         break
+      case "session.handoff":
+        break
       default:
         entries.push({ index, event })
     }

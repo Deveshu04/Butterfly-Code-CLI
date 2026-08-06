@@ -108,6 +108,21 @@ test("/review and /commit each invoke their CommandActions method with the parse
   ])
 })
 
+test("/handoff is registered and invokes CommandActions.handoff", () => {
+  expect(COMMANDS.some((c) => c.name === "handoff")).toBe(true)
+  const match = findCommand("/handoff")
+  expect(match && "command" in match ? match.command.name : "").toBe("handoff")
+
+  let called = 0
+  const actions = {
+    handoff: async () => {
+      called += 1
+    },
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(called).toBe(1)
+})
+
 test("/paste-img is registered and invokes CommandActions.pasteImage", () => {
   expect(COMMANDS.some((c) => c.name === "paste-img")).toBe(true)
   const match = findCommand("/paste-img")

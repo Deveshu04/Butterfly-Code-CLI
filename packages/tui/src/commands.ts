@@ -36,6 +36,7 @@ export interface CommandActions {
   review(arg: string): Promise<void>
   commit(): Promise<void>
   pasteImage(): Promise<void>
+  handoff(): Promise<void>
 }
 
 export interface SlashCommand {
@@ -155,6 +156,12 @@ export const COMMANDS: SlashCommand[] = [
     description: "branch this conversation — history copies, futures diverge",
     aliases: ["branch"],
     run: (_arg, a) => a.forkNow(),
+  },
+  {
+    name: "handoff",
+    args: "",
+    description: "write a goal/state/next-move/files doc for the next session (cheap goodbye)",
+    run: (_arg, a) => a.handoff(),
   },
   {
     name: "undo",

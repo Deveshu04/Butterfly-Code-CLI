@@ -120,6 +120,16 @@ export const SessionEvent = z.discriminatedUnion("type", [
     skipped: z.array(z.string()).optional(),
     warning: z.string().optional(),
   }),
+  z.object({
+    ...base,
+    type: z.literal("session.handoff"),
+    /** `.butterfly/handoff.md` at save time. */
+    path: z.string(),
+    /** `.butterfly/handoffs/<ts>.md` — the permanent, never-overwritten copy. */
+    archivePath: z.string(),
+    chars: z.number(),
+    truncated: z.boolean(),
+  }),
 ])
 export type SessionEvent = z.infer<typeof SessionEvent>
 
