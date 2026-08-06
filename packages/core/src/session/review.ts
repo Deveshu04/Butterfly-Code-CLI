@@ -15,6 +15,36 @@ export interface GatherDiffOptions {
   range?: string
   /** Only the index (`git diff --staged`). Ignored when `range` is set. */
   staged?: boolean
+  rejected?: string
+}
+
+export const REVISION_MAX_CHARS = 200
+
+const REVISION_MAX_TOKENS = 3
+
+const REVISION_TOKEN = /^[A-Za-z0-9._/:@^~{}-]+$/
+
+export type RevisionVerdict = { ok: true; range: string } | { ok: false; reason: string }
+
+export function validateRevisionRange(raw: string): RevisionVerdict {
+  const range = raw.trim()
+  const refuse = (why: string): RevisionVerdict => ({
+    ok: false,
+    reason: `${why} — /review takes a git revision (e.g. HEAD~3, main..feature, v1.2.3, --staged), not a shell expression`,
+  })
+  if (range === "") return refuse("empty revision")
+  if (range.length > REVISION_MAX_CHARS) {
+    return refuse(`revision argument longer than ${REVISION_MAX_CHARS} characters`)
+  }
+  const tokens = range.split(/\s+/)
+  if (tokens.length > REVISION_MAX_TOKENS) return refuse("too many revision arguments")
+  for (const token of tokens) {
+    // A leading "-" would smuggle git-diff options (--output= writes files).
+    if (token.startsWith("-")) return refuse(`"${token}" looks like an option, not a revision`)
+    if (token.startsWith("~")) return refuse(`"${token}" starts with a shell tilde expansion`)
+    if (!REVISION_TOKEN.test(token)) return refuse(`"${token}" is not valid git revision syntax`)
+  }
+  return { ok: true, range: tokens.join(" ") }
 }
 
 /** A git spawn that did not succeed — never silently equal to "clean tree". */
@@ -33,6 +63,7 @@ export interface GatheredDiff {
   /** True when there is nothing to review: no repo, or a clean tree/index. */
   empty: boolean
   failure?: GitFailure
+  rejected?: string
 }
 
 function failureOf(command: string, result: RunCommandResult): GitFailure | undefined {
@@ -57,11 +88,16 @@ export function describeGitFailure(failure: GitFailure): string {
 }
 
 export async function gatherDiff(cwd: string, opts: GatherDiffOptions = {}): Promise<GatheredDiff> {
+  if (opts.rejected) return { diff: "", truncated: false, empty: true, rejected: opts.rejected }
+  const verdict = opts.range === undefined ? undefined : validateRevisionRange(opts.range)
+  if (verdict && !verdict.ok) {
+    return { diff: "", truncated: false, empty: true, rejected: verdict.reason }
+  }
   if (!isGitRepo(cwd)) return { diff: "", truncated: false, empty: true }
 
   let raw: string
-  if (opts.range) {
-    const command = `git diff ${opts.range}`
+  if (verdict?.ok) {
+    const command = `git diff ${verdict.range}`
     const result = await runCommand(command, { cwd, timeoutMs: GIT_TIMEOUT_MS })
     const failure = failureOf(command, result)
     if (failure) return { diff: "", truncated: false, empty: true, failure }
@@ -94,7 +130,8 @@ export function parseReviewArg(arg: string): GatherDiffOptions {
   const trimmed = arg.trim()
   if (trimmed === "") return {}
   if (trimmed === "--staged") return { staged: true }
-  return { range: trimmed }
+  const verdict = validateRevisionRange(trimmed)
+  return verdict.ok ? { range: verdict.range } : { rejected: verdict.reason }
 }
 
 export function describeReviewScope(opts: GatherDiffOptions): string {
@@ -123,6 +160,8 @@ export interface ReviewResult {
   truncated: boolean
   /** Set when git failed — distinct from "nothing to review"; no model ran. */
   failure?: GitFailure
+  /** Set when the revision argument was refused — nothing ran at all. */
+  rejected?: string
 }
 
 export async function runReview(
@@ -132,6 +171,14 @@ export async function runReview(
   signal?: AbortSignal,
 ): Promise<ReviewResult> {
   const gathered = await gatherDiff(cwd, diffOpts)
+  if (gathered.rejected) {
+    return {
+      summary: gathered.rejected,
+      diffChars: 0,
+      truncated: false,
+      rejected: gathered.rejected,
+    }
+  }
   if (gathered.failure) {
     return {
       summary: `git failed: ${describeGitFailure(gathered.failure)}`,

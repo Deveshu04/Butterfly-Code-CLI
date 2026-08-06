@@ -246,9 +246,12 @@ export {
   parseReviewArg,
   REVIEW_DIFF_MAX_CHARS,
   REVIEW_RUBRIC,
+  REVISION_MAX_CHARS,
   type ReviewEvent,
   type ReviewResult,
+  type RevisionVerdict,
   runReview,
+  validateRevisionRange,
 } from "./session/review"
 export {
   DEFAULT_MAX_STEPS,

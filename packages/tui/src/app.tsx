@@ -1536,6 +1536,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       try {
         const diffOpts = parseReviewArg(arg)
         const result = await runReview(props.cwd, taskToolOpts, diffOpts)
+        if (result.rejected) {
+          push({ kind: "error", text: result.rejected })
+          return
+        }
         if (result.failure) {
           push({ kind: "error", text: `git failed: ${describeGitFailure(result.failure)}` })
           return

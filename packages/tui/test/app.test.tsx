@@ -2371,3 +2371,21 @@ test("Ctrl+C during a real in-turn approval denies it, journals the paired tool.
   t.renderer.destroy()
   server.stop()
 }, 60_000)
+
+test("/review with a shell expression as its range is refused in the UI — no git, no file written", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const marker = join(cwd, "pwned.txt").split("\\").join("/")
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 160, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText(`/review $(touch ${marker})`)
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (f) => f.includes("git revision"))
+  expect(frame).not.toContain("git failed")
+  expect(frame).not.toContain("nothing to review")
+  expect(existsSync(marker)).toBe(false)
+  t.renderer.destroy()
+}, 30_000)

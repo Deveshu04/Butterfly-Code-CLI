@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { assemble } from "../src/session/assembly"
@@ -15,6 +15,7 @@ import {
   REVIEW_DIFF_MAX_CHARS,
   REVIEW_RUBRIC,
   runReview,
+  validateRevisionRange,
 } from "../src/session/review"
 import { ToolRegistry } from "../src/tool/registry"
 import { runCommand } from "../src/tool/shell"
@@ -383,3 +384,101 @@ test("journalReview journals nothing when no subagent ran", async () => {
   expect(failed).toBeUndefined()
   expect(SessionJournal.replay(main.path).events.length).toBe(0)
 })
+
+
+test("validateRevisionRange accepts the revision forms git users actually type", () => {
+  for (const range of [
+    "HEAD~3",
+    "HEAD^",
+    "main..feature",
+    "main...feature",
+    "v1.2.3",
+    "release/2026-08",
+    "origin/main",
+    "8f3a1c9",
+    "HEAD@{2}",
+    "HEAD^{tree}",
+    "refs/heads/my-branch",
+    "main feature",
+  ]) {
+    const verdict = validateRevisionRange(range)
+    expect(verdict.ok ? verdict.range : `REJECTED: ${range}`).toBe(range)
+  }
+})
+
+test("validateRevisionRange refuses shell metacharacters, option injection and absurd length", () => {
+  for (const range of [
+    "$(touch pwned)",
+    "`touch pwned`",
+    "HEAD~1; touch pwned",
+    "HEAD~1 && touch pwned",
+    "HEAD~1 | tee pwned",
+    "HEAD~1 > pwned",
+    'HEAD~1"',
+    "HEAD~1'",
+    "$HOME",
+    "--output=pwned",
+    "~/somewhere",
+    "*",
+    "a".repeat(201),
+    "",
+    "   ",
+    "a b c d",
+  ]) {
+    expect(validateRevisionRange(range).ok).toBe(false)
+  }
+})
+
+test("a $(...)-bearing range is rejected by parseReviewArg with no range to spawn", () => {
+  const opts = parseReviewArg("$(touch pwned)")
+  expect(opts.range).toBeUndefined()
+  expect(opts.staged).toBeUndefined()
+  expect(opts.rejected).toBeTruthy()
+  expect(opts.rejected).toContain("revision")
+})
+
+test("gatherDiff refuses a rejected/invalid range BEFORE spawning anything", async () => {
+  const dir = await gitFixture()
+  const marker = join(dir, "pwned.txt")
+  // Both entry shapes: the parsed one, and gatherDiff called directly with a
+  // hand-built range (it is exported, so it validates on its own account).
+  const viaParse = await gatherDiff(dir, parseReviewArg(`$(touch "${marker}")`))
+  expect(viaParse.rejected).toBeTruthy()
+  expect(viaParse.failure).toBeUndefined()
+  const direct = await gatherDiff(dir, { range: `$(touch "${marker}")` })
+  expect(direct.rejected).toBeTruthy()
+  expect(direct.failure).toBeUndefined()
+  expect(existsSync(marker)).toBe(false)
+}, 20_000)
+
+test("runReview refuses an invalid range without git or the model", async () => {
+  const dir = await gitFixture()
+  const provider = new MockProvider([])
+  const result = await runReview(
+    dir,
+    {
+      provider: () => provider,
+      model: () => "mock",
+      system: () => "s",
+      cwd: dir,
+      sessionsDir: tempDir("bfly-review-j-"),
+      makeRegistry: () => new ToolRegistry(),
+    },
+    parseReviewArg("`git push --force`"),
+  )
+  expect(result.rejected).toBeTruthy()
+  expect(result.journalPath).toBeUndefined()
+  expect(result.summary).toContain("revision")
+  // no model call was made
+  expect(provider.requests.length).toBe(0)
+}, 20_000)
+
+test("a legit range still reaches git and produces a diff", async () => {
+  const dir = await gitFixture()
+  writeFileSync(join(dir, "app.ts"), "export const v = 2\n")
+  await runCommand("git add -A && git commit -qm second", { cwd: dir })
+  const result = await gatherDiff(dir, parseReviewArg("HEAD~1"))
+  expect(result.rejected).toBeUndefined()
+  expect(result.empty).toBe(false)
+  expect(result.diff).toContain("app.ts")
+}, 20_000)
