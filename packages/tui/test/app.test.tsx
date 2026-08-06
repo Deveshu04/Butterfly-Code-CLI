@@ -18,6 +18,33 @@ async function gitFixture(cwd: string): Promise<void> {
   await runCommand("git add -A && git commit -qm init", { cwd })
 }
 
+async function stagedGitFixture(cwd: string): Promise<void> {
+  await gitFixture(cwd)
+  writeFileSync(join(cwd, "app.ts"), "export const v = 2\n")
+  await runCommand("git add -A", { cwd })
+}
+
+function startFakeChatServer(replyText: string): { baseURL: string; stop: () => void } {
+  const body =
+    `data: ${JSON.stringify({
+      id: "1",
+      choices: [
+        { index: 0, delta: { role: "assistant", content: replyText }, finish_reason: null },
+      ],
+    })}\n\n` +
+    `data: ${JSON.stringify({
+      id: "1",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    })}\n\n` +
+    "data: [DONE]\n\n"
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Response(body, { headers: { "content-type": "text/event-stream" } }),
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
+}
+
 async function waitForFrameSlow(
   t: { renderOnce: () => Promise<void>; captureCharFrame: () => string },
   predicate: (frame: string) => boolean,
@@ -341,6 +368,55 @@ test("/commit in a clean git repo offers to stage; approving finds nothing left 
   await waitForFrameSlow(t, (frame) => frame.includes("still nothing staged"))
   t.renderer.destroy()
 }, 30_000)
+
+
+test("a plain confirmation (no tool/target) never offers [a]lways", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/commit")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (frame) =>
+    frame.includes("stage all tracked modifications"),
+  )
+  expect(frame).not.toContain("[a]lways")
+  t.mockInput.pressKey("n")
+  await waitForFrameSlow(t, (frame) => frame.includes("commit cancelled"))
+  t.renderer.destroy()
+}, 30_000)
+
+test("a real permission ask (reached via a REAL staged diff + provider round-trip, not a simulation) shows [a]lways with the exact narrowed rule preview", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await stagedGitFixture(cwd)
+  const server = startFakeChatServer("chore: quick-add test commit")
+  const t = await testRender(
+    () => (
+      <App
+        cwd={cwd}
+        config={{ model: "fake/mock-commit", providers: { fake: { baseURL: server.baseURL } } }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 240, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/commit")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (f) => f.includes("[a]lways"), 25_000)
+  expect(frame).toContain("approve?")
+  expect(frame).toContain("bash")
+  expect(frame).toContain('[a]lways bash: "git *"')
+  t.mockInput.pressKey("a")
+  await waitForFrameSlow(t, (f) => f.includes("saved to"), 15_000)
+  const written = JSON.parse(readFileSync(join(cwd, "butterfly.jsonc"), "utf8"))
+  expect(written.permissions.bash).toEqual({ "git *": "allow" })
+  t.renderer.destroy()
+  server.stop()
+}, 40_000)
 
 test("attention: approval notify does not fire while the terminal is focused (default)", async () => {
   const cwd = tempDir("bfly-tui-")

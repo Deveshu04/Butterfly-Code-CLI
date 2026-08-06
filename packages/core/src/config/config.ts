@@ -1,6 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { z } from "zod"
+import { mergeAllowRule } from "../permission/quick-add"
+import type { PermissionRules } from "../permission/tree"
 
 const Decision = z.enum(["allow", "ask", "deny"])
 
@@ -301,6 +303,41 @@ export function setHookEnabled(
   hooksArr[index] = { ...target, enabled }
   writeFileSync(source.path, `${JSON.stringify(raw, null, 2)}\n`)
   return { ok: true, path: source.path, scope: source.scope }
+}
+
+
+export interface PermissionWriteResult {
+  ok: boolean
+  path: string
+  snippet?: string
+}
+
+export function setPermissionRule(
+  tool: string,
+  pattern: string,
+  opts: LoadConfigOptions,
+): PermissionWriteResult {
+  const path = join(opts.cwd, "butterfly.jsonc")
+  let text: string
+  try {
+    text = readFileSync(path, "utf8")
+  } catch {
+    text = ""
+  }
+  if (text !== "" && containsComments(text)) {
+    const snippet = `"permissions": { "${tool}": { "${pattern}": "allow" } }`
+    return { ok: false, path, snippet }
+  }
+  const raw = text === "" ? {} : parseJsonc(text)
+  const base: Record<string, unknown> = isPlainObject(raw) ? { ...raw } : {}
+  const currentPermissions: PermissionRules = isPlainObject(base["permissions"])
+    ? (base["permissions"] as PermissionRules)
+    : {}
+  base["permissions"] = mergeAllowRule(currentPermissions, tool, pattern)
+  ButterflyConfig.parse(base)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify(base, null, 2)}\n`)
+  return { ok: true, path }
 }
 
 /** Deep-merge configs; later sources win on scalars, objects merge. */

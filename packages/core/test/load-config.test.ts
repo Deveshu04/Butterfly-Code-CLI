@@ -8,6 +8,7 @@ import {
   locateHooksSource,
   saveGlobalConfig,
   setHookEnabled,
+  setPermissionRule,
 } from "../src/config/config"
 
 function tempDir(): string {
@@ -166,6 +167,61 @@ test("setHookEnabled fails soft on a commented file — never corrupts it, offer
   expect(result.ok).toBe(false)
   expect(result.snippet).toContain("npm run lint")
   expect(result.snippet).toContain("enabled")
+  const after = readFileSync(join(cwd, "butterfly.jsonc"), "utf8")
+  expect(after).toBe(original)
+})
+
+
+test("setPermissionRule creates butterfly.jsonc and the rule round-trips through loadConfig", () => {
+  const cwd = tempDir()
+  const result = setPermissionRule("bash", "git *", { cwd, home: tempDir() })
+  expect(result.ok).toBe(true)
+  expect(result.path).toBe(join(cwd, "butterfly.jsonc"))
+  const config = loadConfig({ cwd, home: tempDir(), env: {} })
+  expect(config.permissions?.["bash"]).toEqual({ "git *": "allow" })
+})
+
+test("setPermissionRule merges into an existing permissions tree without clobbering other keys", () => {
+  const cwd = tempDir()
+  const home = tempDir()
+  writeFileSync(
+    join(cwd, "butterfly.jsonc"),
+    JSON.stringify({
+      model: "openrouter/x",
+      permissions: { "*": "allow", edit: { "*": "ask", ".env*": "deny" } },
+    }),
+  )
+  const result = setPermissionRule("bash", "git *", { cwd, home })
+  expect(result.ok).toBe(true)
+  const config = loadConfig({ cwd, home, env: {} })
+  expect(config.model).toBe("openrouter/x")
+  expect(config.permissions?.["bash"]).toEqual({ "git *": "allow" })
+  expect(config.permissions?.["edit"]).toEqual({ "*": "ask", ".env*": "deny" })
+  expect(config.permissions?.["*"]).toBe("allow")
+})
+
+test("setPermissionRule converts a blanket tool string in the FILE into a map, preserving it as *", () => {
+  const cwd = tempDir()
+  const home = tempDir()
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ permissions: { bash: "ask" } }))
+  const result = setPermissionRule("bash", "git *", { cwd, home })
+  expect(result.ok).toBe(true)
+  const config = loadConfig({ cwd, home, env: {} })
+  expect(config.permissions?.["bash"]).toEqual({ "*": "ask", "git *": "allow" })
+})
+
+test("setPermissionRule fails soft on a commented project file — never corrupts it, offers a snippet", () => {
+  const cwd = tempDir()
+  const home = tempDir()
+  const original = `{
+  // deliberately hand-annotated
+  "permissions": { "bash": "ask" }
+}`
+  writeFileSync(join(cwd, "butterfly.jsonc"), original)
+  const result = setPermissionRule("bash", "git *", { cwd, home })
+  expect(result.ok).toBe(false)
+  expect(result.snippet).toContain("bash")
+  expect(result.snippet).toContain("git *")
   const after = readFileSync(join(cwd, "butterfly.jsonc"), "utf8")
   expect(after).toBe(original)
 })

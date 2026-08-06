@@ -52,6 +52,7 @@ import {
   type PermissionRules,
   parseModelRef,
   parseReviewArg,
+  planQuickAdd,
   prepareImageAttachments,
   project,
   type ReasoningEffort,
@@ -71,6 +72,7 @@ import {
   safeRewindIndex,
   saveGlobalConfig,
   setHookEnabled,
+  setPermissionRule,
   skillsIndex,
   stageAllTracked,
   syncRepo,
@@ -234,8 +236,15 @@ export function clearTerminalProgress(
   }
 }
 
+interface QuickAddOffer {
+  tool: string
+  pattern: string
+  rules: PermissionRules
+}
+
 interface PendingAsk {
   text: string
+  quickAdd?: QuickAddOffer
   resolve: (decision: "allow" | "deny") => void
 }
 
@@ -527,7 +536,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     scroll?.scrollTo(scroll.scrollHeight)
   }
 
-  const askApproval = (text: string): Promise<"allow" | "deny"> =>
+  const showApprovalPrompt = (text: string, quickAdd?: QuickAddOffer): Promise<"allow" | "deny"> =>
     new Promise((resolve) => {
       // Terminal bell: surfaces the prompt when the user has tabbed away.
       process.stdout.write("\x07")
@@ -540,12 +549,46 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       )
       setPendingAsk({
         text,
+        quickAdd,
         resolve: (decision) => {
           setPendingAsk(null)
           resolve(decision)
         },
       })
     })
+
+  const askApproval = (text: string): Promise<"allow" | "deny"> => showApprovalPrompt(text)
+
+  const askPermission = (
+    request: { tool: string; target?: string; note?: string; input: unknown },
+    rules: PermissionRules,
+  ): Promise<"allow" | "deny"> => {
+    const plan = planQuickAdd(rules, request.tool, request.target)
+    const quickAdd: QuickAddOffer | undefined =
+      plan.ok && plan.rules
+        ? { tool: plan.tool, pattern: plan.pattern, rules: plan.rules }
+        : undefined
+    return showApprovalPrompt(describeAsk(request), quickAdd)
+  }
+
+  const applyQuickAdd = (quickAdd: QuickAddOffer) => {
+    setConfig({ ...config(), permissions: quickAdd.rules })
+    try {
+      const result = setPermissionRule(quickAdd.tool, quickAdd.pattern, { cwd: props.cwd, home })
+      push({
+        kind: "info",
+        text: result.ok
+          ? `always allow ${quickAdd.tool}: "${quickAdd.pattern}" — saved to ${result.path}`
+          : `always allow ${quickAdd.tool}: "${quickAdd.pattern}" for this session — ${result.path} has comments, edit it by hand:\n  ${result.snippet}`,
+      })
+    } catch (error) {
+      push({
+        kind: "info",
+        text: `always allow ${quickAdd.tool}: "${quickAdd.pattern}" for this session — could not save to butterfly.jsonc: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
+
   const appendAssistant = (text: string) => {
     const all = [...messages()]
     const last = all.at(-1)
@@ -1208,13 +1251,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         }
         push({ kind: "info", text: `commit message:\n\n${result.message}` })
         const path = writeCommitMessageFile(props.cwd, result.message)
+        const commitRules = config().permissions ?? TUI_DEFAULT_RULES
         const commitResult = await registry.run(
           "bash",
           { command: `git commit -F "${path}"` },
           {
             cwd: props.cwd,
-            rules: config().permissions ?? TUI_DEFAULT_RULES,
-            ask: (request) => askApproval(describeAsk(request)),
+            rules: commitRules,
+            ask: (request) => askPermission(request, commitRules),
             state,
           },
         )
@@ -1425,12 +1469,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     const attentionConfig = () => ({ notifications: config().notifications ?? true })
     applyAttention(decideAttention({ kind: "turn.start" }, attentionState(), attentionConfig()))
     let turnDetail: string | undefined
+    const turnRules = planMode() ? PLAN_RULES : (config().permissions ?? TUI_DEFAULT_RULES)
     runUserTurn(
       {
         provider: freshProvider(),
         registry,
         journal: session.journal,
-        rules: planMode() ? PLAN_RULES : (config().permissions ?? TUI_DEFAULT_RULES),
+        rules: turnRules,
         model: ref,
         system: frozenSystem(ref),
         cwd: props.cwd,
@@ -1446,7 +1491,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(limit ? { limits: { context: limit } } : {}),
         ...(config().small_model ? { smallModel: config().small_model } : {}),
         imageInputSupported: imageInputSupported(),
-        ask: (request) => askApproval(describeAsk(request)),
+        ask: (request) => askPermission(request, turnRules),
       },
       taskText,
       turnImages.length > 0 ? { images: turnImages } : undefined,
@@ -1538,6 +1583,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       key.preventDefault()
       if (key.name === "y") ask.resolve("allow")
       if (key.name === "n" || key.name === "escape") ask.resolve("deny")
+      if (key.name === "a" && ask.quickAdd) {
+        applyQuickAdd(ask.quickAdd)
+        ask.resolve("allow")
+      }
       return
     }
     if (key.ctrl && key.name === "o" && !setup()) {
@@ -1941,6 +1990,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             <text fg={ACCENT}>approve? </text>
             <text>{ask().text} </text>
             <text fg={MUTED}>[y]es / [n]o</text>
+            <Show when={ask().quickAdd}>
+              {(qa: Accessor<QuickAddOffer>) => (
+                <text fg={MUTED}>{` / [a]lways ${qa().tool}: "${qa().pattern}"`}</text>
+              )}
+            </Show>
           </box>
         )}
       </Show>

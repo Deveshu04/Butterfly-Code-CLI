@@ -1,5 +1,3 @@
-export { VERSION } from "./version"
-
 // Benchmark harness
 export { extractSessionMetrics, type SessionMetrics } from "./bench/metrics"
 export {
@@ -19,9 +17,11 @@ export {
   loadRawConfig,
   locateHooksSource,
   mergeConfigs,
+  type PermissionWriteResult,
   parseJsonc,
   saveGlobalConfig,
   setHookEnabled,
+  setPermissionRule,
   substituteEnv,
 } from "./config/config"
 // Context
@@ -120,6 +120,11 @@ export { REVIEWER_PROMPT, reviewTurn } from "./memory/reviewer"
 export { createSkillTool } from "./memory/skill-tool"
 export { listSkills, promotedSkills, readSkill, recordSkillRun, skillsIndex } from "./memory/skills"
 // Permissions
+export {
+  computeAllowPattern,
+  planQuickAdd,
+  type QuickAddPlan,
+} from "./permission/quick-add"
 export { type PermissionDecision, type PermissionRules, resolvePermission } from "./permission/tree"
 export {
   defaultAssetCacheRoot,
@@ -270,6 +275,7 @@ export {
   worktreeStatus,
   worktreesRoot,
 } from "./tool/worktree"
+export { VERSION } from "./version"
 // Web (search + fetch)
 export type {
   SearchBackend,

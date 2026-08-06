@@ -7,7 +7,7 @@ export type PermissionRules = Record<
 
 const SEVERITY: Record<PermissionDecision, number> = { deny: 2, ask: 1, allow: 0 }
 
-function wildcardToRegex(pattern: string): RegExp {
+export function wildcardToRegex(pattern: string): RegExp {
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
     .replace(/\*/g, ".*")
