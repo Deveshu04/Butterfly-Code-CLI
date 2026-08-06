@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 import {
+  BG_TASKS_STATE_KEY,
+  BgTaskRegistry,
   bashTool,
   buildSystem,
   createMcpTool,
@@ -102,6 +104,7 @@ interface AcpSession {
   model: string
   system: string
   state: Record<string, unknown>
+  bgTasks: BgTaskRegistry
   episodic: EpisodicIndex
   pendingCalls: Map<string, { name: string; input: unknown }>
   abortController?: AbortController
@@ -236,6 +239,12 @@ export class AcpAgent {
     this.peer?.abandonAll(reason)
     for (const session of this.sessions.values()) session.abortController?.abort()
     await Promise.allSettled([...this.inFlight])
+    for (const session of this.sessions.values()) {
+      const killed = session.bgTasks.reap()
+      if (killed.length > 0) {
+        this.log(`reaped ${killed.length} background task(s) on shutdown: ${killed.join(", ")}`)
+      }
+    }
     await Promise.allSettled([...this.sessions.values()].map((session) => session.mcpHub?.close()))
   }
 
@@ -333,6 +342,13 @@ export class AcpAgent {
       skillsIndex: skillsIndex(skillDirs),
     })
 
+    const bgTasks = new BgTaskRegistry({
+      cwd,
+      logDir: join(cwd, ".butterfly", "bg"),
+      journal,
+    })
+    const state: Record<string, unknown> = { [BG_TASKS_STATE_KEY]: bgTasks }
+
     this.sessions.set(sessionId, {
       id: sessionId,
       cwd,
@@ -341,7 +357,8 @@ export class AcpAgent {
       rules: config.permissions ?? DEFAULT_RULES,
       model: modelRef,
       system,
-      state: {},
+      state,
+      bgTasks,
       episodic,
       pendingCalls: new Map(),
       ...(mcpHub ? { mcpHub } : {}),

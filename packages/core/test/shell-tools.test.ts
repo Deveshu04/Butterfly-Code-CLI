@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { BG_TASKS_STATE_KEY, type BgTaskRegistry } from "../src/tool/bg-tasks"
+import { BG_TASKS_STATE_KEY, BgTaskRegistry } from "../src/tool/bg-tasks"
 import type { ToolContext } from "../src/tool/registry"
 import { ToolRegistry } from "../src/tool/registry"
 import { resolveShell, runCommand } from "../src/tool/shell"
@@ -126,6 +126,23 @@ test("background bash goes through the SAME permission gate as foreground bash",
   expect(result.output).toContain("Permission denied")
   expect(state[BG_TASKS_STATE_KEY]).toBeUndefined()
 })
+
+test("a shell that can't host a detached task fails the tool call, never the turn", async () => {
+  const dir = fixtureDir()
+  const state: Record<string, unknown> = {}
+  liveStates.push(state)
+  state[BG_TASKS_STATE_KEY] = new BgTaskRegistry({
+    cwd: dir,
+    logDir: join(dir, ".butterfly", "bg"),
+    shell: () => ({ exe: "powershell.exe", args: (c: string) => ["-Command", c], family: "cmd" }),
+  })
+  const result = await bashTool.execute(
+    { command: "echo nope", background: true },
+    { cwd: dir, rules: { "*": "allow" }, state },
+  )
+  expect(result.isError).toBe(true)
+  expect(result.output).toMatch(/POSIX shell/i)
+}, 20_000)
 
 test("background bash without a pre-seeded registry still works (lazy, no journal)", async () => {
   const state: Record<string, unknown> = {}

@@ -1,10 +1,18 @@
 import { join } from "node:path"
 
-export function resolveShell(): { exe: string; args: (cmd: string) => string[] } {
+export type ShellFamily = "posix" | "powershell" | "cmd"
+
+export interface ShellResolution {
+  exe: string
+  args: (cmd: string) => string[]
+  family: ShellFamily
+}
+
+export function resolveShell(): ShellResolution {
   // Non-login (-c, not -lc): stateless spawns must not pay profile-sourcing
   // latency on every tool call; env comes from the parent process.
   if (process.platform !== "win32") {
-    return { exe: Bun.which("bash") ?? "/bin/sh", args: (c) => ["-c", c] }
+    return { exe: Bun.which("bash") ?? "/bin/sh", args: (c) => ["-c", c], family: "posix" }
   }
   const override = process.env["BUTTERFLY_GIT_BASH_PATH"]
   const git = Bun.which("git")
@@ -17,12 +25,22 @@ export function resolveShell(): { exe: string; args: (cmd: string) => string[] }
       : []
   for (const gitBash of candidates) {
     if (Bun.file(gitBash).size > 0) {
-      return { exe: gitBash, args: (c) => ["-c", c] }
+      return { exe: gitBash, args: (c) => ["-c", c], family: "posix" }
     }
   }
   const ps = Bun.which("pwsh") ?? Bun.which("powershell")
-  if (ps) return { exe: ps, args: (c) => ["-NoProfile", "-NonInteractive", "-Command", c] }
-  return { exe: process.env["COMSPEC"] ?? "cmd.exe", args: (c) => ["/d", "/s", "/c", c] }
+  if (ps) {
+    return {
+      exe: ps,
+      args: (c) => ["-NoProfile", "-NonInteractive", "-Command", c],
+      family: "powershell",
+    }
+  }
+  return {
+    exe: process.env["COMSPEC"] ?? "cmd.exe",
+    args: (c) => ["/d", "/s", "/c", c],
+    family: "cmd",
+  }
 }
 
 export function killTree(proc: ReturnType<typeof Bun.spawn>): void {

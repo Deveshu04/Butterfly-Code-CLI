@@ -44,7 +44,15 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
   async execute(input, ctx) {
     if (input.background === true) {
       const registry = bgRegistry(ctx)
-      const record = registry.spawn(input.command, { keepAlive: input.keepAlive === true })
+      let record: ReturnType<BgTaskRegistry["spawn"]>
+      try {
+        record = registry.spawn(input.command, { keepAlive: input.keepAlive === true })
+      } catch (error) {
+        return {
+          output: error instanceof Error ? error.message : String(error),
+          isError: true,
+        }
+      }
       return {
         output: `Started background task ${record.id} (pid ${record.pid}). Output streaming to ${record.logPath} — read it with the read tool to check progress. Use /tasks show ${record.id} or /tasks kill ${record.id}.`,
       }

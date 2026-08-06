@@ -84,6 +84,28 @@ test("the exit hook writes the clear at most once, however many times it fires",
   expect(stream.written).toEqual([clearProgressOsc()])
 })
 
+test("the exit hook also runs the caller's extra teardown, at most once", () => {
+  const stream = fakeStream(true)
+  let extra = 0
+  const uninstall = installProgressExitClear(stream, () => {
+    extra += 1
+  })
+  process.emit("exit", 0)
+  process.emit("exit", 0)
+  uninstall()
+  expect(extra).toBe(1)
+  expect(stream.written).toEqual([clearProgressOsc()])
+})
+
+test("a throwing extra teardown never masks the real exit", () => {
+  const stream = fakeStream(true)
+  const uninstall = installProgressExitClear(stream, () => {
+    throw new Error("reap blew up")
+  })
+  expect(() => process.emit("exit", 0)).not.toThrow()
+  uninstall()
+})
+
 test("the exit hook fires on a real process exit", async () => {
   const moduleUrl = pathToFileURL(
     fileURLToPath(new URL("../src/attention-headless.ts", import.meta.url)),

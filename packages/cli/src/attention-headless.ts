@@ -20,12 +20,20 @@ export function clearHeadlessProgress(stream: AttentionStream = process.stderr):
   }
 }
 
-export function installProgressExitClear(stream: AttentionStream = process.stderr): () => void {
+export function installProgressExitClear(
+  stream: AttentionStream = process.stderr,
+  alsoOnExit?: () => void,
+): () => void {
   let cleared = false
   const clearOnce = (): void => {
     if (cleared) return
     cleared = true
     clearHeadlessProgress(stream)
+    try {
+      alsoOnExit?.()
+    } catch {
+      // teardown is best-effort — never the process's last error
+    }
   }
   const onExit = (): void => clearOnce()
   const onSigint = (): void => {

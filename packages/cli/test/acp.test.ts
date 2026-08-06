@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test"
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs"
+import { afterEach, expect, test } from "bun:test"
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -91,6 +91,42 @@ function oneToolCallThenText(
 // biome-ignore lint/suspicious/noExplicitAny: test-only JSON-RPC frame inspection
 function parsed(sent: string[]): any[] {
   return sent.map((line) => JSON.parse(line))
+}
+
+const bgPids: number[] = []
+afterEach(() => {
+  for (const pid of bgPids.splice(0)) {
+    if (process.platform === "win32") {
+      Bun.spawnSync(["taskkill", "/PID", String(pid), "/T", "/F"], {
+        stdout: "ignore",
+        stderr: "ignore",
+      })
+    } else {
+      try {
+        process.kill(-pid, "SIGKILL")
+      } catch {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch {
+          // already gone
+        }
+      }
+    }
+  }
+})
+
+function isAlive(pid: number): boolean {
+  if (process.platform === "win32") {
+    return Bun.spawnSync(["tasklist", "/FI", `PID eq ${pid}`, "/NH"])
+      .stdout.toString()
+      .includes(String(pid))
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function waitFor<T>(fn: () => T | undefined, timeoutMs = 5000): Promise<T> {
@@ -688,3 +724,100 @@ test("butterfly.jsonc permissions override the interactive defaults entirely", a
   expect(JSON.stringify(completed.params.update.content)).toContain("hi")
   expect(messages.find((m) => m.id === 2).result.stopReason).toBe("end_turn")
 }, 20_000)
+
+
+test("a background task from an ACP session is journalled and reaped on shutdown", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ permissions: { "*": "allow" } }))
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "bash",
+      input: { command: "sleep 40", background: true },
+    }),
+  )
+  const { peer, agent, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "start a server" }] },
+    }),
+  )
+
+  const sessionsDir = join(cwd, ".butterfly", "sessions")
+  const journalFile = [...new Bun.Glob("*.jsonl").scanSync({ cwd: sessionsDir })][0]
+  expect(journalFile).toBeDefined()
+  const events = () =>
+    readFileSync(join(sessionsDir, journalFile as string), "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as { type?: string; pid?: number; status?: string })
+
+  // Journalled: the ACP session's registry is pre-seeded WITH its journal, not
+  // lazily created without one.
+  const start = events().find((e) => e.type === "bgtask.start")
+  expect(start).toBeDefined()
+  const pid = start?.pid as number
+  bgPids.push(pid)
+  expect(isAlive(pid)).toBe(true)
+
+  await agent.shutdown("test teardown")
+  await waitFor(() => (isAlive(pid) ? undefined : true), 15_000)
+
+  expect(isAlive(pid)).toBe(false)
+  const end = events().find((e) => e.type === "bgtask.end")
+  expect(end?.status).toBe("killed")
+}, 60_000)
+
+test("a keepAlive background task is spared by ACP shutdown", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ permissions: { "*": "allow" } }))
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "bash",
+      input: { command: "sleep 40", background: true, keepAlive: true },
+    }),
+  )
+  const { peer, agent, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "start a server" }] },
+    }),
+  )
+
+  const sessionsDir = join(cwd, ".butterfly", "sessions")
+  const journalFile = [...new Bun.Glob("*.jsonl").scanSync({ cwd: sessionsDir })][0] as string
+  const start = readFileSync(join(sessionsDir, journalFile), "utf8")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map((line) => JSON.parse(line) as { type?: string; pid?: number; keepAlive?: boolean })
+    .find((e) => e.type === "bgtask.start")
+  expect(start?.keepAlive).toBe(true)
+  const pid = start?.pid as number
+  bgPids.push(pid)
+
+  await agent.shutdown("test teardown")
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  expect(isAlive(pid)).toBe(true)
+}, 60_000)

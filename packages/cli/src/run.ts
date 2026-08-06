@@ -252,7 +252,6 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
   const attentionState = { focus: "blurred" as const, cwd }
   const attentionConfig = { notifications }
   applyHeadlessAttention(decideAttention({ kind: "turn.start" }, attentionState, attentionConfig))
-  const stopExitClear = installProgressExitClear()
 
   const state: Record<string, unknown> = {}
   const bgTasks = new BgTaskRegistry({
@@ -261,6 +260,10 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     journal,
   })
   state[BG_TASKS_STATE_KEY] = bgTasks
+
+  const stopExitClear = installProgressExitClear(process.stderr, () => {
+    bgTasks.reap()
+  })
 
   let turnDetail: string | undefined
   try {

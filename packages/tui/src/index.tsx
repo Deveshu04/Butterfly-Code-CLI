@@ -1,4 +1,4 @@
-import { loadConfig } from "@butterfly/core"
+import { loadConfig, reapAllBackgroundTasks } from "@butterfly/core"
 import { createCliRenderer } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { App, clearTerminalProgress } from "./app"
@@ -25,6 +25,7 @@ export async function startTui(opts: { cwd: string; home?: string }): Promise<vo
       // terminal may already be restored
     }
     clearTerminalProgress()
+    reapAllBackgroundTasks()
     stopConsoleGuard()
     console.error(
       "\nbutterfly crashed:",
@@ -46,5 +47,6 @@ export async function startTui(opts: { cwd: string; home?: string }): Promise<vo
   // destroy() restored the screen but not the OSC 9;4 progress indicator a
   // mid-turn quit may have left running.
   clearTerminalProgress()
+  reapAllBackgroundTasks()
   stopConsoleGuard()
 }
