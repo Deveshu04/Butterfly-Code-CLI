@@ -1,6 +1,10 @@
 import { createRequire } from "node:module"
 import { z } from "zod"
-import { defaultAssetCacheRoot, extractEmbeddedAsset, isCompiledExecutable } from "../../platform/embedded-assets"
+import {
+  defaultAssetCacheRoot,
+  extractEmbeddedAsset,
+  isCompiledExecutable,
+} from "../../platform/embedded-assets"
 import { VERSION } from "../../version"
 import type { ToolDefinition } from "../registry"
 
@@ -27,7 +31,11 @@ async function resolveEmbeddedRipgrep(): Promise<string | undefined> {
     const mod = await importer()
     const bytes = new Uint8Array(await Bun.file(mod.default).arrayBuffer())
     return await extractEmbeddedAsset(
-      { name: process.platform === "win32" ? "rg.exe" : "rg", bytes: () => bytes },
+      {
+        name: process.platform === "win32" ? "rg.exe" : "rg",
+        size: bytes.byteLength,
+        bytes: () => bytes,
+      },
       { cacheRoot: defaultAssetCacheRoot(), version: VERSION, executable: true },
     )
   } catch {

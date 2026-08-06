@@ -1,6 +1,10 @@
 import { createRequire } from "node:module"
 import { dirname, join } from "node:path"
-import { defaultAssetCacheRoot, extractEmbeddedAsset, isCompiledExecutable } from "../platform/embedded-assets"
+import {
+  defaultAssetCacheRoot,
+  extractEmbeddedAsset,
+  isCompiledExecutable,
+} from "../platform/embedded-assets"
 import { VERSION } from "../version"
 
 const require = createRequire(import.meta.url)
@@ -84,13 +88,16 @@ const TAGS_IMPORTERS: Record<string, AssetImporter> = {
 const RUNTIME_WASM_IMPORTER: AssetImporter = () =>
   import("web-tree-sitter/web-tree-sitter.wasm", { with: { type: "file" } })
 
-async function resolveEmbedded(name: string, importer: AssetImporter | undefined): Promise<string | undefined> {
+async function resolveEmbedded(
+  name: string,
+  importer: AssetImporter | undefined,
+): Promise<string | undefined> {
   if (!importer || !isCompiledExecutable()) return undefined
   try {
     const mod = await importer()
     const bytes = new Uint8Array(await Bun.file(mod.default).arrayBuffer())
     return await extractEmbeddedAsset(
-      { name, bytes: () => bytes },
+      { name, size: bytes.byteLength, bytes: () => bytes },
       { cacheRoot: defaultAssetCacheRoot(), version: VERSION },
     )
   } catch {
@@ -99,7 +106,9 @@ async function resolveEmbedded(name: string, importer: AssetImporter | undefined
 }
 
 export async function resolveGrammarWasmPath(spec: LanguageSpec): Promise<string> {
-  return (await resolveEmbedded(spec.grammar, GRAMMAR_IMPORTERS[spec.grammar])) ?? grammarWasmPath(spec)
+  return (
+    (await resolveEmbedded(spec.grammar, GRAMMAR_IMPORTERS[spec.grammar])) ?? grammarWasmPath(spec)
+  )
 }
 
 export async function resolveRuntimeWasmPath(): Promise<string> {
@@ -107,5 +116,8 @@ export async function resolveRuntimeWasmPath(): Promise<string> {
 }
 
 export async function resolveTagsQueryPath(spec: LanguageSpec): Promise<string> {
-  return (await resolveEmbedded(`${spec.tags}-tags.scm`, TAGS_IMPORTERS[spec.tags])) ?? tagsQueryPath(spec)
+  return (
+    (await resolveEmbedded(`${spec.tags}-tags.scm`, TAGS_IMPORTERS[spec.tags])) ??
+    tagsQueryPath(spec)
+  )
 }
