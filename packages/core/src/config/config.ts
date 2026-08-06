@@ -27,6 +27,7 @@ export const ButterflyConfig = z.object({
   /** Hard dollar ceiling per turn (priced from models.dev). */
   maxSpendUSD: z.number().positive().optional(),
   notifications: z.boolean().optional(),
+  theme: z.string().optional(),
   mcp: z
     .record(
       z.string(),

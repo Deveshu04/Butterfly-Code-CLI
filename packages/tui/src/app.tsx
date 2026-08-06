@@ -103,7 +103,7 @@ import {
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid"
-import { type Accessor, createSignal, For, onCleanup, Show } from "solid-js"
+import { type Accessor, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { saveClipboardImage } from "./clipboard"
 import {
   type CommandActions,
@@ -141,13 +141,16 @@ import {
   toComposerDraft,
   unreferencedChips,
 } from "./paste"
-import { SYNTAX } from "./theme"
+import {
+  BUILTIN_THEMES,
+  listThemeNames,
+  loadCustomThemes,
+  resolveTheme,
+  SYNTAX,
+  setThemeTokens,
+  themeTokens,
+} from "./theme"
 import { renderWordmark, wordmarkMode } from "./wordmark"
-
-const MUTED = "#8b8b8b"
-const ACCENT = "#c9a7ff"
-const ERROR = "#ff8080"
-const WARN = "#ffcc66"
 
 interface Message {
   kind: "user" | "assistant" | "tool" | "info" | "error"
@@ -364,6 +367,20 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   }
 
   const [config, setConfig] = createSignal(props.config)
+
+  const customThemes = loadCustomThemes(home)
+  setThemeTokens(resolveTheme(config().theme ?? "dark", customThemes))
+  const applyAutoThemeMode = (mode: "dark" | "light") => {
+    if (config().theme) return // pinned — auto-detect never overrides it
+    setThemeTokens(resolveTheme(mode === "light" ? "light" : "dark", customThemes))
+  }
+  if (!config().theme && renderer.themeMode) applyAutoThemeMode(renderer.themeMode)
+  onMount(() => {
+    const onThemeMode = (mode: "dark" | "light") => applyAutoThemeMode(mode)
+    renderer.on("theme_mode", onThemeMode)
+    onCleanup(() => renderer.off("theme_mode", onThemeMode))
+  })
+
   const [messages, setMessages] = createSignal<Message[]>([])
   const [draft, setDraft] = createSignal("")
   const [busy, setBusy] = createSignal(false)
@@ -1379,6 +1396,43 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       return lines.join("\n")
     },
+    pickTheme: () => {
+      const names = listThemeNames(home)
+      const current = config().theme ?? "dark"
+      setPicker({
+        title: "theme — ↑↓ · Enter switch · Esc",
+        items: names.map((name) => ({
+          label: name === current ? `${name}  (current)` : name,
+          value: name,
+        })),
+        index: Math.max(0, names.indexOf(current)),
+        filter: "",
+        onPick: (value) => actions.setTheme(value),
+      })
+    },
+    setTheme: (name) => {
+      const trimmed = name.trim()
+      const custom = loadCustomThemes(home)
+      const known = new Set([...Object.keys(BUILTIN_THEMES), ...Object.keys(custom)])
+      if (!known.has(trimmed)) {
+        push({
+          kind: "error",
+          text: `unknown theme "${trimmed}" — try ${listThemeNames(home).join(", ")}`,
+        })
+        return
+      }
+      setThemeTokens(resolveTheme(trimmed, custom))
+      try {
+        saveGlobalConfig({ theme: trimmed }, { home })
+        setConfig(loadConfig({ cwd: props.cwd, home }))
+        push({ kind: "info", text: `theme set to ${trimmed}` })
+      } catch (error) {
+        push({
+          kind: "error",
+          text: `theme applied but failed to persist: ${String(error instanceof Error ? error.message : error)}`,
+        })
+      }
+    },
     initProject: () => {
       submit(
         "Analyze this repository: read the README, package manifests, build/test scripts, and the main entry points (use glob/read/explore — stay efficient). Then use the memory tool with scope 'project' to store up to 5 terse durable facts: exact build/test/lint commands, architecture invariants, and conventions. Finish with a one-paragraph orientation summary.",
@@ -2145,16 +2199,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0}>
       <box flexShrink={0} height={1} paddingLeft={1} flexDirection="row">
-        <text fg={MUTED}>butterfly </text>
+        <text fg={themeTokens().muted}>butterfly </text>
         <text>
           <b>code</b>
         </text>
-        <text fg={MUTED}>{modelRef() ? `  ·  ${modelRef()}` : "  ·  not configured"}</text>
+        <text fg={themeTokens().muted}>
+          {modelRef() ? `  ·  ${modelRef()}` : "  ·  not configured"}
+        </text>
         <Show when={reasoning()}>
-          <text fg={ACCENT}>{`  ·  think:${reasoning()}`}</text>
+          <text fg={themeTokens().accent}>{`  ·  think:${reasoning()}`}</text>
         </Show>
         <Show when={planMode()}>
-          <text fg={WARN}>{"  ·  PLAN (read-only)"}</text>
+          <text fg={themeTokens().warn}>{"  ·  PLAN (read-only)"}</text>
         </Show>
       </box>
 
@@ -2184,7 +2240,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 </text>
                 <box marginTop={1} flexDirection="column">
                   <Show when={setup()?.stage === "provider"}>
-                    <text fg={MUTED}>Pick a provider (type its number or name, then Enter):</text>
+                    <text fg={themeTokens().muted}>
+                      Pick a provider (type its number or name, then Enter):
+                    </text>
                     <For each={PROVIDERS}>
                       {(choice, index) => (
                         <text>
@@ -2194,19 +2252,19 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                     </For>
                   </Show>
                   <Show when={setup()?.stage === "key"}>
-                    <text fg={MUTED}>
+                    <text fg={themeTokens().muted}>
                       Paste your API key and press Enter. It is stored in
                       ~/.config/butterfly/butterfly.jsonc (visible while typing).
                     </text>
                   </Show>
                   <Show when={setup()?.stage === "model"}>
-                    <text fg={MUTED}>{`Model id for this provider — e.g. ${
+                    <text fg={themeTokens().muted}>{`Model id for this provider — e.g. ${
                       PROVIDERS.find((p) => p.id === (setup() as { provider?: string }).provider)
                         ?.example ?? "model-id"
                     }`}</text>
                     <Show when={setupModels() !== ""}>
                       <box marginTop={1}>
-                        <text fg={MUTED}>{setupModels()}</text>
+                        <text fg={themeTokens().muted}>{setupModels()}</text>
                       </box>
                     </Show>
                   </Show>
@@ -2214,7 +2272,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 <box marginTop={1} flexDirection="column">
                   <For each={messages().slice(-3)}>
                     {(message) => (
-                      <text fg={message.kind === "error" ? ERROR : MUTED}>{message.text}</text>
+                      <text
+                        fg={message.kind === "error" ? themeTokens().error : themeTokens().muted}
+                      >
+                        {message.text}
+                      </text>
                     )}
                   </For>
                 </box>
@@ -2235,7 +2297,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                     fallback={
                       <box flexDirection="column" alignItems="center">
                         <For each={markRows()}>
-                          {(row) => <text fg={MUTED}>{mark.left[row]}</text>}
+                          {(row) => <text fg={themeTokens().muted}>{mark.left[row]}</text>}
                         </For>
                         <box marginTop={1} flexDirection="column" alignItems="center">
                           <For each={markRows()}>
@@ -2253,7 +2315,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                       <For each={markRows()}>
                         {(row) => (
                           <box flexDirection="row">
-                            <text fg={MUTED}>{mark.left[row]}</text>
+                            <text fg={themeTokens().muted}>{mark.left[row]}</text>
                             <text>{"  "}</text>
                             <text>
                               <b>{mark.right[row]}</b>
@@ -2264,7 +2326,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                     </box>
                   </Show>
                   <box marginTop={1}>
-                    <text fg={MUTED}>the harness-first coding agent — /help for commands</text>
+                    <text fg={themeTokens().muted}>
+                      the harness-first coding agent — /help for commands
+                    </text>
                   </box>
                 </box>
               }
@@ -2286,9 +2350,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                           <text
                             fg={
                               message.kind === "tool" || message.kind === "info"
-                                ? MUTED
+                                ? themeTokens().muted
                                 : message.kind === "error"
-                                  ? ERROR
+                                  ? themeTokens().error
                                   : undefined
                             }
                           >
@@ -2302,6 +2366,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                 syntaxStyle={SYNTAX}
                                 filetype={filetypeOf(message.path)}
                                 wrapMode="none"
+                                addedSignColor={themeTokens().diffAdd}
+                                removedSignColor={themeTokens().diffDel}
+                                addedBg={themeTokens().diffAddBg}
+                                removedBg={themeTokens().diffDelBg}
+                                contextBg={themeTokens().diffContextBg}
+                                lineNumberFg={themeTokens().diffLineNumber}
+                                lineNumberBg={themeTokens().diffLineNumberBg}
                               />
                             </box>
                           </Show>
@@ -2333,11 +2404,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             flexShrink={0}
             border
             borderStyle="rounded"
-            borderColor={ACCENT}
+            borderColor={themeTokens().accent}
             paddingLeft={1}
             flexDirection="column"
           >
-            <text fg={ACCENT}>{"loop running — Ctrl+C to interrupt"}</text>
+            <text fg={themeTokens().accent}>{"loop running — Ctrl+C to interrupt"}</text>
             <text>{loopCardText(card())}</text>
           </box>
         )}
@@ -2349,16 +2420,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             flexShrink={0}
             border
             borderStyle="rounded"
-            borderColor={ACCENT}
+            borderColor={themeTokens().accent}
             paddingLeft={1}
             flexDirection="row"
           >
-            <text fg={ACCENT}>approve? </text>
+            <text fg={themeTokens().accent}>approve? </text>
             <text>{ask().text} </text>
-            <text fg={MUTED}>[y]es / [n]o</text>
+            <text fg={themeTokens().muted}>[y]es / [n]o</text>
             <Show when={ask().quickAdd}>
               {(qa: Accessor<QuickAddOffer>) => (
-                <text fg={MUTED}>{` / [a]lways ${qa().tool}: "${qa().pattern}"`}</text>
+                <text
+                  fg={themeTokens().muted}
+                >{` / [a]lways ${qa().tool}: "${qa().pattern}"`}</text>
               )}
             </Show>
           </box>
@@ -2374,27 +2447,35 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               flexShrink={0}
               border
               borderStyle="rounded"
-              borderColor={ACCENT}
+              borderColor={themeTokens().accent}
               paddingLeft={1}
               flexDirection="column"
             >
-              <text fg={ACCENT}>{p().title}</text>
+              <text fg={themeTokens().accent}>{p().title}</text>
               <Show when={p().filter !== ""}>
                 <text
-                  fg={WARN}
+                  fg={themeTokens().warn}
                 >{`  filter: ${p().filter}  (${items().length} match${items().length === 1 ? "" : "es"})`}</text>
               </Show>
               <Show
                 when={items().length > 0}
-                fallback={<text fg={MUTED}> no matches — Backspace to widen</text>}
+                fallback={<text fg={themeTokens().muted}> no matches — Backspace to widen</text>}
               >
                 <For each={items().slice(windowStart(), windowStart() + 9)}>
                   {(item, i) => (
                     <box flexDirection="row">
-                      <text fg={windowStart() + i() === p().index ? ACCENT : MUTED}>
+                      <text
+                        fg={
+                          windowStart() + i() === p().index
+                            ? themeTokens().accent
+                            : themeTokens().muted
+                        }
+                      >
                         {windowStart() + i() === p().index ? "❯ " : "  "}
                       </text>
-                      <text fg={windowStart() + i() === p().index ? undefined : MUTED}>
+                      <text
+                        fg={windowStart() + i() === p().index ? undefined : themeTokens().muted}
+                      >
                         {item.label}
                       </text>
                     </box>
@@ -2402,7 +2483,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 </For>
               </Show>
               <Show when={items().length > 9}>
-                <text fg={MUTED}>{`  … ${items().length} total`}</text>
+                <text fg={themeTokens().muted}>{`  … ${items().length} total`}</text>
               </Show>
             </box>
           )
@@ -2414,7 +2495,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           flexShrink={0}
           border
           borderStyle="rounded"
-          borderColor={MUTED}
+          borderColor={themeTokens().border}
           paddingLeft={1}
           flexDirection="column"
         >
@@ -2428,19 +2509,19 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           >
             {(row) => (
               <box flexDirection="row">
-                <text fg={row.absolute === cmdIndex() ? ACCENT : MUTED}>
+                <text fg={row.absolute === cmdIndex() ? themeTokens().accent : themeTokens().muted}>
                   {row.absolute === cmdIndex() ? "❯ " : "  "}
                 </text>
-                <text fg={row.absolute === cmdIndex() ? undefined : MUTED}>
+                <text fg={row.absolute === cmdIndex() ? undefined : themeTokens().muted}>
                   {`/${row.command.name}${row.command.args ? ` ${row.command.args}` : ""}`.padEnd(
                     18,
                   )}
                 </text>
-                <text fg={MUTED}>{row.command.description}</text>
+                <text fg={themeTokens().muted}>{row.command.description}</text>
               </box>
             )}
           </For>
-          <text fg={MUTED}>
+          <text fg={themeTokens().muted}>
             {` ↑↓ select · Tab complete · Enter run${cmdList().length > 8 ? ` · ${cmdList().length} commands` : ""}`}
           </text>
         </box>
@@ -2448,10 +2529,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
       <Show when={attachedImages().length > 0}>
         <box flexShrink={0} paddingLeft={1} flexDirection="row">
-          <text fg={ACCENT}>
+          <text fg={themeTokens().accent}>
             {`📎 ${attachedImages().length} image${attachedImages().length === 1 ? "" : "s"}: `}
           </text>
-          <text fg={MUTED}>
+          <text fg={themeTokens().muted}>
             {attachedImages()
               .map((img) => basename(img.path))
               .join(", ")}
@@ -2512,17 +2593,17 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       </box>
 
       <box flexShrink={0} height={1} paddingLeft={1} flexDirection="row">
-        <text fg={busy() ? ACCENT : MUTED}>
+        <text fg={busy() ? themeTokens().accent : themeTokens().muted}>
           {busy() ? `${SPINNER[spin()]} thinking… ` : status() ? `${status()}  ` : ""}
         </text>
         <Show when={ctxGauge() !== ""}>
-          <text fg={ctxDanger() ? WARN : MUTED}>{ctxGauge()}</text>
+          <text fg={ctxDanger() ? themeTokens().warn : themeTokens().muted}>{ctxGauge()}</text>
         </Show>
         <Show when={sessionCost() > 0}>
-          <text fg={MUTED}>{`  ·  ${formatUSD(sessionCost())}`}</text>
+          <text fg={themeTokens().muted}>{`  ·  ${formatUSD(sessionCost())}`}</text>
         </Show>
         <Show when={queued().length > 0}>
-          <text fg={WARN}>{`  ·  ⧗ ${queued().length} queued`}</text>
+          <text fg={themeTokens().warn}>{`  ·  ⧗ ${queued().length} queued`}</text>
         </Show>
       </box>
     </box>

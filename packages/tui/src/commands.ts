@@ -43,6 +43,10 @@ export interface CommandActions {
   loopPlan(goal: string): Promise<void>
   loopRun(allowDirty: boolean): Promise<void>
   loopStatusText(): string
+  /** Opens the theme picker (windowed, like /model). */
+  pickTheme(): void
+  /** Switches + persists (saveGlobalConfig) the named theme. */
+  setTheme(name: string): void
 }
 
 export interface SlashCommand {
@@ -284,6 +288,15 @@ export const COMMANDS: SlashCommand[] = [
         return a.loopPlan(goal)
       }
       a.error("usage: /loop plan <goal> | /loop run [--allow-dirty] | /loop status")
+    },
+  },
+  {
+    name: "theme",
+    args: "[name]",
+    description: "color theme (dark/light/dark-ansi/light-ansi/custom) — no arg opens the picker",
+    run: (arg, a) => {
+      if (arg.trim() === "") a.pickTheme()
+      else a.setTheme(arg.trim())
     },
   },
   {

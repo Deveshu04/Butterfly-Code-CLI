@@ -9,11 +9,19 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { now, runCommand, SessionJournal, saveHandoff, WorkQueue } from "@butterfly/core"
+import {
+  loadConfig,
+  now,
+  runCommand,
+  SessionJournal,
+  saveHandoff,
+  WorkQueue,
+} from "@butterfly/core"
 import { testRender } from "@opentui/solid"
 import { App, clearTerminalProgress, timelineToMessages } from "../src/app"
 import { NEWLINE_MARKER } from "../src/paste"
 import { installWin32ConsoleGuard } from "../src/terminal-win32"
+import { builtinTheme, DARK_TOKENS, LIGHT_TOKENS, themeTokens } from "../src/theme"
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))
@@ -605,13 +613,13 @@ test("Enter on a bare / runs the selected command, not the raw slash", async () 
         home={tempDir("bfly-home-")}
       />
     ),
-    { width: 100, height: 40 },
+    { width: 100, height: 45 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/")
   await t.waitForFrame((frame: string) => frame.includes("↑↓ select"))
   t.mockInput.pressEnter()
-  await t.waitForFrame((frame: string) => frame.includes("commands:"))
+  await waitForFrameSlow(t, (frame: string) => frame.includes("commands:"))
   expect(t.captureCharFrame()).not.toContain("did you mean")
   t.renderer.destroy()
 })
@@ -632,6 +640,101 @@ test("/plan toggles read-only mode with a header badge", async () => {
   t.mockInput.pressEnter()
   await t.waitForFrame((frame: string) => frame.includes("PLAN (read-only)"))
   expect(t.captureCharFrame()).toContain("again to exit")
+  t.renderer.destroy()
+})
+
+test("theme_mode event flips the reactive token store when no theme is pinned", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  expect(themeTokens()).toEqual(DARK_TOKENS)
+  t.renderer.emit("theme_mode", "light")
+  await t.renderOnce()
+  expect(themeTokens()).toEqual(LIGHT_TOKENS)
+  t.renderer.destroy()
+})
+
+test("a pinned config.theme is never overridden by an auto theme_mode event", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model", theme: "dark-ansi" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  expect(themeTokens()).toEqual(builtinTheme("dark-ansi"))
+  t.renderer.emit("theme_mode", "light")
+  await t.renderOnce()
+  expect(themeTokens()).toEqual(builtinTheme("dark-ansi"))
+  t.renderer.destroy()
+})
+
+test("/theme <name> switches the store and persists via saveGlobalConfig", async () => {
+  const home = tempDir("bfly-home-")
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{ model: "mock/model" }} home={home} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/theme light")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (frame) => frame.includes("theme set to light"))
+  expect(themeTokens()).toEqual(LIGHT_TOKENS)
+  const reloaded = loadConfig({ cwd: tempDir("bfly-tui-reload-"), home })
+  expect(reloaded.theme).toBe("light")
+  t.renderer.destroy()
+})
+
+test("/theme with no arg opens a picker listing the built-in theme names", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/theme")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (frame) => frame.includes("theme —"))
+  const frame = t.captureCharFrame()
+  expect(frame).toContain("dark")
+  expect(frame).toContain("light")
+  expect(frame).toContain("dark-ansi")
+  t.renderer.destroy()
+})
+
+test("/theme with an unknown name errors instead of silently switching to dark", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/theme bogus")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (frame) => frame.includes("unknown theme"))
+  expect(themeTokens()).toEqual(DARK_TOKENS)
   t.renderer.destroy()
 })
 

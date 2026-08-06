@@ -266,6 +266,34 @@ test("/loop with an unrecognized sub-verb reports usage via error, not a crash",
   expect(errors[0]).toContain("/loop")
 })
 
+test("/theme with no arg opens the picker via CommandActions.pickTheme", () => {
+  expect(COMMANDS.some((c) => c.name === "theme")).toBe(true)
+  const match = findCommand("/theme")
+  expect(match && "command" in match ? match.command.name : "").toBe("theme")
+  expect(match && "command" in match ? match.arg : "x").toBe("")
+
+  const calls: string[] = []
+  const actions = {
+    pickTheme: () => calls.push("picked"),
+    setTheme: (name: string) => calls.push(`set:${name}`),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["picked"])
+})
+
+test("/theme <name> dispatches to CommandActions.setTheme with the trimmed name", () => {
+  const match = findCommand("/theme  light ")
+  expect(match && "command" in match ? match.arg : "").toBe("light")
+
+  const calls: string[] = []
+  const actions = {
+    pickTheme: () => calls.push("picked"),
+    setTheme: (name: string) => calls.push(`set:${name}`),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["set:light"])
+})
+
 test("/paste-img is registered and invokes CommandActions.pasteImage", () => {
   expect(COMMANDS.some((c) => c.name === "paste-img")).toBe(true)
   const match = findCommand("/paste-img")
