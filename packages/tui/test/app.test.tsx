@@ -39,7 +39,10 @@ async function stagedGitFixture(cwd: string): Promise<void> {
   await runCommand("git add -A", { cwd })
 }
 
-function startFakeChatServer(replyText: string): { baseURL: string; stop: () => void } {
+function startFakeChatServer(
+  replyText: string,
+  opts: { delayMs?: number } = {},
+): { baseURL: string; stop: () => void } {
   const body =
     `data: ${JSON.stringify({
       id: "1",
@@ -50,6 +53,44 @@ function startFakeChatServer(replyText: string): { baseURL: string; stop: () => 
     `data: ${JSON.stringify({
       id: "1",
       choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    })}\n\n` +
+    "data: [DONE]\n\n"
+  const server = Bun.serve({
+    port: 0,
+    fetch: async () => {
+      if (opts.delayMs) await new Promise((resolve) => setTimeout(resolve, opts.delayMs))
+      return new Response(body, { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
+}
+
+function startFakeToolCallServer(command: string): { baseURL: string; stop: () => void } {
+  const body =
+    `data: ${JSON.stringify({
+      id: "1",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                type: "function",
+                function: { name: "bash", arguments: JSON.stringify({ command }) },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    })}\n\n` +
+    `data: ${JSON.stringify({
+      id: "1",
+      choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
       usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
     })}\n\n` +
     "data: [DONE]\n\n"
@@ -2238,4 +2279,95 @@ test("/loop run meters its token usage into the session cost — a loop never re
   } finally {
     server.stop()
   }
+}, 60_000)
+
+
+test("an approval that fires while the pager is open is NOT answerable by pager keys (incl. the [a] config write)", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await stagedGitFixture(cwd)
+  const server = startFakeChatServer("chore: pager modality test", { delayMs: 1_500 })
+  const t = await testRender(
+    () => (
+      <App
+        cwd={cwd}
+        config={{ model: "fake/mock-commit", providers: { fake: { baseURL: server.baseURL } } }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 240, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/commit")
+  t.mockInput.pressEnter()
+  await t.renderOnce()
+  t.mockInput.pressKey("o", { ctrl: true })
+  await waitForFrameSlow(t, (f) => f.includes("-- PAGER --"), 5_000)
+
+  // The ask box renders BELOW the pager pane, so it is visible — but its keys
+  // must not be live while the pager owns the keyboard.
+  const asked = await waitForFrameSlow(t, (f) => f.includes("approve?"), 20_000)
+  expect(asked).toContain("close the pager")
+
+  // n/N are pager nav; "a" would apply the persistent quick-add; y would run
+  // the commit. None of them may resolve the ask.
+  t.mockInput.pressKey("a")
+  t.mockInput.pressKey("y")
+  t.mockInput.pressKey("n")
+  await t.renderOnce()
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  await t.renderOnce()
+  expect(t.captureCharFrame()).toContain("approve?")
+  expect(existsSync(join(cwd, "butterfly.jsonc"))).toBe(false)
+
+  // Esc closes the pager; only then do the answer keys reach the ask.
+  t.mockInput.pressEscape()
+  await waitForFrameSlow(t, (f) => !f.includes("-- PAGER --"), 5_000)
+  expect(t.captureCharFrame()).toContain("approve?")
+  t.mockInput.pressKey("n")
+  await waitForFrameSlow(t, (f) => !f.includes("approve?"), 10_000)
+  expect(existsSync(join(cwd, "butterfly.jsonc"))).toBe(false)
+  t.renderer.destroy()
+  server.stop()
+}, 60_000)
+
+
+test("Ctrl+C during a real in-turn approval denies it, journals the paired tool.result, and unblocks the turn", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeToolCallServer("echo interrupted-approval")
+  const t = await testRender(
+    () => (
+      <App
+        cwd={cwd}
+        config={{ model: "fake/mock-tools", providers: { fake: { baseURL: server.baseURL } } }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 140, height: 30, exitOnCtrlC: false },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("run the thing")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f) => f.includes("approve?"), 25_000)
+  t.mockInput.pressKey("c", { ctrl: true })
+  await waitForFrameSlow(t, (f) => f.includes("turn interrupted"), 15_000)
+  // The prompt is gone (resolved, not parked) and the turn is no longer busy.
+  expect(t.captureCharFrame()).not.toContain("approve?")
+
+  const sessionsDir = join(cwd, ".butterfly", "sessions")
+  const file = readdirSync(sessionsDir).find((name) => name.endsWith(".jsonl"))
+  expect(file).toBeDefined()
+  const { events } = SessionJournal.replay(join(sessionsDir, file ?? ""))
+  const calls = events.filter((e) => e.type === "tool.call")
+  const results = events.filter((e) => e.type === "tool.result")
+  expect(calls.length).toBeGreaterThan(0)
+  // Every journaled tool.call got its paired tool.result — no orphan
+  // tool_use, which every provider rejects on the next assemble().
+  expect(results.map((r) => (r.type === "tool.result" ? r.callId : ""))).toEqual(
+    calls.map((c) => (c.type === "tool.call" ? c.callId : "")),
+  )
+  const denied = results.find((r) => r.type === "tool.result" && r.isError)
+  expect(denied && denied.type === "tool.result" ? denied.output : "").toContain("bash")
+  t.renderer.destroy()
+  server.stop()
 }, 60_000)

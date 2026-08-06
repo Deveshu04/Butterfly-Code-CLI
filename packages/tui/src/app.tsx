@@ -1983,7 +1983,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       return
     }
     const ask = pendingAsk()
-    if (ask) {
+    if (ask && !pagerOpen()) {
       key.preventDefault()
       if (key.name === "y") ask.resolve("allow")
       if (key.name === "n" || key.name === "escape") ask.resolve("deny")
@@ -2426,13 +2426,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           >
             <text fg={themeTokens().accent}>approve? </text>
             <text>{ask().text} </text>
-            <text fg={themeTokens().muted}>[y]es / [n]o</text>
-            <Show when={ask().quickAdd}>
-              {(qa: Accessor<QuickAddOffer>) => (
-                <text
-                  fg={themeTokens().muted}
-                >{` / [a]lways ${qa().tool}: "${qa().pattern}"`}</text>
-              )}
+            <Show
+              when={!pagerOpen()}
+              fallback={<text fg={themeTokens().warn}>close the pager (Esc) to answer</text>}
+            >
+              <text fg={themeTokens().muted}>[y]es / [n]o</text>
+              <Show when={ask().quickAdd}>
+                {(qa: Accessor<QuickAddOffer>) => (
+                  <text
+                    fg={themeTokens().muted}
+                  >{` / [a]lways ${qa().tool}: "${qa().pattern}"`}</text>
+                )}
+              </Show>
             </Show>
           </box>
         )}
