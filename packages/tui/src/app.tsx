@@ -383,8 +383,8 @@ function ThinkingBlock(props: {
   )
 }
 
-function splitLabelValue(line: string): { label: string; value: string } | undefined {
-  const match = line.match(/^(\s*\S(?:.*\S)?)( {2,})(\S.*)$/)
+export function splitLabelValue(line: string): { label: string; value: string } | undefined {
+  const match = line.match(/^(\s*\S.*?)( {2,})(\S.*)$/)
   if (!match) return undefined
   const [, label, gap, value] = match
   if (label === undefined || gap === undefined || value === undefined) return undefined

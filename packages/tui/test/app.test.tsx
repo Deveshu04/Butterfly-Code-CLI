@@ -19,7 +19,7 @@ import {
 } from "@butterfly/core"
 import type { CapturedFrame } from "@opentui/core"
 import { testRender } from "@opentui/solid"
-import { App, clearTerminalProgress, timelineToMessages } from "../src/app"
+import { App, clearTerminalProgress, splitLabelValue, timelineToMessages } from "../src/app"
 import { NEWLINE_MARKER } from "../src/paste"
 import { installWin32ConsoleGuard } from "../src/terminal-win32"
 import { builtinTheme, DARK_TOKENS, LIGHT_TOKENS, themeTokens } from "../src/theme"
@@ -3675,6 +3675,160 @@ test("the turn-end sweep is idempotent — a block already collapsed by the answ
     expect(settled).toContain(`thought for ${frozen?.[1]}s`)
     expect(settled).not.toContain("thinking…")
 
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+
+function spansOfLine(
+  t: { captureSpans: () => CapturedFrame },
+  lineNeedle: string,
+): { text: string; fg: [number, number, number] }[] {
+  for (const line of t.captureSpans().lines) {
+    const text = line.spans.map((s) => s.text).join("")
+    if (text.includes(lineNeedle)) {
+      return line.spans.map((s) => {
+        const [r, g, b] = s.fg.toInts()
+        return { text: s.text, fg: [r, g, b] as [number, number, number] }
+      })
+    }
+  }
+  throw new Error(`no captured line containing ${JSON.stringify(lineNeedle)}`)
+}
+
+test("splitLabelValue splits at the FIRST 2+-space run, so a primary value is never left on the muted side", () => {
+  expect(splitLabelValue("  system prompt   ~558 tok  █████")).toEqual({
+    label: "  system prompt   ",
+    value: "~558 tok  █████",
+  })
+  expect(splitLabelValue("  system prompt   ~558 tok")).toEqual({
+    label: "  system prompt   ",
+    value: "~558 tok",
+  })
+  // /doctor's journal block: label column, path/count is the value.
+  expect(splitLabelValue("  path            ~/proj/.butterfly/sessions/a.jsonl")).toEqual({
+    label: "  path            ",
+    value: "~/proj/.butterfly/sessions/a.jsonl",
+  })
+  expect(splitLabelValue("  events          1,204")).toEqual({
+    label: "  events          ",
+    value: "1,204",
+  })
+  // /doctor's config-lint rows carry no column at all (single spaces) — they
+  // must stay whole rather than be forced into a two-tone shape they lack.
+  expect(
+    splitLabelValue("  [unknown-model] mock/model is not in the models.dev catalog"),
+  ).toBeUndefined()
+  expect(splitLabelValue("doctor — context audit:")).toBeUndefined()
+  expect(splitLabelValue("  1  2026-08-06 12:34  fix the bar  (current)")).toEqual({
+    label: "  1  ",
+    value: "2026-08-06 12:34  fix the bar  (current)",
+  })
+  expect(splitLabelValue("  /status                   show session status")).toEqual({
+    label: "  /status                   ",
+    value: "show session status",
+  })
+  // /status rows.
+  expect(splitLabelValue("model      fake/cat-model")).toEqual({
+    label: "model      ",
+    value: "fake/cat-model",
+  })
+})
+
+test("with a real catalog limit, /context's bar row paints the token count as primary content — only the label is muted", async () => {
+  const home = tempDir("bfly-home-")
+  seedCatalogCache(home, "fake", "cat-model", { input: 1, output: 2 })
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{ model: "fake/cat-model" }} home={home} />,
+    { width: 120, height: 34 },
+  )
+  await t.renderOnce()
+  await waitForFrameSlow(t, (frame) => frame.includes("128.0k"))
+  t.mockInput.typeText("/context")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (frame) => frame.includes("system prompt") && frame.includes("█"))
+
+  const spans = spansOfLine(t, "system prompt")
+  const muted = hexToInts(DARK_TOKENS.muted)
+  const label = spans.find((s) => s.text.includes("system prompt"))
+  const value = spans.find((s) => s.text.includes("tok"))
+  expect(label).toBeDefined()
+  expect(value).toBeDefined()
+  expect(label?.fg).toEqual(muted)
+  expect(value?.fg).not.toEqual(muted)
+  t.renderer.destroy()
+}, 30_000)
+
+test("a tool-call row is a summarized one-liner, never a raw JSON dump", () => {
+  // edit/read collapse to the path — the args object is fully suppressed
+  // (the diff card two rows later already carries the content).
+  const rows = timelineToMessages([
+    {
+      time: now(),
+      type: "tool.call",
+      callId: "c1",
+      name: "edit",
+      input: {
+        file_path: "packages/tui/src/app.tsx",
+        old_string: "export function greet(name) {",
+        new_string: "export function greet(name: string): string {",
+      },
+    },
+    {
+      time: now(),
+      type: "tool.call",
+      callId: "c2",
+      name: "grep",
+      input: { pattern: "splitLabelValue", glob: "*.tsx" },
+    },
+    {
+      time: now(),
+      type: "tool.call",
+      callId: "c3",
+      name: "memory",
+      input: { op: "search", query: "alpha ".repeat(40) },
+    },
+  ])
+  expect(rows[0]?.text).toBe("edit packages/tui/src/app.tsx")
+  expect(rows[0]?.text).not.toContain("old_string")
+  expect(rows[0]?.text).not.toContain("{")
+  expect(rows[0]?.isCall).toBe(true)
+  expect(rows[1]?.text).toBe("grep splitLabelValue *.tsx")
+  const fallback = rows[2]?.text ?? ""
+  expect(fallback.startsWith("memory ")).toBe(true)
+  expect(fallback.endsWith("…")).toBe(true)
+  expect(fallback.length).toBeLessThan(120)
+  expect(fallback).not.toContain("alph…")
+})
+
+test("the rendered call row shows the summary, not the JSON the model sent", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  // `read` is auto-allowed by the TUI's default rules, so this reaches a real
+  // rendered call row with no approval detour in the way.
+  const server = startFakeSequenceServer([
+    toolCallStreamBody("read", { file_path: "app.ts", offset: 0, limit: 2000 }, "call_r"),
+    textStreamBody("read it"),
+  ])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-toolrow", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 140, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("read the file")
+    t.mockInput.pressEnter()
+    const frame = await waitForFrameSlow(t, (f) => f.includes("read it"))
+    expect(frame).toContain("read app.ts")
+    expect(frame).not.toContain("file_path")
     t.renderer.destroy()
   } finally {
     server.stop()
