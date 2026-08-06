@@ -136,7 +136,13 @@ export {
   isCompiledExecutable,
 } from "./platform/embedded-assets"
 // Provider port + adapter
-export { AiSdkProvider, mapFinishReason, mapUsage } from "./provider/aisdk-adapter"
+export { AiSdkProvider, buildErrorEvent, mapFinishReason, mapUsage } from "./provider/aisdk-adapter"
+export {
+  classifyProviderError,
+  describeProviderError,
+  type ProviderErrorInfo,
+  type ProviderErrorKind,
+} from "./provider/describe-error"
 export {
   createModelResolver,
   type ModelResolver,

@@ -1,4 +1,5 @@
 import type { Usage } from "../session/events"
+import type { ProviderErrorInfo } from "./describe-error"
 
 
 export type ChatMessagePart =
@@ -43,7 +44,7 @@ export type TurnEvent =
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-call"; callId: string; name: string; input: unknown }
   | { type: "finish"; reason: FinishReason; usage: Usage }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; info?: ProviderErrorInfo }
 
 export interface ProviderPort {
   streamTurn(request: TurnRequest): AsyncIterable<TurnEvent>

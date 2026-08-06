@@ -1,5 +1,10 @@
 import { jsonSchema, type ModelMessage, streamText, tool } from "ai"
 import type { Usage } from "../session/events"
+import {
+  classifyProviderError,
+  describeProviderError,
+  type ProviderErrorInfo,
+} from "./describe-error"
 import type { ModelResolver } from "./hub"
 import type {
   ChatMessage,
@@ -111,9 +116,14 @@ function toSdkTools(specs: ToolSpec[] | undefined) {
   )
 }
 
-function describeError(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return String(error)
+export function buildErrorEvent(
+  error: unknown,
+  providerId: string,
+): Extract<TurnEvent, { type: "error" }> {
+  const classified = classifyProviderError(error)
+  const info: ProviderErrorInfo =
+    classified.provider === undefined ? { ...classified, provider: providerId } : classified
+  return { type: "error", message: describeProviderError(info), info }
 }
 
 const STREAM_TIMEOUT_MS = Number(process.env["BUTTERFLY_STREAM_TIMEOUT_MS"]) || 300_000
@@ -182,14 +192,14 @@ export class AiSdkProvider implements ProviderPort {
             finishReason = mapFinishReason(part.finishReason)
             break
           case "error":
-            yield { type: "error", message: describeError(part.error) }
+            yield buildErrorEvent(part.error, providerId)
             return
           default:
             break
         }
       }
     } catch (error) {
-      yield { type: "error", message: describeError(error) }
+      yield buildErrorEvent(error, providerId)
       return
     }
 
