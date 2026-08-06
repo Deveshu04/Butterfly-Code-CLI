@@ -239,8 +239,29 @@ export async function runUserTurn(
       })
     }
 
+    const abandonPendingCalls = (reason: string): void => {
+      for (const call of toolCalls) {
+        const output = `[not executed — ${reason}]`
+        deps.onEvent?.({
+          type: "tool-result",
+          callId: call.callId,
+          name: call.name,
+          output,
+          isError: true,
+        })
+        journal.append({
+          type: "tool.result",
+          callId: call.callId,
+          output,
+          isError: true,
+          time: now(),
+        })
+      }
+    }
+
     if (deps.budgetTokens !== undefined && totals.input + totals.output >= deps.budgetTokens) {
       budgetExceeded = true
+      abandonPendingCalls("budget stop")
       break
     }
 
@@ -267,6 +288,7 @@ export async function runUserTurn(
           type: "notice",
           text: `dollar budget reached ($${spent.toFixed(2)} of $${deps.maxSpendUSD.toFixed(2)}) — stopping this turn`,
         })
+        abandonPendingCalls("budget stop")
         break
       }
     }
@@ -379,6 +401,7 @@ export async function runUserTurn(
       }
       continue
     }
+    abandonPendingCalls("the turn ended before this call ran")
     break
   }
 

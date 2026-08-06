@@ -3,7 +3,10 @@ import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { z } from "zod"
+import { assemble } from "../src/session/assembly"
+import type { SessionEvent } from "../src/session/events"
 import { SessionJournal } from "../src/session/journal"
+import { project } from "../src/session/projector"
 import { type RunnerDeps, type RunnerEvent, runUserTurn } from "../src/session/runner"
 import { ToolRegistry } from "../src/tool/registry"
 import { MockProvider } from "./helpers/mock-provider"
@@ -207,4 +210,96 @@ test("onEvent streams deltas, tool calls, and tool results", async () => {
   expect(seen).toContain("tool-call")
   expect(seen).toContain("tool-result")
   expect(seen).toContain("text-delta")
+})
+
+function assertPaired(events: SessionEvent[]): void {
+  const calls = events
+    .filter((e) => e.type === "tool.call")
+    .map((e) => (e as { callId: string }).callId)
+  const results = events
+    .filter((e) => e.type === "tool.result")
+    .map((e) => (e as { callId: string }).callId)
+  expect(results).toEqual(calls)
+}
+
+test("a TOKEN budget stop mid-batch still journals a result for every pending call", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "tool-call", callId: "c1", name: "echo", input: { text: "one" } },
+      { type: "finish", reason: "tool-calls", usage: bigUsage },
+    ],
+    [
+      { type: "tool-call", callId: "c2", name: "echo", input: { text: "two" } },
+      { type: "tool-call", callId: "c3", name: "echo", input: { text: "three" } },
+      { type: "finish", reason: "tool-calls", usage: bigUsage },
+    ],
+  ])
+  const deps = makeDeps(provider, { budgetTokens: 100_000 })
+  const outcome = await runUserTurn(deps, "spend a lot")
+  expect(outcome.budgetExceeded).toBe(true)
+
+  const { events } = SessionJournal.replay(deps.journal.path)
+  assertPaired(events)
+  const abandoned = events.filter(
+    (e) => e.type === "tool.result" && e.isError && e.output.includes("budget stop"),
+  )
+  expect(abandoned.length).toBe(2)
+
+  // The invariant that actually matters: the very next turn must assemble
+  // into something a provider will accept — every assistant toolCall id
+  // answered by a tool message.
+  const messages = assemble({
+    system: "s",
+    timeline: project(SessionJournal.replay(deps.journal.path).header, events).timeline,
+  })
+  const called = new Set<string>()
+  const answered = new Set<string>()
+  for (const message of messages) {
+    if (message.role === "assistant")
+      for (const call of message.toolCalls ?? []) called.add(call.callId)
+    if (message.role === "tool") answered.add(message.callId)
+  }
+  expect(called.size).toBeGreaterThan(0)
+  expect([...called].every((id) => answered.has(id))).toBe(true)
+})
+
+test("a DOLLAR budget stop mid-batch pairs its pending calls too", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "tool-call", callId: "c1", name: "echo", input: { text: "one" } },
+      { type: "finish", reason: "tool-calls", usage: bigUsage },
+    ],
+    [
+      { type: "tool-call", callId: "c2", name: "echo", input: { text: "two" } },
+      { type: "finish", reason: "tool-calls", usage: bigUsage },
+    ],
+  ])
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, {
+    cost: { input: 10, output: 30 },
+    maxSpendUSD: 1.0,
+    onEvent: (event) => seen.push(event),
+  })
+  const outcome = await runUserTurn(deps, "spend dollars")
+  expect(outcome.budgetExceeded).toBe(true)
+
+  const { events } = SessionJournal.replay(deps.journal.path)
+  assertPaired(events)
+  // The UI hears about the abandoned call too — no tool row left spinning.
+  expect(
+    seen.some((e) => e.type === "tool-result" && e.callId === "c2" && e.isError === true),
+  ).toBe(true)
+})
+
+test("tool calls emitted with a non-tool-calls finish reason are still answered", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "tool-call", callId: "c1", name: "echo", input: { text: "orphan" } },
+      { type: "finish", reason: "stop", usage: bigUsage },
+    ],
+  ])
+  const deps = makeDeps(provider)
+  await runUserTurn(deps, "confuse the loop")
+  const { events } = SessionJournal.replay(deps.journal.path)
+  assertPaired(events)
 })
