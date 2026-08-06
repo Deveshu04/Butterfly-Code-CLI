@@ -24,6 +24,25 @@ test("foldTimeline excludes hook.run events — bookkeeping only, like turn.snap
   expect(entries.map((e) => e.event.type)).toEqual(["message.user", "message.assistant"])
 })
 
+test("foldTimeline excludes bgtask.start/bgtask.end events — bookkeeping only", () => {
+  const events: SessionEvent[] = [
+    { type: "message.user", id: "u1", text: "run it in the background", time: t },
+    {
+      type: "bgtask.start",
+      id: "abc12345",
+      command: "sleep 30",
+      pid: 4242,
+      logPath: "/tmp/abc12345.log",
+      keepAlive: false,
+      time: t,
+    },
+    { type: "message.assistant", id: "a1", text: "started task abc12345", time: t },
+    { type: "bgtask.end", id: "abc12345", status: "exited", exitCode: 0, time: t },
+  ]
+  const { entries } = foldTimeline(events)
+  expect(entries.map((e) => e.event.type)).toEqual(["message.user", "message.assistant"])
+})
+
 test("safeRewindIndex passes through a turn-start checkpoint (no callId) unchanged", () => {
   const events: SessionEvent[] = [
     { type: "turn.snapshot", tree: "a".repeat(40), untracked: [], time: t },

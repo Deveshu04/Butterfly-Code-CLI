@@ -1,4 +1,6 @@
+import { join } from "node:path"
 import { z } from "zod"
+import { BG_TASKS_STATE_KEY, BgTaskRegistry } from "../bg-tasks"
 import type { ToolDefinition } from "../registry"
 import { DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS, runCommand } from "../shell"
 
@@ -11,15 +13,43 @@ export const bashInput = z.object({
     .max(MAX_COMMAND_TIMEOUT_MS)
     .optional()
     .describe("Timeout in milliseconds (default 120000)"),
+  background: z
+    .boolean()
+    .optional()
+    .describe(
+      "Run in the background: returns immediately with a task id instead of waiting for the command to finish. Output streams to a log file (path returned) — read it with the read tool to check progress, or use /tasks. Use for long-running commands (servers, watchers, long builds).",
+    ),
+  keepAlive: z
+    .boolean()
+    .optional()
+    .describe(
+      "Only meaningful with background:true. Without it, the task is killed when the session ends. Set true to let it survive session exit.",
+    ),
 })
+
+function bgRegistry(ctx: { cwd: string; state: Record<string, unknown> }): BgTaskRegistry {
+  const existing = ctx.state[BG_TASKS_STATE_KEY]
+  if (existing instanceof BgTaskRegistry) return existing
+  const registry = new BgTaskRegistry({ cwd: ctx.cwd, logDir: join(ctx.cwd, ".butterfly", "bg") })
+  ctx.state[BG_TASKS_STATE_KEY] = registry
+  return registry
+}
 
 export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
   name: "bash",
   description:
-    "Execute one shell command in the workspace (stateless — no shell state persists between calls). POSIX syntax. Default timeout 2 minutes, max 10. Non-zero exit codes are reported as errors with the output.",
+    "Execute one shell command in the workspace (stateless — no shell state persists between calls). POSIX syntax. Default timeout 2 minutes, max 10. Non-zero exit codes are reported as errors with the output. background:true runs it detached instead of waiting.",
   inputSchema: bashInput,
   permissionTarget: (input) => input.command,
   async execute(input, ctx) {
+    if (input.background === true) {
+      const registry = bgRegistry(ctx)
+      const record = registry.spawn(input.command, { keepAlive: input.keepAlive === true })
+      return {
+        output: `Started background task ${record.id} (pid ${record.pid}). Output streaming to ${record.logPath} — read it with the read tool to check progress. Use /tasks show ${record.id} or /tasks kill ${record.id}.`,
+      }
+    }
+
     const result = await runCommand(input.command, { cwd: ctx.cwd, timeoutMs: input.timeout })
 
     const parts: string[] = []

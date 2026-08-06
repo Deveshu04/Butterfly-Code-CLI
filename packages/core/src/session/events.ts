@@ -130,6 +130,22 @@ export const SessionEvent = z.discriminatedUnion("type", [
     chars: z.number(),
     truncated: z.boolean(),
   }),
+  z.object({
+    ...base,
+    type: z.literal("bgtask.start"),
+    id: z.string(),
+    command: z.string(),
+    pid: z.number(),
+    logPath: z.string(),
+    keepAlive: z.boolean(),
+  }),
+  z.object({
+    ...base,
+    type: z.literal("bgtask.end"),
+    id: z.string(),
+    status: z.enum(["exited", "killed"]),
+    exitCode: z.number().optional(),
+  }),
 ])
 export type SessionEvent = z.infer<typeof SessionEvent>
 

@@ -260,9 +260,18 @@ export {
 } from "./session/sessions"
 export { createSnapshot, listUntracked, restoreSnapshot } from "./session/snapshot"
 // Tools
+export {
+  BG_LOG_CAP_BYTES,
+  BG_TASKS_STATE_KEY,
+  type BgTaskJournalSink,
+  type BgTaskRecord,
+  BgTaskRegistry,
+  type BgTaskRegistryOptions,
+  type BgTaskStatus,
+} from "./tool/bg-tasks"
 export { type ToolContext, type ToolDefinition, ToolRegistry } from "./tool/registry"
 export { DEFAULT_MODEL_OUTPUT_CHARS, settle } from "./tool/settle"
-export { resolveShell, runCommand } from "./tool/shell"
+export { killTree, resolveShell, runCommand } from "./tool/shell"
 export { bashTool } from "./tool/tools/bash"
 export { editTool } from "./tool/tools/edit"
 export { globTool } from "./tool/tools/glob"

@@ -54,6 +54,9 @@ export function foldTimeline(events: SessionEvent[]): {
         break
       case "session.handoff":
         break
+      case "bgtask.start":
+      case "bgtask.end":
+        break
       default:
         entries.push({ index, event })
     }

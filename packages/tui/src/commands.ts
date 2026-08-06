@@ -37,6 +37,9 @@ export interface CommandActions {
   commit(): Promise<void>
   pasteImage(): Promise<void>
   handoff(): Promise<void>
+  tasksText(): string
+  killTask(id: string): void
+  showTask(id: string): string
 }
 
 export interface SlashCommand {
@@ -226,6 +229,29 @@ export const COMMANDS: SlashCommand[] = [
     args: "",
     description: "generate a commit message from the staged diff, commit on approval",
     run: (_arg, a) => a.commit(),
+  },
+  {
+    name: "tasks",
+    args: "[kill|show <id>]",
+    description: "background bash tasks (bash background:true): list, kill <id>, or show <id>",
+    run: (arg, a) => {
+      const trimmed = arg.trim()
+      if (trimmed === "") {
+        a.info(a.tasksText())
+        return
+      }
+      const [verb, ...rest] = trimmed.split(/\s+/)
+      const id = rest.join(" ")
+      if (verb === "kill" && id) {
+        a.killTask(id)
+        return
+      }
+      if (verb === "show" && id) {
+        a.info(a.showTask(id))
+        return
+      }
+      a.error("usage: /tasks | /tasks kill <id> | /tasks show <id>")
+    },
   },
   {
     name: "paste-img",

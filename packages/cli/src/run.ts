@@ -2,6 +2,8 @@ import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 import {
   AiSdkProvider,
+  BG_TASKS_STATE_KEY,
+  BgTaskRegistry,
   bashTool,
   buildSkeleton,
   buildSystem,
@@ -245,6 +247,14 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
   applyHeadlessAttention(decideAttention({ kind: "turn.start" }, attentionState, attentionConfig))
   const stopExitClear = installProgressExitClear()
 
+  const state: Record<string, unknown> = {}
+  const bgTasks = new BgTaskRegistry({
+    cwd,
+    logDir: join(cwd, ".butterfly", "bg"),
+    journal,
+  })
+  state[BG_TASKS_STATE_KEY] = bgTasks
+
   let turnDetail: string | undefined
   try {
     const outcome = await runUserTurn(
@@ -256,6 +266,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
         model: modelRef,
         system,
         cwd,
+        state,
         ...(opts.maxSteps !== undefined ? { maxSteps: opts.maxSteps } : {}),
         ...(opts.budget !== undefined ? { budgetTokens: opts.budget } : {}),
         createSnapshot,
@@ -332,5 +343,6 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
       decideAttention({ kind: "turn.end", detail: turnDetail }, attentionState, attentionConfig),
     )
     stopExitClear()
+    bgTasks.reap()
   }
 }

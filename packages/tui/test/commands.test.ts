@@ -123,6 +123,57 @@ test("/handoff is registered and invokes CommandActions.handoff", () => {
   expect(called).toBe(1)
 })
 
+test("/tasks with no arg lists background tasks via CommandActions.tasksText", () => {
+  expect(COMMANDS.some((c) => c.name === "tasks")).toBe(true)
+  const match = findCommand("/tasks")
+  expect(match && "command" in match ? match.command.name : "").toBe("tasks")
+  expect(match && "command" in match ? match.arg : "x").toBe("")
+
+  const calls: string[] = []
+  const actions = {
+    tasksText: () => "no background tasks this session.",
+    info: (text: string) => calls.push(text),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["no background tasks this session."])
+})
+
+test("/tasks kill <id> dispatches to CommandActions.killTask with the id", () => {
+  const match = findCommand("/tasks kill abc12345")
+  expect(match && "command" in match ? match.command.name : "").toBe("tasks")
+  expect(match && "command" in match ? match.arg : "").toBe("kill abc12345")
+
+  const calls: string[] = []
+  const actions = {
+    killTask: (id: string) => calls.push(id),
+    error: () => {},
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["abc12345"])
+})
+
+test("/tasks show <id> dispatches to CommandActions.showTask and surfaces its text via info", () => {
+  const match = findCommand("/tasks show abc12345")
+  const calls: string[] = []
+  const actions = {
+    showTask: (id: string) => `task ${id}: exited (0)`,
+    info: (text: string) => calls.push(text),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["task abc12345: exited (0)"])
+})
+
+test("/tasks with an unrecognized sub-verb reports usage via error, not a crash", () => {
+  const match = findCommand("/tasks frobnicate abc12345")
+  const errors: string[] = []
+  const actions = {
+    error: (text: string) => errors.push(text),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(errors.length).toBe(1)
+  expect(errors[0]).toContain("/tasks")
+})
+
 test("/paste-img is registered and invokes CommandActions.pasteImage", () => {
   expect(COMMANDS.some((c) => c.name === "paste-img")).toBe(true)
   const match = findCommand("/paste-img")

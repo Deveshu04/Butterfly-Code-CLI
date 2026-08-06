@@ -1,8 +1,10 @@
-import { expect, test } from "bun:test"
+import { afterEach, expect, test } from "bun:test"
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { BG_TASKS_STATE_KEY, type BgTaskRegistry } from "../src/tool/bg-tasks"
 import type { ToolContext } from "../src/tool/registry"
+import { ToolRegistry } from "../src/tool/registry"
 import { resolveShell, runCommand } from "../src/tool/shell"
 import { bashTool } from "../src/tool/tools/bash"
 import { editTool } from "../src/tool/tools/edit"
@@ -11,6 +13,19 @@ import { grepTool, resolveRipgrep } from "../src/tool/tools/grep"
 function ctx(cwd: string): ToolContext {
   return { cwd, rules: { "*": "allow" }, state: {} }
 }
+
+// Detached background spawns must never leak across tests — kill anything
+// still running after each test, keepAlive included.
+const liveStates: Record<string, unknown>[] = []
+afterEach(() => {
+  for (const state of liveStates.splice(0)) {
+    const registry = state[BG_TASKS_STATE_KEY] as BgTaskRegistry | undefined
+    registry?.reap()
+    for (const task of registry?.list() ?? []) {
+      if (task.status === "running") registry?.kill(task.id)
+    }
+  }
+})
 
 function fixtureDir(): string {
   return mkdtempSync(join(tmpdir(), "bfly-shell-"))
@@ -67,6 +82,61 @@ test("bash tool says so when a command produces no output", async () => {
   const result = await bashTool.execute({ command: "true" }, ctx(fixtureDir()))
   expect(result.output).toContain("no output")
 }, 20_000)
+
+
+test("background:true spawns detached — returns fast with a task id + log path, not waiting for the command", async () => {
+  const state: Record<string, unknown> = {}
+  liveStates.push(state)
+  const before = Date.now()
+  const result = await bashTool.execute(
+    { command: "sleep 5", background: true },
+    { cwd: fixtureDir(), rules: { "*": "allow" }, state },
+  )
+  expect(Date.now() - before).toBeLessThan(1_000)
+  expect(result.isError).toBeFalsy()
+  const registry = state[BG_TASKS_STATE_KEY] as BgTaskRegistry
+  expect(registry).toBeDefined()
+  const tasks = registry.list()
+  expect(tasks.length).toBe(1)
+  expect(result.output).toContain(tasks[0]?.id ?? "")
+  expect(result.output).toContain(tasks[0]?.logPath ?? "")
+}, 20_000)
+
+test("repeated background calls against the same ctx.state share one registry", async () => {
+  const state: Record<string, unknown> = {}
+  liveStates.push(state)
+  const callCtx: ToolContext = { cwd: fixtureDir(), rules: { "*": "allow" }, state }
+  await bashTool.execute({ command: "echo one", background: true }, callCtx)
+  await bashTool.execute({ command: "echo two", background: true }, callCtx)
+  const registry = state[BG_TASKS_STATE_KEY] as BgTaskRegistry
+  expect(registry.list().length).toBe(2)
+}, 20_000)
+
+test("background bash goes through the SAME permission gate as foreground bash", async () => {
+  const registry = new ToolRegistry()
+  registry.register(bashTool)
+  const state: Record<string, unknown> = {}
+  liveStates.push(state)
+  const result = await registry.run(
+    "bash",
+    { command: "echo nope", background: true },
+    { cwd: fixtureDir(), rules: { bash: "deny" }, state },
+  )
+  expect(result.isError).toBe(true)
+  expect(result.output).toContain("Permission denied")
+  expect(state[BG_TASKS_STATE_KEY]).toBeUndefined()
+})
+
+test("background bash without a pre-seeded registry still works (lazy, no journal)", async () => {
+  const state: Record<string, unknown> = {}
+  liveStates.push(state)
+  const result = await bashTool.execute(
+    { command: "echo lazy", background: true },
+    { cwd: fixtureDir(), rules: { "*": "allow" }, state },
+  )
+  expect(result.isError).toBeFalsy()
+  expect(state[BG_TASKS_STATE_KEY]).toBeDefined()
+})
 
 
 test("resolveRipgrep finds an rg binary", async () => {

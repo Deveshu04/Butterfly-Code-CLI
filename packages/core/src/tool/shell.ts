@@ -25,7 +25,7 @@ export function resolveShell(): { exe: string; args: (cmd: string) => string[] }
   return { exe: process.env["COMSPEC"] ?? "cmd.exe", args: (c) => ["/d", "/s", "/c", c] }
 }
 
-function killTree(proc: ReturnType<typeof Bun.spawn>): void {
+export function killTree(proc: ReturnType<typeof Bun.spawn>): void {
   if (process.platform === "win32") {
     Bun.spawnSync(["taskkill", "/PID", String(proc.pid), "/T", "/F"], {
       stdout: "ignore",

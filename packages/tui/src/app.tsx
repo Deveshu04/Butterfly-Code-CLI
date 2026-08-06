@@ -4,6 +4,8 @@ import { basename, isAbsolute, join } from "node:path"
 import {
   AiSdkProvider,
   type AttentionAction,
+  BG_TASKS_STATE_KEY,
+  BgTaskRegistry,
   type ButterflyConfig,
   bashTool,
   buildSkeleton,
@@ -421,6 +423,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const session = { journal: SessionJournal.create(join(props.cwd, ".butterfly", "sessions")) }
   const state: Record<string, unknown> = {}
+  const bgTasks = new BgTaskRegistry({
+    cwd: props.cwd,
+    logDir: join(props.cwd, ".butterfly", "bg"),
+    journal: session.journal,
+    onEnd: (record) => {
+      push({
+        kind: "info",
+        text: `background task ${record.id} ${record.status}${record.exitCode !== undefined ? ` (exit ${record.exitCode})` : ""} — ${record.command}`,
+      })
+    },
+  })
+  state[BG_TASKS_STATE_KEY] = bgTasks
   let lastListing: SessionSummary[] = []
   const customCommands = loadCustomCommands([
     join(props.cwd, ".butterfly", "commands"),
@@ -527,6 +541,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     })
 
   const quit = () => {
+    bgTasks.reap()
     try {
       renderer.destroy()
     } catch {
@@ -1088,6 +1103,36 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       } catch (error) {
         push({ kind: "error", text: `toggle failed: ${String(error)}` })
       }
+    },
+    tasksText: () => {
+      const tasks = bgTasks.list()
+      if (tasks.length === 0) return "no background tasks this session."
+      const lines = tasks.map((t) => {
+        const cmd = t.command.length > 60 ? `${t.command.slice(0, 60)}…` : t.command
+        const exit = t.exitCode !== undefined ? ` exit ${t.exitCode}` : ""
+        return `  ${t.id}  ${t.status.padEnd(7)}${exit.padEnd(9)}  pid ${t.pid}  ${cmd}`
+      })
+      return ["background tasks:", ...lines, "", "/tasks show <id> · /tasks kill <id>"].join("\n")
+    },
+    killTask: (id) => {
+      const ok = bgTasks.kill(id)
+      push({
+        kind: "info",
+        text: ok ? `killed background task ${id}` : `no running background task "${id}"`,
+      })
+    },
+    showTask: (id) => {
+      const record = bgTasks.get(id)
+      if (!record) return `no background task "${id}"`
+      const exit = record.exitCode !== undefined ? `  exit ${record.exitCode}` : ""
+      const tail = (bgTasks.tail(id, 2_000) ?? "").trim()
+      return [
+        `${record.id}  ${record.status}  pid ${record.pid}${exit}`,
+        record.command,
+        record.logPath,
+        "",
+        tail === "" ? "(no output yet)" : tail,
+      ].join("\n")
     },
     initProject: () => {
       submit(
