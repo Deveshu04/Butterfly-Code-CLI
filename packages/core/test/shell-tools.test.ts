@@ -84,6 +84,23 @@ test("bash tool says so when a command produces no output", async () => {
 }, 20_000)
 
 
+test("bash tool meta carries the command + exit code on success", async () => {
+  const result = await bashTool.execute({ command: "echo meta-ok" }, ctx(fixtureDir()))
+  expect(result.meta).toEqual({ command: "echo meta-ok", exitCode: 0 })
+}, 20_000)
+
+test("bash tool meta carries a non-zero exit code on failure", async () => {
+  const result = await bashTool.execute({ command: "exit 7" }, ctx(fixtureDir()))
+  expect(result.isError).toBe(true)
+  expect(result.meta).toEqual({ command: "exit 7", exitCode: 7 })
+}, 20_000)
+
+test("bash tool meta is present even when the command produces no output", async () => {
+  const result = await bashTool.execute({ command: "true" }, ctx(fixtureDir()))
+  expect(result.meta).toEqual({ command: "true", exitCode: 0 })
+}, 20_000)
+
+
 test("background:true spawns detached — returns fast with a task id + log path, not waiting for the command", async () => {
   const state: Record<string, unknown> = {}
   liveStates.push(state)

@@ -102,6 +102,122 @@ function startFakeToolCallServer(command: string): { baseURL: string; stop: () =
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+
+function sseChunk(obj: unknown): string {
+  return `data: ${JSON.stringify(obj)}\n\n`
+}
+
+function toolCallStreamBody(toolName: string, args: unknown, callId: string): string {
+  return (
+    sseChunk({
+      id: "1",
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: "assistant",
+            tool_calls: [
+              { index: 0, id: callId, type: "function", function: { name: toolName, arguments: JSON.stringify(args) } },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    }) +
+    sseChunk({
+      id: "1",
+      choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    }) +
+    "data: [DONE]\n\n"
+  )
+}
+
+function textStreamBody(replyText: string): string {
+  return (
+    sseChunk({
+      id: "1",
+      choices: [{ index: 0, delta: { role: "assistant", content: replyText }, finish_reason: null }],
+    }) +
+    sseChunk({
+      id: "1",
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+    }) +
+    "data: [DONE]\n\n"
+  )
+}
+
+function startFakeSequenceServer(
+  bodies: string[],
+  opts: { delayMs?: number } = {},
+): { baseURL: string; stop: () => void } {
+  let n = 0
+  const server = Bun.serve({
+    port: 0,
+    fetch: async () => {
+      if (opts.delayMs) await new Promise((resolve) => setTimeout(resolve, opts.delayMs))
+      const body = bodies[Math.min(n, bodies.length - 1)]
+      n++
+      return new Response(body, { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
+}
+
+function startFakeReasoningServer(
+  reasoningText: string,
+  replyText: string,
+  opts: { delayMs?: number } = {},
+): { baseURL: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => {
+      const stream = new ReadableStream({
+        async start(controller) {
+          const enc = new TextEncoder()
+          controller.enqueue(
+            enc.encode(
+              sseChunk({
+                id: "1",
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: "assistant", reasoning_content: reasoningText },
+                    finish_reason: null,
+                  },
+                ],
+              }),
+            ),
+          )
+          if (opts.delayMs) await new Promise((resolve) => setTimeout(resolve, opts.delayMs))
+          controller.enqueue(
+            enc.encode(
+              sseChunk({
+                id: "1",
+                choices: [{ index: 0, delta: { content: replyText }, finish_reason: null }],
+              }),
+            ),
+          )
+          controller.enqueue(
+            enc.encode(
+              sseChunk({
+                id: "1",
+                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+              }),
+            ),
+          )
+          controller.enqueue(enc.encode("data: [DONE]\n\n"))
+          controller.close()
+        },
+      })
+      return new Response(stream, { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
+}
+
 function startFakeOpenAIModelsServer(ids: string[]): { baseURL: string; stop: () => void } {
   const server = Bun.serve({
     port: 0,
@@ -807,7 +923,7 @@ test("/theme with an unknown name errors instead of silently switching to dark",
   t.renderer.destroy()
 })
 
-test("/provider opens a picker showing (current) and ✓ key markers", async () => {
+test("/provider opens a picker showing (current) and [key] markers", async () => {
   const t = await testRender(
     () => (
       <App
@@ -826,7 +942,7 @@ test("/provider opens a picker showing (current) and ✓ key markers", async () 
   t.mockInput.pressEnter()
   const frame = await waitForFrameSlow(t, (f) => f.includes("provider —"))
   expect(frame).toContain("anthropic  (current)")
-  expect(frame).toContain("✓ key")
+  expect(frame).toContain("[key]")
   expect(frame).toContain("openai")
   t.renderer.destroy()
 })
@@ -2097,7 +2213,7 @@ test("a multi-line paste WHILE BUSY becomes a chip and the queued message keeps 
   t.mockInput.pressEnter()
   await t.renderOnce()
   const frame = t.captureCharFrame()
-  expect(frame).toContain("⧗ queued (1)")
+  expect(frame).toContain("(queued) (1)")
   expect(frame).toContain("alphaAAAA")
   expect(frame).toContain("charlieCC")
   expect(frame).not.toContain("alphaAAAAbravoBBBB")
@@ -2448,8 +2564,8 @@ test("/loop run completes, summarizes the outcome into the transcript, and drain
     t.mockInput.pressEnter()
     t.mockInput.typeText("what happened while looping")
     t.mockInput.pressEnter()
-    const queued = await waitForFrameSlow(t, (frame) => frame.includes("⧗ queued"))
-    expect(queued).toContain("what happened while looping")
+    const queued = await waitForFrameSlow(t, (frame) => frame.includes("what happened while looping"))
+    expect(queued).toContain("(queued)")
 
     const summary = await waitForFrameSlow(
       t,
@@ -2869,4 +2985,249 @@ test("/theme light actually REPAINTS — a styled span's colour changes, not jus
   expect(spanFgFor(t, "butterfly")).toEqual(hexToInts(LIGHT_TOKENS.muted))
   expect(LIGHT_TOKENS.muted).not.toBe(DARK_TOKENS.muted)
   t.renderer.destroy()
+}, 30_000)
+
+
+test("reasoning deltas render a live thinking block (height-capped to 3 lines) that collapses once the answer starts, and Ctrl+R expands/collapses it", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeReasoningServer(
+    "alpha-reasoning\nbeta-reasoning\ngamma-reasoning\ndelta-reasoning",
+    "final answer text",
+    { delayMs: 800 },
+  )
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-reasoning", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("think about it")
+    t.mockInput.pressEnter()
+
+    const streaming = await waitForFrameSlow(t, (frame) => frame.includes("beta-reasoning"))
+    expect(streaming).toContain("thinking…")
+    expect(streaming).toContain("delta-reasoning")
+    expect(streaming).toContain("gamma-reasoning")
+    expect(streaming).not.toContain("alpha-reasoning")
+    expect(streaming).not.toContain("final answer text")
+
+    // Collapses once the answer starts — no "thinking…" streaming header
+    // left, no raw reasoning text, just the one-line summary.
+    const collapsed = await waitForFrameSlow(t, (frame) => frame.includes("final answer text"))
+    expect(collapsed).toMatch(/thought for \d+s/)
+    expect(collapsed).not.toContain("thinking…")
+    expect(collapsed).not.toContain("beta-reasoning")
+
+    expect(spanFgFor(t, "thought for")).toEqual(hexToInts(DARK_TOKENS.muted))
+
+    t.mockInput.pressKey("r", { ctrl: true })
+    const expanded = await waitForFrameSlow(t, (frame) => frame.includes("alpha-reasoning"))
+    expect(expanded).toContain("beta-reasoning")
+    expect(expanded).toContain("gamma-reasoning")
+    expect(expanded).toContain("delta-reasoning")
+
+    t.mockInput.pressKey("r", { ctrl: true })
+    await waitForFrameSlow(t, (frame) => !frame.includes("alpha-reasoning"))
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("an inline <think> block from a qwen-style model feeds the SAME thinking presentation instead of vanishing", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeChatServer("<think>\nqwen reasoning here\n</think>\nqwen final answer")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-inline-think", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("think inline")
+    t.mockInput.pressEnter()
+
+    const settled = await waitForFrameSlow(t, (frame) => frame.includes("qwen final answer"))
+    expect(settled).toContain("thought")
+    expect(settled).not.toContain("qwen reasoning here")
+    expect(settled).not.toContain("<think>")
+
+    t.mockInput.pressKey("r", { ctrl: true })
+    const expanded = await waitForFrameSlow(t, (frame) => frame.includes("qwen reasoning here"))
+    expect(expanded).toContain("qwen final answer")
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("todo tool meta renders a card with glyphs + progress, and only the LATEST todo result keeps the card (recency)", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeSequenceServer(
+    [
+      toolCallStreamBody(
+        "todo",
+        {
+          items: [
+            { text: "first task", status: "in_progress" },
+            { text: "second task", status: "pending" },
+          ],
+        },
+        "call_1",
+      ),
+      toolCallStreamBody(
+        "todo",
+        {
+          items: [
+            { text: "first task", status: "completed" },
+            { text: "second task", status: "in_progress" },
+          ],
+        },
+        "call_2",
+      ),
+      textStreamBody("all done"),
+    ],
+    { delayMs: 300 },
+  )
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-todo", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("plan the work")
+    t.mockInput.pressEnter()
+
+    const firstCard = await waitForFrameSlow(t, (frame) => frame.includes("todos 0/2"))
+    expect(firstCard).toContain("[~] first task")
+    expect(firstCard).toContain("[ ] second task")
+
+    const settled = await waitForFrameSlow(t, (frame) => frame.includes("all done"))
+    expect(settled).toContain("todos 1/2")
+    expect(settled).toContain("[x] first task")
+    expect(settled).toContain("[~] second task")
+    expect(settled).not.toContain("todos 0/2")
+
+    expect(spanFgFor(t, "[~] second task")).toEqual(hexToInts(DARK_TOKENS.accent))
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("bash results render a $ command cell with dim output and a right-aligned exit badge — ok on success, exit N on failure", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeSequenceServer([
+    toolCallStreamBody("bash", { command: "echo alpha-success" }, "call_1"),
+    toolCallStreamBody("bash", { command: "test -f /definitely/not/a/real/path" }, "call_2"),
+    textStreamBody("done with both"),
+  ])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-bash-cell", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("run two commands")
+    t.mockInput.pressEnter()
+
+    await waitForFrameSlow(t, (f) => f.includes("approve?") && f.includes("alpha-success"))
+    t.mockInput.pressKey("y")
+    await waitForFrameSlow(t, (f) => f.includes("approve?") && f.includes("test -f"))
+    t.mockInput.pressKey("y")
+
+    const settled = await waitForFrameSlow(t, (frame) => frame.includes("done with both"))
+    expect(settled).toContain("$ echo alpha-success")
+    expect(settled).toContain("alpha-success")
+    expect(settled).toContain("ok")
+    expect(settled).toContain("$ test -f /definitely/not/a/real/path")
+    expect(settled).toContain("exit 1")
+
+    expect(spanFgFor(t, "exit 1")).toEqual(hexToInts(DARK_TOKENS.error))
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("a provider error renders a structured card from the classified error — kind-specific first line, no duplicate generic Error: line", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      Response.json(
+        {
+          error: {
+            message: "Incorrect API key provided.",
+            type: "invalid_request_error",
+            code: "invalid_api_key",
+          },
+        },
+        { status: 401 },
+      ),
+  })
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-error", providers: { fake: { baseURL: `http://127.0.0.1:${server.port}/v1` } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("hello")
+    t.mockInput.pressEnter()
+
+    const frame = await waitForFrameSlow(t, (f) => f.includes("invalid or missing API key"))
+    // Kind-specific headline (auth, from the 401 status) plus the
+    // actionability rule: auth errors point at /provider.
+    expect(frame).toContain("error: invalid or missing API key (401) — /provider to update it")
+    // Detail line: NOT deduped here (auth's headline never echoes the raw
+    // provider message), so it shows as its own dim line below.
+    expect(frame).toContain("Incorrect API key provided.")
+    // Exactly ONE error line for this failure — the generic "Error: Provider
+    // error: …" fallback must not ALSO have fired for the same rejection.
+    expect(frame).not.toContain("Error: Provider error:")
+
+    expect(spanFgFor(t, "invalid or missing API key")).toEqual(hexToInts(DARK_TOKENS.error))
+
+    t.renderer.destroy()
+  } finally {
+    server.stop(true)
+  }
 }, 30_000)

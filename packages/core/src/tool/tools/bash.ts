@@ -59,6 +59,7 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
     }
 
     const result = await runCommand(input.command, { cwd: ctx.cwd, timeoutMs: input.timeout })
+    const meta = { command: input.command, exitCode: result.exitCode }
 
     const parts: string[] = []
     if (result.stdout.trim() !== "") parts.push(result.stdout.trimEnd())
@@ -67,15 +68,15 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
     if (result.timedOut) {
       const limit = input.timeout ?? DEFAULT_COMMAND_TIMEOUT_MS
       parts.push(`Command timed out after ${limit}ms and was killed (including child processes).`)
-      return { output: parts.join("\n"), isError: true }
+      return { output: parts.join("\n"), isError: true, meta }
     }
     if (result.exitCode !== 0) {
       parts.push(`(exit code ${result.exitCode})`)
-      return { output: parts.join("\n"), isError: true }
+      return { output: parts.join("\n"), isError: true, meta }
     }
     if (parts.length === 0) {
-      return { output: "(command completed with no output)" }
+      return { output: "(command completed with no output)", meta }
     }
-    return { output: parts.join("\n") }
+    return { output: parts.join("\n"), meta }
   },
 }

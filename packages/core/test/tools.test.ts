@@ -92,3 +92,19 @@ test("todo replaces the list, renders it, and persists to session state", async 
   const stored = context.state[TODO_STATE_KEY]
   expect(stored).toEqual([{ text: "ship", status: "pending" }])
 })
+
+test("todo returns UI-only meta.todos mirroring the items — never in the model-visible output", async () => {
+  const items = [
+    { text: "plan", status: "completed" as const },
+    { text: "build", status: "in_progress" as const },
+    { text: "ship", status: "pending" as const },
+  ]
+  const result = await todoTool.execute({ items }, ctx(fixtureDir()))
+  expect(result.meta).toEqual({ todos: items })
+  expect(result.output).not.toContain("meta")
+})
+
+test("todo with an empty list still returns meta.todos: [] (card can clear itself)", async () => {
+  const result = await todoTool.execute({ items: [] }, ctx(fixtureDir()))
+  expect(result.meta).toEqual({ todos: [] })
+})

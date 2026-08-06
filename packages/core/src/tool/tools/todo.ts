@@ -27,8 +27,10 @@ export const todoTool: ToolDefinition<z.infer<typeof todoInput>> = {
   inputSchema: todoInput,
   async execute(input, ctx) {
     ctx.state[TODO_STATE_KEY] = input.items
-    if (input.items.length === 0) return { output: "(todo list cleared)" }
+    if (input.items.length === 0) {
+      return { output: "(todo list cleared)", meta: { todos: [] } }
+    }
     const rendered = input.items.map((item) => `${MARK[item.status]} ${item.text}`).join("\n")
-    return { output: rendered }
+    return { output: rendered, meta: { todos: input.items } }
   },
 }

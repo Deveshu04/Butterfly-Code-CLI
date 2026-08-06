@@ -112,7 +112,7 @@ test("export labels the region /undo rewound out of the conversation", () => {
   // Undone content is still present, and every undone turn carries the
   // label — not just the region's first line.
   expect(markdown).toContain("undone reply")
-  expect(markdown).toContain("## ⤺ (undone) ❯ undone ask")
+  expect(markdown).toContain("## (undone) ❯ undone ask")
   expect(markdown).not.toContain("## ❯ undone ask")
   // Live turns on both sides of the region are untouched.
   expect(markdown).toContain("## ❯ kept ask")
@@ -143,6 +143,6 @@ test("export unions overlapping rewinds and never opens a region it does not clo
   expect(markdown.split("\n").filter((line) => line.includes("end of undone")).length).toBe(1)
   // Everything is undone, so nothing keeps the live-prompt heading.
   expect(markdown).not.toContain("## ❯ ")
-  expect(markdown).toContain("## ⤺ (undone) ❯ first ask")
-  expect(markdown).toContain("## ⤺ (undone) ❯ third ask")
+  expect(markdown).toContain("## (undone) ❯ first ask")
+  expect(markdown).toContain("## (undone) ❯ third ask")
 })

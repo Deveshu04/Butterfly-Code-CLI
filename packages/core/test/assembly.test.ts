@@ -178,3 +178,36 @@ test("message.user without images keeps plain string content — unchanged histo
   const messages = assemble({ system: "s", timeline })
   expect(messages[1]).toEqual({ role: "user", content: "hi" })
 })
+
+
+test("tool.result.meta (todo/bash/edit UI hints) never rides into the assembled tool message", () => {
+  const timeline: SessionEvent[] = [
+    { type: "message.user", id: "u1", text: "plan it", time: t },
+    { type: "message.assistant", id: "a1", text: "", time: t },
+    { type: "tool.call", callId: "c1", name: "todo", input: { items: [] }, time: t },
+    {
+      type: "tool.result",
+      callId: "c1",
+      output: "(todo list cleared)",
+      isError: false,
+      meta: { todos: [{ text: "ship", status: "pending" }] },
+      time: t,
+    },
+    { type: "tool.call", callId: "c2", name: "bash", input: { command: "echo hi" }, time: t },
+    {
+      type: "tool.result",
+      callId: "c2",
+      output: "hi",
+      isError: false,
+      meta: { command: "echo hi", exitCode: 0 },
+      time: t,
+    },
+  ]
+  const messages = assemble({ system: "s", timeline })
+  const toolMessages = messages.filter((m) => m.role === "tool")
+  expect(toolMessages).toHaveLength(2)
+  for (const m of toolMessages) {
+    expect(m).not.toHaveProperty("meta")
+    expect(JSON.stringify(m)).not.toContain("meta")
+  }
+})

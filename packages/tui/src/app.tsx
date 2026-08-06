@@ -22,6 +22,7 @@ import {
   createWebTool,
   decideAttention,
   describeGitFailure,
+  describeProviderError,
   describeReviewScope,
   doctor,
   EpisodicIndex,
@@ -60,6 +61,7 @@ import {
   preloadHandoff,
   prepareImageAttachments,
   project,
+  type ProviderErrorInfo,
   type ReasoningEffort,
   type ReviewEvent,
   type RunnerEvent,
@@ -103,7 +105,7 @@ import {
   useRenderer,
   useTerminalDimensions,
 } from "@opentui/solid"
-import { type Accessor, createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import { type Accessor, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { saveClipboardImage } from "./clipboard"
 import {
   type CommandActions,
@@ -113,7 +115,7 @@ import {
   loadCustomCommands,
   type SlashCommand,
 } from "./commands"
-import { formatToolResult, stripThink } from "./format"
+import { formatCommandBody, formatToolResult, splitThink } from "./format"
 import {
   applyLoopEvent,
   askBearingRules,
@@ -152,12 +154,24 @@ import {
 } from "./theme"
 import { renderWordmark, wordmarkMode } from "./wordmark"
 
+interface TodoMeta {
+  text: string
+  status: "pending" | "in_progress" | "completed"
+}
+
 interface Message {
-  kind: "user" | "assistant" | "tool" | "info" | "error"
+  kind: "user" | "assistant" | "tool" | "info" | "error" | "thinking"
   text: string
   /** Unified diff for edit results — rendered with the diff element. */
   diff?: string
   path?: string
+  todos?: TodoMeta[]
+  command?: string
+  exitCode?: number
+  commandBody?: string
+  errorInfo?: ProviderErrorInfo
+  thinkStartedAt?: number
+  thinkClosedAt?: number
 }
 
 function filetypeOf(path: string | undefined): string | undefined {
@@ -183,19 +197,15 @@ export function timelineToMessages(timeline: import("@butterfly/core").SessionEv
   const restored: Message[] = []
   for (const event of timeline) {
     if (event.type === "message.user") restored.push({ kind: "user", text: event.text })
-    else if (event.type === "message.assistant" && stripThink(event.text).trim() !== "")
-      restored.push({ kind: "assistant", text: event.text })
-    else if (event.type === "tool.call")
-      restored.push({
-        kind: "tool",
-        text: `→ ${event.name} ${JSON.stringify(event.input).slice(0, 120)}`,
-      })
+    else if (event.type === "message.assistant") {
+      const split = splitThink(event.text)
+      if (split.rest.trim() !== "" || split.thinking !== "") {
+        restored.push({ kind: "assistant", text: event.text })
+      }
+    }
+    else if (event.type === "tool.call") restored.push(toolCallMessage(event.name, event.input))
     else if (event.type === "tool.result")
-      restored.push({
-        kind: event.isError ? "error" : "tool",
-        text: `  ${formatToolResult(event.output, event.isError)}`,
-        ...(metaDiff(event.meta) ?? {}),
-      })
+      restored.push(toolResultMessage(event.output, event.isError, event.meta))
     else if (event.type === "session.compacted")
       restored.push({ kind: "info", text: "(older context was compacted)" })
     else if (event.type === "session.review") restored.push(reviewMessage(event))
@@ -225,6 +235,110 @@ function metaDiff(meta: unknown): { diff: string; path?: string } | undefined {
     }
   }
   return undefined
+}
+
+const TODO_STATUSES = new Set(["pending", "in_progress", "completed"])
+
+function metaTodos(meta: unknown): { todos: TodoMeta[] } | undefined {
+  if (!meta || typeof meta !== "object" || !("todos" in meta)) return undefined
+  const raw = (meta as { todos: unknown }).todos
+  if (!Array.isArray(raw)) return undefined
+  const todos: TodoMeta[] = []
+  for (const item of raw) {
+    if (
+      item &&
+      typeof item === "object" &&
+      typeof (item as { text?: unknown }).text === "string" &&
+      TODO_STATUSES.has((item as { status?: unknown }).status as string)
+    ) {
+      todos.push(item as TodoMeta)
+    } else {
+      return undefined // one malformed item — refuse the whole card
+    }
+  }
+  return { todos }
+}
+
+/** Duck-types the bash tool's UI-only `meta.command`/`meta.exitCode` (bash.ts). */
+function metaBash(meta: unknown): { command: string; exitCode: number } | undefined {
+  if (!meta || typeof meta !== "object" || !("command" in meta) || !("exitCode" in meta)) {
+    return undefined
+  }
+  const m = meta as { command: unknown; exitCode: unknown }
+  if (typeof m.command === "string" && typeof m.exitCode === "number") {
+    return { command: m.command, exitCode: m.exitCode }
+  }
+  return undefined
+}
+
+function toolCallMessage(name: string, input: unknown): Message {
+  return { kind: "tool", text: `${name} ${JSON.stringify(input).slice(0, 120)}` }
+}
+
+function toolResultMessage(output: string, isError: boolean, meta: unknown): Message {
+  const bash = metaBash(meta)
+  return {
+    kind: isError ? "error" : "tool",
+    text: `  ${formatToolResult(output, isError)}`,
+    ...(metaDiff(meta) ?? {}),
+    ...(metaTodos(meta) ?? {}),
+    ...(bash
+      ? { command: bash.command, exitCode: bash.exitCode, commandBody: formatCommandBody(output, isError) }
+      : {}),
+  }
+}
+
+function errorCardHeadline(info: ProviderErrorInfo): string {
+  return `error: ${describeProviderError(info)}`
+}
+
+function errorCardDetail(info: ProviderErrorInfo, headline: string): string | undefined {
+  const detail = info.detail
+  if (detail === undefined || detail === "") return undefined
+  return headline.includes(detail) ? undefined : detail
+}
+
+const TODO_GLYPH: Record<TodoMeta["status"], string> = {
+  pending: "[ ]",
+  in_progress: "[~]",
+  completed: "[x]",
+}
+
+function ThinkingBlock(props: {
+  thinkingText: string
+  open: boolean
+  startedAt?: number
+  closedAt?: number
+  expanded: boolean
+}) {
+  const seconds = () =>
+    props.startedAt !== undefined && props.closedAt !== undefined
+      ? Math.max(0, Math.round((props.closedAt - props.startedAt) / 1000))
+      : undefined
+  return (
+    <box flexDirection="column">
+      <Show
+        when={props.open}
+        fallback={
+          <text fg={themeTokens().muted}>
+            {seconds() !== undefined ? `thought for ${seconds()}s` : "thought"}
+          </text>
+        }
+      >
+        <box flexDirection="column">
+          <text fg={themeTokens().muted}>{"thinking…"}</text>
+          <For each={props.thinkingText.split("\n").slice(-3)}>
+            {(line) => <text fg={themeTokens().muted}>{`  ${line}`}</text>}
+          </For>
+        </box>
+      </Show>
+      <Show when={props.expanded && !props.open && props.thinkingText.trim() !== ""}>
+        <box paddingLeft={2} flexDirection="column">
+          <text fg={themeTokens().muted}>{props.thinkingText.trim()}</text>
+        </box>
+      </Show>
+    </box>
+  )
 }
 
 function isMentionTrigger(previous: string, value: string): boolean {
@@ -382,6 +496,15 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   })
 
   const [messages, setMessages] = createSignal<Message[]>([])
+  const [thinkingExpanded, setThinkingExpanded] = createSignal(false)
+  const latestTodoIndex = createMemo(() => {
+    const list = messages()
+    let last = -1
+    for (let i = 0; i < list.length; i++) {
+      if (list[i]?.todos !== undefined) last = i
+    }
+    return last
+  })
   const [draft, setDraft] = createSignal("")
   const [busy, setBusy] = createSignal(false)
   const [pendingAsk, setPendingAsk] = createSignal<PendingAsk | null>(null)
@@ -689,11 +812,20 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const appendAssistant = (text: string) => {
     const all = [...messages()]
     const last = all.at(-1)
-    if (last?.kind === "assistant") {
-      all[all.length - 1] = { kind: "assistant", text: last.text + text }
-    } else {
-      all.push({ kind: "assistant", text })
+    const combined = last?.kind === "assistant" ? last.text + text : text
+    const startedAt = last?.kind === "assistant" ? (last.thinkStartedAt ?? Date.now()) : Date.now()
+    const alreadyClosedAt = last?.kind === "assistant" ? last.thinkClosedAt : undefined
+    const split = splitThink(combined)
+    const closedAt =
+      alreadyClosedAt ?? (split.thinking !== "" && !split.open ? Date.now() : undefined)
+    const updated: Message = {
+      kind: "assistant",
+      text: combined,
+      thinkStartedAt: startedAt,
+      ...(closedAt !== undefined ? { thinkClosedAt: closedAt } : {}),
     }
+    if (last?.kind === "assistant") all[all.length - 1] = updated
+    else all.push(updated)
     setMessages(all)
     scroll?.scrollTo(scroll.scrollHeight)
   }
@@ -797,27 +929,64 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
 
+  let providerErrorRendered = false
+
+  const appendReasoning = (text: string) => {
+    const all = [...messages()]
+    const last = all.at(-1)
+    if (last?.kind === "thinking" && last.thinkClosedAt === undefined) {
+      all[all.length - 1] = { ...last, text: last.text + text }
+    } else {
+      all.push({ kind: "thinking", text, thinkStartedAt: Date.now() })
+    }
+    setMessages(all)
+    scroll?.scrollTo(scroll.scrollHeight)
+  }
+
+  const finalizeOpenThinking = () => {
+    const all = [...messages()]
+    const last = all.at(-1)
+    if (last?.kind === "thinking" && last.thinkClosedAt === undefined) {
+      all[all.length - 1] = { ...last, thinkClosedAt: Date.now() }
+      setMessages(all)
+    } else if (last?.kind === "assistant" && last.thinkClosedAt === undefined) {
+      if (splitThink(last.text).thinking !== "") {
+        all[all.length - 1] = { ...last, thinkClosedAt: Date.now() }
+        setMessages(all)
+      }
+    }
+  }
+
   const onEvent = (event: RunnerEvent) => {
     switch (event.type) {
+      case "reasoning-delta":
+        appendReasoning(event.text)
+        break
       case "text-delta":
+        finalizeOpenThinking()
         appendAssistant(event.text)
         break
       case "tool-call":
-        push({ kind: "tool", text: `→ ${event.name} ${JSON.stringify(event.input).slice(0, 120)}` })
+        finalizeOpenThinking()
+        push(toolCallMessage(event.name, event.input))
         break
-      case "tool-result": {
-        const diffMeta = metaDiff(event.meta)
-        push({
-          kind: event.isError ? "error" : "tool",
-          text: `  ${formatToolResult(event.output, event.isError)}`,
-          ...(diffMeta ?? {}),
-        })
+      case "tool-result":
+        push(toolResultMessage(event.output, event.isError, event.meta))
         break
-      }
       case "finish":
+        finalizeOpenThinking()
         // Live context gauge: the last step's input+output IS the window size.
         setCtxUsed(event.usage.input + event.usage.output)
         break
+      case "error": {
+        providerErrorRendered = true
+        push(
+          event.info
+            ? { kind: "error", text: errorCardHeadline(event.info), errorInfo: event.info }
+            : { kind: "error", text: `Error: ${event.message}` },
+        )
+        break
+      }
       case "notice":
         push({ kind: "info", text: event.text })
         break
@@ -1522,7 +1691,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         items: PROVIDERS.map((p) => {
           const marks = [
             p.id === currentProvider ? "(current)" : "",
-            config().providers?.[p.id]?.apiKey ? "✓ key" : "",
+            config().providers?.[p.id]?.apiKey ? "[key]" : "",
           ]
             .filter(Boolean)
             .join("  ")
@@ -1883,7 +2052,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         const which = orphans.map((n) => `#${n}`).join(", ")
         push({
           kind: "info",
-          text: `⚠ paste chip${orphans.length === 1 ? "" : "s"} ${which} ${orphans.length === 1 ? "is" : "are"} no longer in the message — that text was NOT sent`,
+          text: `warn: paste chip${orphans.length === 1 ? "" : "s"} ${which} ${orphans.length === 1 ? "is" : "are"} no longer in the message — that text was NOT sent`,
         })
       }
     }
@@ -1891,7 +2060,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       setQueued([...queued(), task])
       setDraft("")
       setPasteChips(new Map())
-      push({ kind: "info", text: `⧗ queued (${queued().length}): ${task.slice(0, 80)}` })
+      push({ kind: "info", text: `(queued) (${queued().length}): ${task.slice(0, 80)}` })
       return
     }
     setDraft("")
@@ -2003,6 +2172,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     const attentionConfig = () => ({ notifications: config().notifications ?? true })
     applyAttention(decideAttention({ kind: "turn.start" }, attentionState(), attentionConfig()))
     let turnDetail: string | undefined
+    providerErrorRendered = false
     const turnRules = planMode() ? PLAN_RULES : (config().permissions ?? TUI_DEFAULT_RULES)
     runUserTurn(
       {
@@ -2054,10 +2224,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       })
       .catch((error: unknown) => {
         turnDetail = error instanceof Error ? error.message : String(error)
-        push({
-          kind: "error",
-          text: `Error: ${turnDetail}`,
-        })
+        if (!providerErrorRendered) {
+          push({
+            kind: "error",
+            text: `Error: ${turnDetail}`,
+          })
+        }
       })
       .finally(() => {
         applyAttention(
@@ -2134,6 +2306,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       key.preventDefault()
       if (pagerOpen()) closePager()
       else if (!picker()) openPager()
+      return
+    }
+    if (key.ctrl && key.name === "r" && !setup() && !providerKeyStep() && !pagerOpen()) {
+      key.preventDefault()
+      setThinkingExpanded((expanded) => !expanded)
       return
     }
     if (pagerOpen()) {
@@ -2486,55 +2663,159 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 flexGrow={1}
               >
                 <For each={messages()}>
-                  {(message, index) => (
-                    <Show
-                      when={message.kind === "assistant"}
-                      fallback={
-                        <box marginTop={message.kind === "user" ? 1 : 0} flexDirection="column">
-                          <text
-                            fg={
-                              message.kind === "tool" || message.kind === "info"
-                                ? themeTokens().muted
-                                : message.kind === "error"
-                                  ? themeTokens().error
-                                  : undefined
+                  {(message, index) => {
+                    const inlineThink = message.kind === "assistant" ? splitThink(message.text) : undefined
+                    return (
+                      <Show
+                        when={message.kind === "assistant"}
+                        fallback={
+                          <Show
+                            when={message.kind === "thinking"}
+                            fallback={
+                              <box marginTop={message.kind === "user" ? 1 : 0} flexDirection="column">
+                                <Show
+                                  when={message.errorInfo}
+                                  fallback={
+                                    <Show
+                                      when={message.todos !== undefined && index() === latestTodoIndex()}
+                                      fallback={
+                                        <Show
+                                          when={message.command !== undefined}
+                                          fallback={
+                                            <text
+                                              fg={
+                                                message.kind === "tool" || message.kind === "info"
+                                                  ? themeTokens().muted
+                                                  : message.kind === "error"
+                                                    ? themeTokens().error
+                                                    : undefined
+                                              }
+                                            >
+                                              {message.kind === "user" ? `❯ ${message.text}` : message.text}
+                                            </text>
+                                          }
+                                        >
+                                          <box flexDirection="column">
+                                            <box flexDirection="row">
+                                              <text fg={themeTokens().accent}>{"$ "}</text>
+                                              <text>{message.command}</text>
+                                              <box flexGrow={1} />
+                                              <text
+                                                fg={
+                                                  message.exitCode === 0
+                                                    ? themeTokens().muted
+                                                    : themeTokens().error
+                                                }
+                                              >
+                                                {message.exitCode === 0 ? "ok" : `exit ${message.exitCode}`}
+                                              </text>
+                                            </box>
+                                            <Show
+                                              when={
+                                                message.commandBody !== undefined &&
+                                                message.commandBody !== ""
+                                              }
+                                            >
+                                              <text fg={themeTokens().muted}>{message.commandBody}</text>
+                                            </Show>
+                                          </box>
+                                        </Show>
+                                      }
+                                    >
+                                      <box
+                                        border
+                                        borderStyle="rounded"
+                                        borderColor={themeTokens().border}
+                                        flexDirection="column"
+                                        paddingLeft={1}
+                                        paddingRight={1}
+                                      >
+                                        <text fg={themeTokens().muted}>
+                                          {`todos ${(message.todos ?? []).filter((item) => item.status === "completed").length}/${(message.todos ?? []).length}`}
+                                        </text>
+                                        <For each={message.todos ?? []}>
+                                          {(item) => (
+                                            <text
+                                              fg={
+                                                item.status === "in_progress"
+                                                  ? themeTokens().accent
+                                                  : themeTokens().muted
+                                              }
+                                            >
+                                              {`${TODO_GLYPH[item.status]} ${item.text}`}
+                                            </text>
+                                          )}
+                                        </For>
+                                      </box>
+                                    </Show>
+                                  }
+                                >
+                                  {(info: Accessor<ProviderErrorInfo>) => (
+                                    <box flexDirection="column">
+                                      <text fg={themeTokens().error}>{message.text}</text>
+                                      <Show when={errorCardDetail(info(), message.text)}>
+                                        {(detail: Accessor<string>) => (
+                                          <text fg={themeTokens().muted}>{detail()}</text>
+                                        )}
+                                      </Show>
+                                    </box>
+                                  )}
+                                </Show>
+                                <Show when={message.diff}>
+                                  <box paddingLeft={2} flexShrink={0}>
+                                    <diff
+                                      diff={message.diff ?? ""}
+                                      view="unified"
+                                      syntaxStyle={SYNTAX}
+                                      filetype={filetypeOf(message.path)}
+                                      wrapMode="none"
+                                      addedSignColor={themeTokens().diffAdd}
+                                      removedSignColor={themeTokens().diffDel}
+                                      addedBg={themeTokens().diffAddBg}
+                                      removedBg={themeTokens().diffDelBg}
+                                      contextBg={themeTokens().diffContextBg}
+                                      lineNumberFg={themeTokens().diffLineNumber}
+                                      lineNumberBg={themeTokens().diffLineNumberBg}
+                                    />
+                                  </box>
+                                </Show>
+                              </box>
                             }
                           >
-                            {message.kind === "user" ? `❯ ${message.text}` : message.text}
-                          </text>
-                          <Show when={message.diff}>
-                            <box paddingLeft={2} flexShrink={0}>
-                              <diff
-                                diff={message.diff ?? ""}
-                                view="unified"
+                            <ThinkingBlock
+                              thinkingText={message.text}
+                              open={message.thinkClosedAt === undefined}
+                              startedAt={message.thinkStartedAt}
+                              closedAt={message.thinkClosedAt}
+                              expanded={thinkingExpanded()}
+                            />
+                          </Show>
+                        }
+                      >
+                        <box flexDirection="column">
+                          <Show when={inlineThink && inlineThink.thinking !== ""}>
+                            <ThinkingBlock
+                              thinkingText={inlineThink?.thinking ?? ""}
+                              open={(inlineThink?.open ?? false) && message.thinkClosedAt === undefined}
+                              startedAt={message.thinkStartedAt}
+                              closedAt={message.thinkClosedAt}
+                              expanded={thinkingExpanded()}
+                            />
+                          </Show>
+                          <Show when={inlineThink && inlineThink.rest.trim() !== ""}>
+                            <box marginTop={1} flexShrink={0}>
+                              <markdown
+                                content={inlineThink?.rest.trim() ?? ""}
                                 syntaxStyle={SYNTAX}
-                                filetype={filetypeOf(message.path)}
-                                wrapMode="none"
-                                addedSignColor={themeTokens().diffAdd}
-                                removedSignColor={themeTokens().diffDel}
-                                addedBg={themeTokens().diffAddBg}
-                                removedBg={themeTokens().diffDelBg}
-                                contextBg={themeTokens().diffContextBg}
-                                lineNumberFg={themeTokens().diffLineNumber}
-                                lineNumberBg={themeTokens().diffLineNumberBg}
+                                streaming={busy() && index() === messages().length - 1}
+                                internalBlockMode="top-level"
                               />
                             </box>
                           </Show>
                         </box>
-                      }
-                    >
-                      <Show when={stripThink(message.text).trim() !== ""}>
-                        <box marginTop={1} flexShrink={0}>
-                          <markdown
-                            content={stripThink(message.text).trim()}
-                            syntaxStyle={SYNTAX}
-                            streaming={busy() && index() === messages().length - 1}
-                            internalBlockMode="top-level"
-                          />
-                        </box>
                       </Show>
-                    </Show>
-                  )}
+                    )
+                  }}
                 </For>
               </scrollbox>
             </Show>
@@ -2779,7 +3060,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           <text fg={themeTokens().muted}>{`  ·  ${formatUSD(sessionCost())}`}</text>
         </Show>
         <Show when={queued().length > 0}>
-          <text fg={themeTokens().warn}>{`  ·  ⧗ ${queued().length} queued`}</text>
+          <text fg={themeTokens().warn}>{`  ·  ${queued().length} (queued)`}</text>
         </Show>
       </box>
     </box>

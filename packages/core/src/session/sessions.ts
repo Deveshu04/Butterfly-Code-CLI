@@ -55,9 +55,9 @@ export function forkSession(journalPath: string, dir: string): string {
 }
 
 const PROMPT_HEADING = "## ❯ "
-const UNDONE_PROMPT_HEADING = "## ⤺ (undone) ❯ "
-const UNDONE_OPEN = "> _⤺ undone — /undo rewound the following out of the conversation:_"
-const UNDONE_CLOSE = "> _⤺ end of undone_"
+const UNDONE_PROMPT_HEADING = "## (undone) ❯ "
+const UNDONE_OPEN = "> _undone — /undo rewound the following out of the conversation:_"
+const UNDONE_CLOSE = "> _end of undone_"
 
 function undoneIndices(events: SessionEvent[]): Set<number> {
   const undone = new Set<number>()

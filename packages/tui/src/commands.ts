@@ -47,6 +47,7 @@ export interface CommandActions {
   pickTheme(): void
   /** Switches + persists (saveGlobalConfig) the named theme. */
   setTheme(name: string): void
+  /** Opens the provider picker: (current)/[key] markers, like pickTheme. */
   pickProvider(): void
   /** `/provider <name>` — exact or unique-prefix match; also the picker's onPick target. */
   selectProvider(nameOrPrefix: string): void
@@ -384,7 +385,7 @@ export function renderHelp(): string {
     const usage = `/${command.name}${command.args ? ` ${command.args}` : ""}`
     return `  ${usage.padEnd(18)} ${command.description}`
   })
-  return `commands:\n${lines.join("\n")}\nkeys: y/n answers approvals · Ctrl+C interrupts, twice quits · Esc cancels setup · Ctrl+O opens the transcript pager`
+  return `commands:\n${lines.join("\n")}\nkeys: y/n answers approvals · Ctrl+C interrupts, twice quits · Esc cancels setup · Ctrl+O opens the transcript pager · Ctrl+R expands/collapses the last thinking block (this session's view only — reasoning is never journaled, so it does not survive /resume)`
 }
 
 export interface CommandMatch {
