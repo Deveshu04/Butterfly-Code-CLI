@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { parseArgs } from "node:util"
-import { VERSION } from "@butterfly/core"
+import { isCompiledExecutable, VERSION } from "@butterfly/core"
 import { runHeadless } from "./run"
 
 const [, , command, ...rest] = process.argv
@@ -80,6 +80,11 @@ async function main(): Promise<number> {
       console.log("  butterfly version        print the version")
       return 0
     default: {
+      if (isCompiledExecutable()) {
+        const { startTui } = await import("@butterfly/tui")
+        await startTui({ cwd: process.cwd() })
+        return 0
+      }
       const { solidPreloadPath, tuiEntrypoint } = await import("@butterfly/tui/launch")
       const child = Bun.spawn(
         [process.execPath, "--preload", solidPreloadPath(), tuiEntrypoint()],

@@ -1,5 +1,7 @@
 import { createRequire } from "node:module"
 import { z } from "zod"
+import { defaultAssetCacheRoot, extractEmbeddedAsset, isCompiledExecutable } from "../../platform/embedded-assets"
+import { VERSION } from "../../version"
 import type { ToolDefinition } from "../registry"
 
 const require = createRequire(import.meta.url)
@@ -13,7 +15,29 @@ export const grepInput = z.object({
 
 export const GREP_MAX_MATCHES = 100
 
-export function resolveRipgrep(): string {
+const EMBEDDED_RIPGREP_IMPORTERS: Record<string, () => Promise<{ default: string }>> = {
+  "win32-x64": () => import("@vscode/ripgrep-win32-x64/bin/rg.exe", { with: { type: "file" } }),
+}
+
+async function resolveEmbeddedRipgrep(): Promise<string | undefined> {
+  if (!isCompiledExecutable()) return undefined
+  const importer = EMBEDDED_RIPGREP_IMPORTERS[`${process.platform}-${process.arch}`]
+  if (!importer) return undefined
+  try {
+    const mod = await importer()
+    const bytes = new Uint8Array(await Bun.file(mod.default).arrayBuffer())
+    return await extractEmbeddedAsset(
+      { name: process.platform === "win32" ? "rg.exe" : "rg", bytes: () => bytes },
+      { cacheRoot: defaultAssetCacheRoot(), version: VERSION, executable: true },
+    )
+  } catch {
+    return undefined
+  }
+}
+
+export async function resolveRipgrep(): Promise<string> {
+  const embedded = await resolveEmbeddedRipgrep()
+  if (embedded) return embedded
   const system = Bun.which("rg")
   if (system) return system
   try {
@@ -38,7 +62,7 @@ export const grepTool: ToolDefinition<z.infer<typeof grepInput>> = {
     "Search file contents with ripgrep. Returns matching lines as path:line:text, capped at 100 matches. Respects .gitignore; node_modules and .git are always excluded.",
   inputSchema: grepInput,
   async execute(input, ctx) {
-    const rg = resolveRipgrep()
+    const rg = await resolveRipgrep()
     const args = [
       "--line-number",
       "--no-heading",

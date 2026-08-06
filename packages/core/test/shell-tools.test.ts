@@ -69,8 +69,8 @@ test("bash tool says so when a command produces no output", async () => {
 }, 20_000)
 
 
-test("resolveRipgrep finds an rg binary", () => {
-  const rg = resolveRipgrep()
+test("resolveRipgrep finds an rg binary", async () => {
+  const rg = await resolveRipgrep()
   expect(rg.toLowerCase()).toContain("rg")
 })
 

@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs"
 import { Language, Parser, Query } from "web-tree-sitter"
 import {
-  grammarWasmPath,
   type LanguageSpec,
   languageForPath,
-  runtimeWasmPath,
-  tagsQueryPath,
+  resolveGrammarWasmPath,
+  resolveRuntimeWasmPath,
+  resolveTagsQueryPath,
 } from "./languages"
 
 export interface Tag {
@@ -32,11 +32,14 @@ async function loadLanguage(spec: LanguageSpec): Promise<LoadedLanguage | null> 
 
   try {
     if (!initialized) {
-      await Parser.init({ locateFile: () => runtimeWasmPath() })
+      const wasmPath = await resolveRuntimeWasmPath()
+      await Parser.init({ locateFile: () => wasmPath })
       initialized = true
     }
-    const language = await Language.load(new Uint8Array(readFileSync(grammarWasmPath(spec))))
-    const query = new Query(language, readFileSync(tagsQueryPath(spec), "utf8"))
+    const grammarPath = await resolveGrammarWasmPath(spec)
+    const language = await Language.load(new Uint8Array(readFileSync(grammarPath)))
+    const tagsPath = await resolveTagsQueryPath(spec)
+    const query = new Query(language, readFileSync(tagsPath, "utf8"))
     const parser = new Parser()
     parser.setLanguage(language)
     const loaded: LoadedLanguage = { language, query, parser }
