@@ -294,6 +294,38 @@ test("/theme <name> dispatches to CommandActions.setTheme with the trimmed name"
   expect(calls).toEqual(["set:light"])
 })
 
+test("/provider is registered with a /providers alias", () => {
+  expect(COMMANDS.some((c) => c.name === "provider")).toBe(true)
+  const alias = findCommand("/providers")
+  expect(alias && "command" in alias ? alias.command.name : "").toBe("provider")
+})
+
+test("/provider with no arg dispatches to CommandActions.pickProvider", () => {
+  const match = findCommand("/provider")
+  expect(match && "command" in match ? match.arg : "x").toBe("")
+
+  const calls: string[] = []
+  const actions = {
+    pickProvider: () => calls.push("picked"),
+    selectProvider: (name: string) => calls.push(`select:${name}`),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["picked"])
+})
+
+test("/provider <name> dispatches to CommandActions.selectProvider with the trimmed name", () => {
+  const match = findCommand("/provider  openai ")
+  expect(match && "command" in match ? match.arg : "").toBe("openai")
+
+  const calls: string[] = []
+  const actions = {
+    pickProvider: () => calls.push("picked"),
+    selectProvider: (name: string) => calls.push(`select:${name}`),
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual(["select:openai"])
+})
+
 test("/paste-img is registered and invokes CommandActions.pasteImage", () => {
   expect(COMMANDS.some((c) => c.name === "paste-img")).toBe(true)
   const match = findCommand("/paste-img")

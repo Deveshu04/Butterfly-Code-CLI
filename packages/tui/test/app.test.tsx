@@ -102,6 +102,33 @@ function startFakeToolCallServer(command: string): { baseURL: string; stop: () =
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+function startFakeOpenAIModelsServer(ids: string[]): { baseURL: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    fetch: (req) => {
+      const url = new URL(req.url)
+      if (url.pathname === "/models") return Response.json({ data: ids.map((id) => ({ id })) })
+      return new Response("not found", { status: 404 })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
+}
+
+/** Same idea for the keyless "ollama" provider — fetchOllamaModels hits `${baseURL}/api/tags`. */
+function startFakeOllamaServer(names: string[]): { baseURL: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    fetch: (req) => {
+      const url = new URL(req.url)
+      if (url.pathname === "/api/tags") {
+        return Response.json({ models: names.map((name) => ({ name })) })
+      }
+      return new Response("not found", { status: 404 })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
+}
+
 async function waitForFrameSlow(
   t: { renderOnce: () => Promise<void>; captureCharFrame: () => string },
   predicate: (frame: string) => boolean,
@@ -225,12 +252,12 @@ test("/help lists commands in a configured session", async () => {
         home={tempDir("bfly-home-")}
       />
     ),
-    { width: 100, height: 40 },
+    { width: 100, height: 48 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/help")
   t.mockInput.pressEnter()
-  await t.waitForFrame((frame: string) => frame.includes("/setup"))
+  await waitForFrameSlow(t, (frame: string) => frame.includes("/setup"))
   expect(t.captureCharFrame()).toContain("/quit")
   t.renderer.destroy()
 })
@@ -779,6 +806,290 @@ test("/theme with an unknown name errors instead of silently switching to dark",
   expect(themeTokens()).toEqual(DARK_TOKENS)
   t.renderer.destroy()
 })
+
+test("/provider opens a picker showing (current) and ✓ key markers", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{
+          model: "anthropic/claude-x",
+          providers: { anthropic: { apiKey: "sk-a" } },
+        }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/provider")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (f) => f.includes("provider —"))
+  expect(frame).toContain("anthropic  (current)")
+  expect(frame).toContain("✓ key")
+  expect(frame).toContain("openai")
+  t.renderer.destroy()
+})
+
+test("/provider <prefix> resolves a unique prefix and skips the picker", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "openai/gpt-4" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/provider anthro")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (f) => f.includes("anthropic API key"))
+  expect(frame).not.toContain("provider —")
+  t.renderer.destroy()
+})
+
+test("/provider <unknown> errors and lists valid provider names", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/provider bogus")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (f) => f.includes("unknown provider"))
+  expect(frame).toContain("bogus")
+  expect(frame).toContain("openrouter")
+  t.renderer.destroy()
+})
+
+test("/provider ollama (keyless) skips the key step and opens a live model picker", async () => {
+  const home = tempDir("bfly-home-")
+  const server = startFakeOllamaServer(["llama3:8b", "qwen3:8b"])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{
+            model: "openai/gpt-4",
+            providers: { ollama: { baseURL: server.baseURL } },
+          }}
+          home={home}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/provider ollama")
+    t.mockInput.pressEnter()
+    const frame = await waitForFrameSlow(t, (f) => f.includes("ollama models"))
+    expect(frame).not.toContain("API key")
+    expect(frame).toContain("llama3:8b")
+    expect(frame).toContain("qwen3:8b")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 20_000)
+
+test("Esc at the ollama model picker cancels — nothing is written", async () => {
+  const home = tempDir("bfly-home-")
+  const server = startFakeOllamaServer(["llama3:8b"])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{
+            model: "anthropic/claude-x",
+            providers: { ollama: { baseURL: server.baseURL } },
+          }}
+          home={home}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/provider ollama")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("llama3:8b"))
+    t.mockInput.pressEscape()
+    await waitForFrameSlow(t, (f) => !f.includes("llama3:8b"))
+    expect(existsSync(join(home, ".config", "butterfly", "butterfly.jsonc"))).toBe(false)
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 20_000)
+
+test("Esc at the key step cancels the whole flow — no key typed, no config written", async () => {
+  const home = tempDir("bfly-home-")
+  const t = await testRender(
+    () => (
+      <App cwd={tempDir("bfly-tui-")} config={{ model: "anthropic/claude-x" }} home={home} />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/provider openai")
+  t.mockInput.pressEnter()
+  const keyFrame = await waitForFrameSlow(t, (f) => f.includes("openai API key"))
+  expect(keyFrame).toContain("paste your API key")
+  t.mockInput.typeText("sk-typed-but-abandoned")
+  t.mockInput.pressEscape()
+  await waitForFrameSlow(t, (f) => f.includes("provider switch cancelled"))
+  expect(t.captureCharFrame()).not.toContain("sk-typed-but-abandoned")
+  expect(existsSync(join(home, ".config", "butterfly", "butterfly.jsonc"))).toBe(false)
+  t.renderer.destroy()
+})
+
+test("key step: Enter with an existing key keeps it — does not overwrite or blank it", async () => {
+  const home = tempDir("bfly-home-")
+  const cfgDir = join(home, ".config", "butterfly")
+  mkdirSync(cfgDir, { recursive: true })
+  writeFileSync(
+    join(cfgDir, "butterfly.jsonc"),
+    JSON.stringify({
+      model: "anthropic/claude-x",
+      providers: { openai: { apiKey: "sk-openai-original" } },
+    }),
+  )
+  const server = startFakeOpenAIModelsServer(["gpt-eval-1"])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{
+            model: "anthropic/claude-x",
+            providers: { openai: { apiKey: "sk-openai-original", baseURL: server.baseURL } },
+          }}
+          home={home}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/provider openai")
+    t.mockInput.pressEnter()
+    const keyFrame = await waitForFrameSlow(t, (f) => f.includes("openai API key"))
+    expect(keyFrame).toContain("Enter keeps the saved key")
+    t.mockInput.pressEnter() // blank — keep existing
+    await waitForFrameSlow(t, (f) => f.includes("gpt-eval-1"))
+    t.mockInput.pressEnter() // pick the only model
+    await waitForFrameSlow(t, (f) => f.includes("Ready on openai/gpt-eval-1"))
+
+    const saved = JSON.parse(readFileSync(join(cfgDir, "butterfly.jsonc"), "utf8"))
+    expect(saved.providers.openai.apiKey).toBe("sk-openai-original")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 20_000)
+
+test("key step: typing a new value replaces the saved key", async () => {
+  const home = tempDir("bfly-home-")
+  const cfgDir = join(home, ".config", "butterfly")
+  mkdirSync(cfgDir, { recursive: true })
+  writeFileSync(
+    join(cfgDir, "butterfly.jsonc"),
+    JSON.stringify({
+      model: "anthropic/claude-x",
+      providers: { openai: { apiKey: "sk-openai-original" } },
+    }),
+  )
+  const server = startFakeOpenAIModelsServer(["gpt-eval-1"])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{
+            model: "anthropic/claude-x",
+            providers: { openai: { apiKey: "sk-openai-original", baseURL: server.baseURL } },
+          }}
+          home={home}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/provider openai")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("openai API key"))
+    t.mockInput.typeText("sk-openai-replaced")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("gpt-eval-1"))
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("Ready on openai/gpt-eval-1"))
+
+    const saved = JSON.parse(readFileSync(join(cfgDir, "butterfly.jsonc"), "utf8"))
+    expect(saved.providers.openai.apiKey).toBe("sk-openai-replaced")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 20_000)
+
+test("model pick persists provider+model+key, preserves other providers' keys, and applies live", async () => {
+  const home = tempDir("bfly-home-")
+  const cfgDir = join(home, ".config", "butterfly")
+  mkdirSync(cfgDir, { recursive: true })
+  writeFileSync(
+    join(cfgDir, "butterfly.jsonc"),
+    JSON.stringify({
+      model: "anthropic/claude-x",
+      providers: { anthropic: { apiKey: "sk-anthropic-keep" } },
+    }),
+  )
+  const server = startFakeOpenAIModelsServer(["gpt-eval-1"])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{
+            model: "anthropic/claude-x",
+            providers: {
+              anthropic: { apiKey: "sk-anthropic-keep" },
+              openai: { baseURL: server.baseURL },
+            },
+          }}
+          home={home}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/provider openai")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("openai API key"))
+    t.mockInput.typeText("sk-openai-new")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("gpt-eval-1"))
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("Ready on openai/gpt-eval-1"))
+
+    // Live apply: header model ref updates without a restart.
+    expect(t.captureCharFrame()).toContain("openai/gpt-eval-1")
+
+    const saved = JSON.parse(readFileSync(join(cfgDir, "butterfly.jsonc"), "utf8"))
+    expect(saved.model).toBe("openai/gpt-eval-1")
+    expect(saved.providers.openai.apiKey).toBe("sk-openai-new")
+    expect(saved.providers.anthropic.apiKey).toBe("sk-anthropic-keep")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 20_000)
 
 test("typing @ opens the mention picker and selecting inserts an @token", async () => {
   const cwd = tempDir("bfly-tui-")

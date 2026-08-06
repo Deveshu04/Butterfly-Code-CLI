@@ -402,6 +402,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     filter: string
     onPick: (value: string) => void
   } | null>(null)
+  const [providerKeyStep, setProviderKeyStep] = createSignal<{
+    provider: string
+    hasExisting: boolean
+  } | null>(null)
   const [cmdIndex, setCmdIndex] = createSignal(0)
   const [planMode, setPlanMode] = createSignal(false)
   const [queued, setQueued] = createSignal<string[]>([])
@@ -437,7 +441,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   let loopAbort: AbortController | undefined
 
   const cmdList = (): SlashCommand[] =>
-    !setup() && !picker() && !busy() ? commandMatches(draft()) : []
+    !setup() && !picker() && !busy() && !providerKeyStep() ? commandMatches(draft()) : []
 
   const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
   const [spin, setSpin] = createSignal(0)
@@ -839,16 +843,76 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const modelLabel = (m: { id: string; context?: number; name?: string }): string =>
     `${m.id}${m.context ? `  (${Math.round(m.context / 1000)}k ctx)` : ""}${m.name && m.name !== m.id ? `  — ${m.name}` : ""}`
 
+  const noModelsNote = (providerId: string): string =>
+    providerId === "ollama"
+      ? "no local ollama models found (is the server running? `ollama pull <model>` to add one)"
+      : `no model list available for "${providerId}" (offline or bad key?) — you can still type any model id`
+
   const modelListText = async (providerId: string, apiKey?: string): Promise<string> => {
     const models = await modelListItems(providerId, apiKey)
-    if (models.length === 0) {
-      return providerId === "ollama"
-        ? "no local ollama models found (is the server running? `ollama pull <model>` to add one)"
-        : `no model list available for "${providerId}" (offline or bad key?) — you can still type any model id`
-    }
+    if (models.length === 0) return noModelsNote(providerId)
     const shown = models.slice(0, 25)
     const more = models.length - shown.length
     return `${providerId} models:\n${shown.map((m) => `  ${modelLabel(m)}`).join("\n")}${more > 0 ? `\n  … ${more} more — type any id` : ""}`
+  }
+
+  const applyProviderSelection = (
+    provider: string,
+    modelId: string,
+    newKey: string | undefined,
+  ): void => {
+    try {
+      const path = saveGlobalConfig(
+        {
+          model: `${provider}/${modelId}`,
+          ...(newKey ? { providers: { [provider]: { apiKey: newKey } } } : {}),
+        },
+        { home },
+      )
+      setConfig(loadConfig({ cwd: props.cwd, home }))
+      refreshCtxLimit()
+      setCtxUsed(0)
+      push({ kind: "info", text: `Saved to ${path}` })
+      push({ kind: "info", text: `Ready on ${provider}/${modelId}` })
+      if (provider !== "ollama" && provider !== "lmstudio" && !catalog.lookup(provider, modelId)) {
+        push({
+          kind: "info",
+          text: `note: "${provider}/${modelId}" is not in the models.dev catalog — double-check the id if requests fail (/provider to change it).`,
+        })
+      }
+    } catch (error) {
+      push({
+        kind: "error",
+        text: `Could not save config: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
+
+  const openProviderModelPicker = async (
+    provider: string,
+    newKey: string | undefined,
+  ): Promise<void> => {
+    const models = await modelListItems(provider, newKey)
+    if (models.length === 0) {
+      push({ kind: "info", text: noModelsNote(provider) })
+      return
+    }
+    setPicker({
+      title: `${provider} models — type to filter · ↑↓ · Enter switch · Esc`,
+      items: models.map((m) => ({ label: modelLabel(m), value: m.id })),
+      index: 0,
+      filter: "",
+      onPick: (value) => applyProviderSelection(provider, value, newKey),
+    })
+  }
+
+  const handleProviderKeySubmit = (
+    step: { provider: string; hasExisting: boolean },
+    value: string,
+  ): void => {
+    const typed = value.trim()
+    setProviderKeyStep(null)
+    void openProviderModelPicker(step.provider, typed === "" ? undefined : typed)
   }
 
   const performRewind = async (
@@ -1433,6 +1497,54 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         })
       }
     },
+    pickProvider: () => {
+      const ref = modelRef()
+      let currentProvider: string | undefined
+      try {
+        currentProvider = ref ? parseModelRef(ref).providerId : undefined
+      } catch {
+        currentProvider = undefined
+      }
+      setPicker({
+        title: "provider — ↑↓ · Enter select · Esc",
+        items: PROVIDERS.map((p) => {
+          const marks = [
+            p.id === currentProvider ? "(current)" : "",
+            config().providers?.[p.id]?.apiKey ? "✓ key" : "",
+          ]
+            .filter(Boolean)
+            .join("  ")
+          return { label: marks ? `${p.id}  ${marks}` : p.id, value: p.id }
+        }),
+        index: Math.max(
+          0,
+          PROVIDERS.findIndex((p) => p.id === currentProvider),
+        ),
+        filter: "",
+        onPick: (value) => actions.selectProvider(value),
+      })
+    },
+    selectProvider: (nameOrPrefix) => {
+      const trimmed = nameOrPrefix.trim().toLowerCase()
+      const exact = PROVIDERS.find((p) => p.id === trimmed)
+      const prefixMatches = PROVIDERS.filter((p) => p.id.startsWith(trimmed))
+      const choice = exact ?? (prefixMatches.length === 1 ? prefixMatches[0] : undefined)
+      if (!choice) {
+        push({
+          kind: "error",
+          text: `unknown provider "${nameOrPrefix}" — try ${PROVIDERS.map((p) => p.id).join(", ")}`,
+        })
+        return
+      }
+      if (choice.needsKey) {
+        setProviderKeyStep({
+          provider: choice.id,
+          hasExisting: Boolean(config().providers?.[choice.id]?.apiKey),
+        })
+        return
+      }
+      void openProviderModelPicker(choice.id, undefined)
+    },
     initProject: () => {
       submit(
         "Analyze this repository: read the README, package manifests, build/test scripts, and the main entry points (use glob/read/explore — stay efficient). Then use the memory tool with scope 'project' to store up to 5 terse durable facts: exact build/test/lint commands, architecture invariants, and conventions. Finish with a one-paragraph orientation summary.",
@@ -1746,6 +1858,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const submit = (value: string, source: "composer" | "internal" = "composer") => {
     if (picker()) return
     const rawTask = value.trim()
+    const keyStep = providerKeyStep()
+    if (rawTask === "" && keyStep) {
+      handleProviderKeySubmit(keyStep, "")
+      return
+    }
     if (rawTask === "" || pendingAsk()) return
     const task = expandComposerText(rawTask, pasteChips())
     if (source === "composer") {
@@ -1772,6 +1889,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     const stage = setup()
     if (stage) {
       handleSetupSubmit(stage, task)
+      return
+    }
+    if (keyStep) {
+      handleProviderKeySubmit(keyStep, task)
       return
     }
 
@@ -1997,7 +2118,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       return
     }
-    if (key.ctrl && key.name === "o" && !setup()) {
+    if (key.ctrl && key.name === "o" && !setup() && !providerKeyStep()) {
       key.preventDefault()
       if (pagerOpen()) closePager()
       else if (!picker()) openPager()
@@ -2101,10 +2222,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       return
     }
-    if (key.ctrl && key.name === "v" && !setup() && !busy()) {
+    if (key.ctrl && key.name === "v" && !setup() && !busy() && !providerKeyStep()) {
       void actions.pasteImage()
     }
-    if (!setup() && !pagerOpen() && !picker() && !pendingAsk()) {
+    if (!setup() && !pagerOpen() && !picker() && !pendingAsk() && !providerKeyStep()) {
       if (key.sequence === "\n" || key.name === "linefeed" || (key.ctrl && key.name === "j")) {
         key.preventDefault()
         setDraft(draft() + NEWLINE_MARKER)
@@ -2130,7 +2251,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         }
       }
     }
-    if (!setup() && !busy() && (draft() === "" || historyPos >= 0)) {
+    if (!setup() && !busy() && !providerKeyStep() && (draft() === "" || historyPos >= 0)) {
       const entries = history()
       if (key.name === "up" && entries.length > 0) {
         historyPos = historyPos < 0 ? entries.length - 1 : Math.max(0, historyPos - 1)
@@ -2170,6 +2291,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
     if (key.name === "escape" && setup() && config().model) {
       setSetup(null)
+      return
+    }
+    if (key.name === "escape" && providerKeyStep()) {
+      setProviderKeyStep(null)
+      setDraft("")
+      push({ kind: "info", text: "provider switch cancelled" })
       return
     }
   })
@@ -2447,6 +2574,26 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         )}
       </Show>
 
+      <Show when={providerKeyStep()}>
+        {(step: Accessor<{ provider: string; hasExisting: boolean }>) => (
+          <box
+            flexShrink={0}
+            border
+            borderStyle="rounded"
+            borderColor={themeTokens().accent}
+            paddingLeft={1}
+            flexDirection="column"
+          >
+            <text fg={themeTokens().accent}>{`${step().provider} API key`}</text>
+            <text fg={themeTokens().muted}>
+              {step().hasExisting
+                ? "Enter keeps the saved key · type to replace · Esc cancels"
+                : "paste your API key · Esc cancels"}
+            </text>
+          </box>
+        )}
+      </Show>
+
       <Show when={picker()}>
         {(p: Accessor<{ title: string; index: number; filter: string }>) => {
           const items = () => pickerItems()
@@ -2558,7 +2705,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           value={draft()}
           onInput={(value: string) => {
             const previous = draft()
-            if (!setup() && !busy() && !picker()) {
+            if (!setup() && !busy() && !picker() && !providerKeyStep()) {
               const detected = detectAttachableImage(props.cwd, value)
               if (detected) {
                 setAttachedImages((imgs) => [
@@ -2571,7 +2718,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 return
               }
             }
-            if (!setup() && !picker() && !pagerOpen()) {
+            if (!setup() && !picker() && !pagerOpen() && !providerKeyStep()) {
               const inserted = insertedSpan(previous, value)
               if (inserted.length >= PASTE_RATE_HEURISTIC_CHARS && shouldChip(inserted)) {
                 const created = addPasteChip(previous, inserted, pasteChips(), nextChipNumber)
@@ -2586,7 +2733,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             setDraft(value)
             setCmdIndex(0)
             historyPos = -1
-            if (!setup() && !busy() && !picker() && isMentionTrigger(previous, value)) {
+            if (!setup() && !busy() && !picker() && !providerKeyStep() && isMentionTrigger(previous, value)) {
               openMentionPicker()
             }
           }}
@@ -2594,9 +2741,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           placeholder={
             setup()
               ? setupPrompt()
-              : busy()
-                ? "working… (Ctrl+C to interrupt)"
-                : "describe a task — /help for commands"
+              : providerKeyStep()
+                ? `${providerKeyStep()?.provider} API key`
+                : busy()
+                  ? "working… (Ctrl+C to interrupt)"
+                  : "describe a task — /help for commands"
           }
         />
       </box>

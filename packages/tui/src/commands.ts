@@ -47,6 +47,9 @@ export interface CommandActions {
   pickTheme(): void
   /** Switches + persists (saveGlobalConfig) the named theme. */
   setTheme(name: string): void
+  pickProvider(): void
+  /** `/provider <name>` — exact or unique-prefix match; also the picker's onPick target. */
+  selectProvider(nameOrPrefix: string): void
 }
 
 export interface SlashCommand {
@@ -72,6 +75,16 @@ export const COMMANDS: SlashCommand[] = [
     args: "",
     description: "configure provider, API key, and model",
     run: (_arg, a) => a.openSetup(),
+  },
+  {
+    name: "provider",
+    args: "[name]",
+    description: "switch provider, API key, and model — picker-based",
+    aliases: ["providers"],
+    run: (arg, a) => {
+      if (arg.trim() === "") a.pickProvider()
+      else a.selectProvider(arg.trim())
+    },
   },
   {
     name: "model",
