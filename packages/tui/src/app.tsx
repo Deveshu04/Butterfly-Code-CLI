@@ -397,6 +397,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const [setupModels, setSetupModels] = createSignal<string>("")
   const [picker, setPicker] = createSignal<{
     title: string
+    note?: string
     items: { label: string; value: string }[]
     index: number
     filter: string
@@ -830,14 +831,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const modelListItems = async (
     providerId: string,
     apiKey?: string,
-  ): Promise<{ id: string; context?: number; name?: string }[]> => {
+  ): Promise<{ models: { id: string; context?: number; name?: string }[]; live: boolean }> => {
     const providerConfig = config().providers?.[providerId]
     const live = await fetchProviderModels(providerId, {
       apiKey: apiKey ?? providerConfig?.apiKey,
       baseURL: providerConfig?.baseURL,
     })
-    if (live.length > 0) return live
-    return catalog.listModels(providerId)
+    if (live.length > 0) return { models: live, live: true }
+    return { models: catalog.listModels(providerId), live: false }
   }
 
   const modelLabel = (m: { id: string; context?: number; name?: string }): string =>
@@ -848,8 +849,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       ? "no local ollama models found (is the server running? `ollama pull <model>` to add one)"
       : `no model list available for "${providerId}" (offline or bad key?) — you can still type any model id`
 
+  const catalogFallbackNote = (providerId: string): string =>
+    PROVIDERS.find((p) => p.id === providerId)?.needsKey === true
+      ? "live list unavailable — showing catalog; the key was NOT validated"
+      : `live list unavailable — showing catalog; ${providerId} was not reachable`
+
   const modelListText = async (providerId: string, apiKey?: string): Promise<string> => {
-    const models = await modelListItems(providerId, apiKey)
+    const { models } = await modelListItems(providerId, apiKey)
     if (models.length === 0) return noModelsNote(providerId)
     const shown = models.slice(0, 25)
     const more = models.length - shown.length
@@ -860,6 +866,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     provider: string,
     modelId: string,
     newKey: string | undefined,
+    fromCatalog = false,
   ): void => {
     try {
       const path = saveGlobalConfig(
@@ -874,6 +881,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       setCtxUsed(0)
       push({ kind: "info", text: `Saved to ${path}` })
       push({ kind: "info", text: `Ready on ${provider}/${modelId}` })
+      if (fromCatalog) {
+        push({ kind: "info", text: `note: ${catalogFallbackNote(provider)}` })
+      }
       if (provider !== "ollama" && provider !== "lmstudio" && !catalog.lookup(provider, modelId)) {
         push({
           kind: "info",
@@ -892,17 +902,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     provider: string,
     newKey: string | undefined,
   ): Promise<void> => {
-    const models = await modelListItems(provider, newKey)
+    const { models, live } = await modelListItems(provider, newKey)
     if (models.length === 0) {
       push({ kind: "info", text: noModelsNote(provider) })
       return
     }
     setPicker({
       title: `${provider} models — type to filter · ↑↓ · Enter switch · Esc`,
+      ...(live ? {} : { note: catalogFallbackNote(provider) }),
       items: models.map((m) => ({ label: modelLabel(m), value: m.id })),
       index: 0,
       filter: "",
-      onPick: (value) => applyProviderSelection(provider, value, newKey),
+      onPick: (value) => applyProviderSelection(provider, value, newKey, !live),
     })
   }
 
@@ -992,7 +1003,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     showModels: async () => {
       const ref = modelRef()
       const providerId = ref ? parseModelRef(ref).providerId : "openrouter"
-      const models = await modelListItems(providerId)
+      const { models, live } = await modelListItems(providerId)
       if (models.length === 0) {
         push({ kind: "info", text: await modelListText(providerId) })
         return
@@ -1004,6 +1015,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       )
       setPicker({
         title: `${providerId} models — type to filter · ↑↓ · Enter switch · Esc`,
+        ...(live ? {} : { note: catalogFallbackNote(providerId) }),
         items: models.map((m) => ({ label: modelLabel(m), value: m.id })),
         index,
         filter: "",
@@ -2070,7 +2082,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   }
 
   usePaste((event) => {
-    if (setup() || picker() || pagerOpen()) return
+    if (setup() || picker() || pagerOpen() || providerKeyStep()) return
     const text = decodePasteBytes(event.bytes)
     if (detectAttachableImage(props.cwd, draft() + text)) return
     if (!shouldChip(text)) return
@@ -2296,6 +2308,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     if (key.name === "escape" && providerKeyStep()) {
       setProviderKeyStep(null)
       setDraft("")
+      setPasteChips(new Map())
       push({ kind: "info", text: "provider switch cancelled" })
       return
     }
@@ -2595,7 +2608,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       </Show>
 
       <Show when={picker()}>
-        {(p: Accessor<{ title: string; index: number; filter: string }>) => {
+        {(p: Accessor<{ title: string; note?: string; index: number; filter: string }>) => {
           const items = () => pickerItems()
           const windowStart = () => Math.max(0, Math.min(p().index - 4, items().length - 9))
           return (
@@ -2608,6 +2621,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               flexDirection="column"
             >
               <text fg={themeTokens().accent}>{p().title}</text>
+              <Show when={p().note}>
+                {(note: Accessor<string>) => (
+                  <text fg={themeTokens().warn}>{` ${note()}`}</text>
+                )}
+              </Show>
               <Show when={p().filter !== ""}>
                 <text
                   fg={themeTokens().warn}

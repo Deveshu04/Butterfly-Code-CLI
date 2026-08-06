@@ -1091,6 +1091,134 @@ test("model pick persists provider+model+key, preserves other providers' keys, a
   }
 }, 20_000)
 
+
+function startFake401ModelsServer(): { baseURL: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      new Response(JSON.stringify({ error: { code: "invalid_api_key" } }), { status: 401 }),
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
+}
+
+test("a 401 on the live model list falls back to the catalog WITH a visible not-validated note", async () => {
+  const home = tempDir("bfly-home-")
+  // Non-empty catalog for openai, so the fallback actually has rows to show
+  // (an empty one takes the noModelsNote branch, a different path).
+  seedCatalogCache(home, "openai", "gpt-cat-1", { input: 1, output: 2 })
+  const server = startFake401ModelsServer()
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{
+            model: "anthropic/claude-x",
+            providers: { openai: { baseURL: server.baseURL } },
+          }}
+          home={home}
+        />
+      ),
+      { width: 120, height: 32 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/provider openai")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("openai API key"))
+    t.mockInput.typeText("sk-expired-and-wrong")
+    t.mockInput.pressEnter()
+
+    const picked = await waitForFrameSlow(t, (f) => f.includes("gpt-cat-1"))
+    expect(picked).toContain("live list unavailable")
+    expect(picked).toContain("the key was NOT validated")
+
+    t.mockInput.pressEnter()
+    const savedFrame = await waitForFrameSlow(t, (f) => f.includes("Ready on openai/gpt-cat-1"))
+    // A note, not a blocker — the save still happens in full.
+    const saved = JSON.parse(
+      readFileSync(join(home, ".config", "butterfly", "butterfly.jsonc"), "utf8"),
+    )
+    expect(saved.model).toBe("openai/gpt-cat-1")
+    expect(saved.providers.openai.apiKey).toBe("sk-expired-and-wrong")
+    // …and the caution outlives the picker that carried it, since the save
+    // lines are what the user is left looking at.
+    expect(savedFrame).toContain("the key was NOT validated")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("a live model list carries NO catalog note — the disclosure is not blanket noise", async () => {
+  const home = tempDir("bfly-home-")
+  const server = startFakeOpenAIModelsServer(["gpt-eval-1"])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{
+            model: "anthropic/claude-x",
+            providers: { openai: { baseURL: server.baseURL } },
+          }}
+          home={home}
+        />
+      ),
+      { width: 120, height: 32 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/provider openai")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("openai API key"))
+    t.mockInput.typeText("sk-good")
+    t.mockInput.pressEnter()
+    const picked = await waitForFrameSlow(t, (f) => f.includes("gpt-eval-1"))
+    expect(picked).not.toContain("live list unavailable")
+    t.mockInput.pressEnter()
+    const savedFrame = await waitForFrameSlow(t, (f) => f.includes("Ready on openai/gpt-eval-1"))
+    expect(savedFrame).not.toContain("NOT validated")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("a chip-worthy paste at the /provider key step stays raw text and leaves no orphan payload", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 120, height: 34 },
+  )
+  await t.renderOnce()
+  const composer = findComposer(t.renderer.root)
+  if (!composer) throw new Error("composer not found")
+
+  t.mockInput.typeText("/provider openai")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f) => f.includes("openai API key"))
+
+  const pasted = `sk-proj-${"A".repeat(900)}`
+  await t.mockInput.pasteBracketedText(pasted)
+  await t.renderOnce()
+  expect(composer.value).toBe(pasted)
+  expect(t.captureCharFrame()).not.toContain("[Pasted #")
+
+  t.mockInput.pressEscape()
+  await waitForFrameSlow(t, (f) => f.includes("provider switch cancelled"))
+
+  // The abandoned paste must not survive as a payload nobody references.
+  t.mockInput.typeText("hello there")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f) => f.includes("hello there"))
+  expect(t.captureCharFrame()).not.toContain("no longer in the message")
+  t.renderer.destroy()
+}, 30_000)
+
 test("typing @ opens the mention picker and selecting inserts an @token", async () => {
   const cwd = tempDir("bfly-tui-")
   writeFileSync(join(cwd, "notes.md"), "hello\n")
