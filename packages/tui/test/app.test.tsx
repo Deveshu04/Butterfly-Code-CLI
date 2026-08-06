@@ -168,7 +168,7 @@ function startFakeSequenceServer(
 function startFakeReasoningServer(
   reasoningText: string,
   replyText: string,
-  opts: { delayMs?: number } = {},
+  opts: { delayMs?: number; holdMs?: number } = {},
 ): { baseURL: string; stop: () => void } {
   const server = Bun.serve({
     port: 0,
@@ -199,6 +199,7 @@ function startFakeReasoningServer(
               }),
             ),
           )
+          if (opts.holdMs) await new Promise((resolve) => setTimeout(resolve, opts.holdMs))
           controller.enqueue(
             enc.encode(
               sseChunk({
@@ -210,6 +211,65 @@ function startFakeReasoningServer(
           )
           controller.enqueue(enc.encode("data: [DONE]\n\n"))
           controller.close()
+        },
+      })
+      return new Response(stream, { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
+}
+
+function startFakeReasoningThenErrorServer(reasoningText: string): {
+  baseURL: string
+  stop: () => void
+} {
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => {
+      const body =
+        sseChunk({
+          id: "1",
+          choices: [
+            {
+              index: 0,
+              delta: { role: "assistant", reasoning_content: reasoningText },
+              finish_reason: null,
+            },
+          ],
+        }) +
+        sseChunk({ error: { message: "the upstream model fell over", type: "overloaded_error" } })
+      return new Response(body, { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
+}
+
+function startFakeReasoningHangServer(reasoningText: string): {
+  baseURL: string
+  stop: () => void
+} {
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              sseChunk({
+                id: "1",
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: "assistant", reasoning_content: reasoningText },
+                    finish_reason: null,
+                  },
+                ],
+              }),
+            ),
+          )
+          // …and never closes.
         },
       })
       return new Response(stream, { headers: { "content-type": "text/event-stream" } })
@@ -3387,6 +3447,12 @@ test("todo tool meta renders a card with glyphs + progress, and only the LATEST 
 
     expect(spanFgFor(t, "[~] second task")).toEqual(hexToInts(DARK_TOKENS.accent))
 
+    t.mockInput.typeText("/theme light")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (frame) => frame.includes("theme set to light"))
+    expect(spanFgFor(t, "[~] second task")).toEqual(hexToInts(LIGHT_TOKENS.accent))
+    expect(LIGHT_TOKENS.accent).not.toBe(DARK_TOKENS.accent)
+
     t.renderer.destroy()
   } finally {
     server.stop()
@@ -3484,5 +3550,133 @@ test("a provider error renders a structured card from the classified error — k
     t.renderer.destroy()
   } finally {
     server.stop(true)
+  }
+}, 30_000)
+
+
+test("a provider error mid-reasoning collapses the open thinking block instead of leaving it streaming under the error card", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeReasoningThenErrorServer(
+    "alpha-reasoning\nbeta-reasoning\ngamma-reasoning",
+  )
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-reasoning-error",
+            providers: { fake: { baseURL: server.baseURL } },
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("think then break")
+    t.mockInput.pressEnter()
+
+    // Wait for the turn to be OVER (the idle composer placeholder), not just
+    // for the card: while busy() the status bar prints its own "thinking… "
+    // spinner, which would make the "no open block" assertion below ambiguous.
+    const settled = await waitForFrameSlow(
+      t,
+      (frame) => frame.includes("describe a task") && frame.includes("provider unavailable"),
+    )
+    expect(settled).toContain("error: provider unavailable/overloaded — try again shortly")
+    // …and the block above it is COLLAPSED: no streaming header, no rolling
+    // reasoning preview. This turn never produced a text-delta, a tool-call
+    // or a finish — the error event is the only close signal there was.
+    expect(settled).toMatch(/thought for \d+s/)
+    expect(settled).not.toContain("thinking…")
+    expect(settled).not.toContain("beta-reasoning")
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("Ctrl+C mid-reasoning collapses the thinking block — an aborted turn ends with no finish AND no error event", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeReasoningHangServer("alpha-reasoning\nbeta-reasoning\ngamma-reasoning")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-reasoning-abort",
+            providers: { fake: { baseURL: server.baseURL } },
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34, exitOnCtrlC: false },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("think forever")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (frame) => frame.includes("beta-reasoning"))
+
+    t.mockInput.pressKey("c", { ctrl: true })
+    const settled = await waitForFrameSlow(
+      t,
+      (frame) => frame.includes("turn interrupted") && frame.includes("describe a task"),
+    )
+    expect(settled).toMatch(/thought(?: for \d+s)?/)
+    expect(settled).not.toContain("thinking…")
+    expect(settled).not.toContain("beta-reasoning")
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("the turn-end sweep is idempotent — a block already collapsed by the answer keeps its frozen duration", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  // The answer arrives immediately (block freezes at ~0s) but the FINISH
+  // chunk is held back 2.5s, so a .finally that re-stamped thinkClosedAt
+  // with a fresh now() could not possibly still read the same duration.
+  const server = startFakeReasoningServer("idempotence-reasoning", "idempotent answer", {
+    holdMs: 2_500,
+  })
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-reasoning-idempotent",
+            providers: { fake: { baseURL: server.baseURL } },
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 120, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("think briefly")
+    t.mockInput.pressEnter()
+
+    const mid = await waitForFrameSlow(t, (frame) => frame.includes("idempotent answer"))
+    const frozen = mid.match(/thought for (\d+)s/)
+    expect(frozen).not.toBeNull()
+
+    const settled = await waitForFrameSlow(
+      t,
+      (frame) => frame.includes("describe a task") && frame.includes("idempotent answer"),
+    )
+    expect(settled).toContain(`thought for ${frozen?.[1]}s`)
+    expect(settled).not.toContain("thinking…")
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
   }
 }, 30_000)

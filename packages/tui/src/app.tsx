@@ -1039,16 +1039,20 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const finalizeOpenThinking = () => {
     const all = [...messages()]
-    const last = all.at(-1)
-    if (last?.kind === "thinking" && last.thinkClosedAt === undefined) {
-      all[all.length - 1] = { ...last, thinkClosedAt: Date.now() }
-      setMessages(all)
-    } else if (last?.kind === "assistant" && last.thinkClosedAt === undefined) {
-      if (splitThink(last.text).thinking !== "") {
-        all[all.length - 1] = { ...last, thinkClosedAt: Date.now() }
-        setMessages(all)
-      }
+    let changed = false
+    for (let i = all.length - 1; i >= 0; i--) {
+      const message = all[i]
+      if (message === undefined) continue
+      if (message.kind === "user") break // turn boundary — nothing older is ours
+      if (message.thinkClosedAt !== undefined) continue
+      const isThinkingBlock =
+        message.kind === "thinking" ||
+        (message.kind === "assistant" && splitThink(message.text).thinking !== "")
+      if (!isThinkingBlock) continue
+      all[i] = { ...message, thinkClosedAt: Date.now() }
+      changed = true
     }
+    if (changed) setMessages(all)
   }
 
   const onEvent = (event: RunnerEvent) => {
@@ -1073,6 +1077,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         setCtxUsed(event.usage.input + event.usage.output)
         break
       case "error": {
+        finalizeOpenThinking()
         providerErrorRendered = true
         push(
           event.info
@@ -2331,6 +2336,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         }
       })
       .finally(() => {
+        finalizeOpenThinking()
         applyAttention(
           decideAttention(
             { kind: "turn.end", detail: turnDetail },
