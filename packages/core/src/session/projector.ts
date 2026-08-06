@@ -45,9 +45,14 @@ export function foldTimeline(events: SessionEvent[]): {
       case "tool.pruned":
         for (const id of event.callIds) pruned.add(id)
         break
-      case "session.rewound":
-        entries = entries.filter((entry) => entry.index < event.toIndex)
+      case "session.rewound": {
+        const cut = Math.min(event.toIndex, index)
+        const survivingFragments = entries.filter(
+          (entry) => entry.index >= cut && entry.event.type === "context.fragment",
+        )
+        entries = [...foldTimeline(events.slice(0, cut)).entries, ...survivingFragments]
         break
+      }
       case "turn.snapshot":
         break
       case "hook.run":

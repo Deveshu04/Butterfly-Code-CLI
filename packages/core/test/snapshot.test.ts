@@ -155,3 +155,28 @@ test("session.rewound truncates the projected timeline", () => {
   expect(texts).toContain("keep me")
   expect(texts).not.toContain("undone")
 })
+
+test("/undo of a turn that compacted mid-flight replays to a correct, non-empty timeline", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bfly-undo-compact-"))
+  const journal = SessionJournal.create(dir)
+  journal.append({ type: "message.user", id: "u1", text: "old ask", time: t }) // 0
+  journal.append({ type: "message.assistant", id: "a1", text: "old reply", time: t }) // 1
+  journal.append({ type: "turn.snapshot", tree: "b".repeat(40), untracked: [], time: t }) // 2
+  journal.append({ type: "message.user", id: "u2", text: "the doomed ask", time: t }) // 3
+  journal.append({ type: "message.assistant", id: "a2", text: "step one", time: t }) // 4
+  // mid-turn compaction supersedes everything before the current step
+  journal.append({
+    type: "session.compacted",
+    summary: "recap of it all",
+    keepFromIndex: 4,
+    time: t,
+  }) // 5
+  journal.append({ type: "message.assistant", id: "a3", text: "step two", time: t }) // 6
+  // /undo -> rewind to this turn's snapshot index (2), which is BEHIND the cut
+  journal.append({ type: "session.rewound", toIndex: 2, time: t }) // 7
+
+  const { header, events } = SessionJournal.replay(journal.path)
+  const timeline = project(header, events).timeline
+  expect(timeline.length).toBeGreaterThan(0)
+  expect(timeline.map((e) => ("text" in e ? e.text : e.type))).toEqual(["old ask", "old reply"])
+})
