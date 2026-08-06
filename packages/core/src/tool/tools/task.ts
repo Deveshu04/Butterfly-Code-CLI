@@ -173,9 +173,12 @@ async function executeWorktreeTask(
       input,
     })
     if (answer !== "allow") {
+      const who =
+        answer === "deny"
+          ? "User denied worktree isolation for this task."
+          : `Worktree isolation was not approved — ${answer.reason}. The user never answered; do not treat this as their decision.`
       return {
-        output:
-          "User denied worktree isolation for this task. Do not retry this exact call; investigate read-only instead, or ask the user how to proceed.",
+        output: `${who} Do not retry this exact call; investigate read-only instead, or ask the user how to proceed.`,
         isError: true,
       }
     }

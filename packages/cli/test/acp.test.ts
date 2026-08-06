@@ -821,3 +821,138 @@ test("a keepAlive background task is spared by ACP shutdown", async () => {
   await new Promise((resolve) => setTimeout(resolve, 500))
   expect(isAlive(pid)).toBe(true)
 }, 60_000)
+
+
+test("a timed-out permission renders as a timeout, never as 'User denied'", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(
+    join(cwd, "butterfly.jsonc"),
+    JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
+  )
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "edit",
+      input: { file_path: "a.txt", old_string: "", new_string: "hi" },
+    }),
+  )
+  const { peer, sent } = makeAgent(provider, {
+    model: "mock/model",
+    home,
+    permissionTimeoutMs: 50,
+  })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "create a.txt" }] },
+    }),
+  )
+
+  const wire = JSON.stringify(parsed(sent))
+  expect(wire).toContain("timed out")
+  expect(wire).not.toContain("User denied")
+  const request = provider.requests[provider.requests.length - 1]
+  const toolMessage = request?.messages.find((m) => m.role === "tool")
+  expect(toolMessage && "output" in toolMessage ? toolMessage.output : "").toContain("timed out")
+  expect(toolMessage && "output" in toolMessage ? toolMessage.output : "").not.toContain(
+    "User denied",
+  )
+}, 20_000)
+
+test("a client disconnect is reported as a disconnect, not as a user decision", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(
+    join(cwd, "butterfly.jsonc"),
+    JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
+  )
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "edit",
+      input: { file_path: "a.txt", old_string: "", new_string: "hi" },
+    }),
+  )
+  const { peer, sent } = makeAgent(provider, {
+    model: "mock/model",
+    home,
+    permissionTimeoutMs: 600_000,
+  })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  const prompt = peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "create a.txt" }] },
+    }),
+  )
+  await waitFor(() => parsed(sent).find((m) => m.method === "session/request_permission"))
+  peer.abandonAll("client disconnected")
+  await prompt
+
+  const wire = JSON.stringify(parsed(sent))
+  expect(wire).toContain("client disconnected")
+  expect(wire).not.toContain("User denied")
+}, 20_000)
+
+test("an explicit Reject from the client still reads as the user's decision", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(
+    join(cwd, "butterfly.jsonc"),
+    JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
+  )
+
+  const provider = new MockProvider(
+    oneToolCallThenText({
+      callId: "c1",
+      name: "edit",
+      input: { file_path: "a.txt", old_string: "", new_string: "hi" },
+    }),
+  )
+  const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  const prompt = peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "create a.txt" }] },
+    }),
+  )
+  const ask = await waitFor(() =>
+    parsed(sent).find((m) => m.method === "session/request_permission"),
+  )
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: ask.id,
+      result: { outcome: { outcome: "selected", optionId: "reject-once" } },
+    }),
+  )
+  await prompt
+
+  const wire = JSON.stringify(parsed(sent))
+  expect(wire).toContain("User denied")
+  expect(wire).not.toContain("never answered")
+  expect(existsSync(join(cwd, "a.txt"))).toBe(false)
+}, 20_000)

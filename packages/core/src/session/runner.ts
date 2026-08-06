@@ -9,7 +9,7 @@ import type {
   TurnEvent,
 } from "../provider/port"
 import { computeCostUSD, type ModelCost } from "../provider/pricing"
-import type { AskRequest, ToolRegistry } from "../tool/registry"
+import type { AskDecision, AskRequest, ToolRegistry } from "../tool/registry"
 import { assemble } from "./assembly"
 import { compactSession, type ModelLimits, needsCompaction } from "./compaction"
 import { now, type SessionEvent, type Usage } from "./events"
@@ -38,7 +38,7 @@ export interface RunnerDeps {
   model: string
   system: string
   cwd: string
-  ask?: (request: AskRequest) => Promise<"allow" | "deny">
+  ask?: (request: AskRequest) => Promise<AskDecision>
   /** Session-scoped state shared with tools (todo list, …). */
   state?: Record<string, unknown>
   /** Guard against runaway loops. */

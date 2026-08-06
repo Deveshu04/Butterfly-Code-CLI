@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto"
 import { mkdirSync, writeFileSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
 import {
+  type AskDecision,
+  type AskRequest,
   BG_TASKS_STATE_KEY,
   BgTaskRegistry,
   bashTool,
@@ -65,13 +67,6 @@ import {
   type ToolCallLocation,
   type ToolKind,
 } from "./types"
-
-interface AskRequest {
-  tool: string
-  target?: string
-  note?: string
-  input: unknown
-}
 
 const DEFAULT_RULES: PermissionRules = {
   "*": "allow",
@@ -460,7 +455,7 @@ export class AcpAgent {
   ): Promise<{ stopReason: StopReason }> {
     const timeoutMs = this.opts.permissionTimeoutMs ?? PERMISSION_TIMEOUT_MS
 
-    const ask = async (request: AskRequest): Promise<"allow" | "deny"> => {
+    const ask = async (request: AskRequest): Promise<AskDecision> => {
       const front = session.pendingCalls.keys().next()
       const toolCallId = front.done ? `call_${randomUUID()}` : front.value
       const options: PermissionOption[] = [
@@ -490,10 +485,15 @@ export class AcpAgent {
         const parsedOutcome = parseRequestPermissionResult(raw)
         if (!parsedOutcome.ok) {
           this.log(`auto-denied ${request.tool} — malformed session/request_permission result`)
-          return "deny"
+          return {
+            decision: "deny",
+            reason: "the client returned a malformed session/request_permission result",
+          }
         }
         const { outcome } = parsedOutcome.data
-        if (outcome.outcome === "cancelled") return "deny"
+        if (outcome.outcome === "cancelled") {
+          return { decision: "deny", reason: "the client cancelled the permission request" }
+        }
         switch (outcome.optionId) {
           case "allow-once":
             return "allow"
@@ -508,12 +508,11 @@ export class AcpAgent {
         }
       } catch (error) {
         this.peer.abandon(id, "permission request abandoned") // no-op if already answered
+        const reason = error instanceof Error ? error.message : String(error)
         this.log(
-          `auto-denied ${request.tool}${request.target ? ` on "${request.target}"` : ""} — ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `auto-denied ${request.tool}${request.target ? ` on "${request.target}"` : ""} — ${reason}`,
         )
-        return "deny"
+        return { decision: "deny", reason }
       } finally {
         if (timer) clearTimeout(timer)
       }
@@ -701,7 +700,7 @@ export class AcpAgent {
     pending: { name: string; input: unknown } | undefined,
     cwd: string,
   ): ToolCallContent[] {
-    if (event.name === "edit" && pending) {
+    if (event.name === "edit" && pending && !event.isError) {
       const input = pending.input as {
         file_path?: string
         old_string?: string

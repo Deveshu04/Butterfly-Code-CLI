@@ -3,7 +3,13 @@ import { type PermissionRules, resolvePermission } from "../permission/tree"
 import type { ToolSpec } from "../provider/port"
 import { type SettleOptions, settle } from "./settle"
 
-export type AskDecision = "allow" | "deny"
+export interface AskDenial {
+  decision: "deny"
+  /** Lower-case fragment, e.g. "permission request timed out after 120000ms". */
+  reason: string
+}
+
+export type AskDecision = "allow" | "deny" | AskDenial
 
 export interface AskRequest {
   tool: string
@@ -62,6 +68,16 @@ function errorResult(output: string): ToolRunResult {
   return { output, isError: true, truncated: false }
 }
 
+export function describeDenial(
+  name: string,
+  target: string | undefined,
+  answer: Exclude<AskDecision, "allow">,
+): string {
+  const on = target ? ` on "${target}"` : ""
+  if (answer === "deny") return `User denied ${name}${on}.`
+  return `${name}${on} was not approved — ${answer.reason}. The user never answered; do not treat this as their decision. Do not retry this exact call.`
+}
+
 export class ToolRegistry {
   private tools = new Map<string, RegisteredTool>()
 
@@ -114,7 +130,7 @@ export class ToolRegistry {
         input: parsed.data,
       })
       if (answer !== "allow") {
-        return errorResult(`User denied ${name}${target ? ` on "${target}"` : ""}.`)
+        return errorResult(describeDenial(name, target, answer))
       }
     }
 

@@ -282,7 +282,15 @@ export {
   reapAllBackgroundTasks,
   wrapBackgroundCommand,
 } from "./tool/bg-tasks"
-export { type ToolContext, type ToolDefinition, ToolRegistry } from "./tool/registry"
+export {
+  type AskDecision,
+  type AskDenial,
+  type AskRequest,
+  describeDenial,
+  type ToolContext,
+  type ToolDefinition,
+  ToolRegistry,
+} from "./tool/registry"
 export { DEFAULT_MODEL_OUTPUT_CHARS, settle } from "./tool/settle"
 export {
   killTree,

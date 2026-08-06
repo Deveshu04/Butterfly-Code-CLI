@@ -17,6 +17,7 @@ import {
   saveHandoff,
   WorkQueue,
 } from "@butterfly/core"
+import type { CapturedFrame } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import { App, clearTerminalProgress, timelineToMessages } from "../src/app"
 import { NEWLINE_MARKER } from "../src/paste"
@@ -2387,5 +2388,46 @@ test("/review with a shell expression as its range is refused in the UI — no g
   expect(frame).not.toContain("git failed")
   expect(frame).not.toContain("nothing to review")
   expect(existsSync(marker)).toBe(false)
+  t.renderer.destroy()
+}, 30_000)
+
+
+/** "#8b8b8b" -> [139,139,139]; captureSpans hands back RGBA channels. */
+function hexToInts(hex: string): [number, number, number] {
+  const n = Number.parseInt(hex.replace("#", ""), 16)
+  return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff]
+}
+
+function spanFgFor(
+  t: { captureSpans: () => CapturedFrame },
+  needle: string,
+): [number, number, number] {
+  for (const line of t.captureSpans().lines) {
+    for (const span of line.spans) {
+      if (span.text.includes(needle)) {
+        const [r, g, b] = span.fg.toInts()
+        return [r, g, b]
+      }
+    }
+  }
+  throw new Error(`no span containing ${JSON.stringify(needle)} in the captured frame`)
+}
+
+test("/theme light actually REPAINTS — a styled span's colour changes, not just the token store", async () => {
+  const home = tempDir("bfly-home-")
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{ model: "mock/model" }} home={home} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  // The header wordmark's "butterfly " is painted with tokens.muted — the
+  // store-level tests prove the token flips; this proves the pixels do.
+  expect(spanFgFor(t, "butterfly")).toEqual(hexToInts(DARK_TOKENS.muted))
+
+  t.mockInput.typeText("/theme light")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (frame) => frame.includes("theme set to light"))
+  expect(spanFgFor(t, "butterfly")).toEqual(hexToInts(LIGHT_TOKENS.muted))
+  expect(LIGHT_TOKENS.muted).not.toBe(DARK_TOKENS.muted)
   t.renderer.destroy()
 }, 30_000)
