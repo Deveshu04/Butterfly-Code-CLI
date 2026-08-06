@@ -2,41 +2,72 @@ import { dirname } from "node:path"
 import { type PermissionDecision, type PermissionRules, wildcardToRegex } from "./tree"
 
 
-const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=\S*\s+/
+const ENV_ASSIGNMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*=/
 
-function bashAllowPattern(command: string): string {
-  let rest = command.trim()
-  let sawEnvPrefix = false
-  while (ENV_ASSIGNMENT.test(rest)) {
-    rest = rest.replace(ENV_ASSIGNMENT, "")
-    sawEnvPrefix = true
+/** Glob metacharacters that are live (and un-escapable) in wildcardToRegex. */
+const GLOB_METACHARACTER = /[*?]/
+
+function scanToken(source: string, from: number): { end: number; unterminated: boolean } {
+  let quote: string | undefined
+  for (let i = from; i < source.length; i++) {
+    const ch = source[i] as string
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      continue
+    }
+    if (/\s/.test(ch)) return { end: i, unterminated: false }
   }
-  let word: string
-  if (rest.startsWith('"') || rest.startsWith("'")) {
-    const quote = rest[0] as string
-    const close = rest.indexOf(quote, 1)
-    word = close === -1 ? rest : rest.slice(0, close + 1)
-  } else {
-    const spaceIndex = rest.search(/\s/)
-    word = spaceIndex === -1 ? rest : rest.slice(0, spaceIndex)
-  }
-  return `${sawEnvPrefix ? "*" : ""}${word} *`
+  return { end: source.length, unterminated: quote !== undefined }
 }
 
-function directoryAllowPattern(filePath: string): string {
-  const dir = dirname(filePath)
-  if (dir === "." || dir === "") return filePath
-  const sep = filePath.includes("\\") && !filePath.includes("/") ? "\\" : "/"
-  return `${dir}${sep}**`
+function bashCommandWord(command: string): { word?: string; problem?: string } {
+  let rest = command.trim()
+  if (rest === "") return { problem: "the command is empty" }
+  for (;;) {
+    const name = rest.match(ENV_ASSIGNMENT_NAME)
+    if (!name) break
+    const value = scanToken(rest, name[0].length)
+    if (value.unterminated) return { problem: "the command has unbalanced quoting" }
+    rest = rest.slice(value.end).trimStart()
+    if (rest === "") return { problem: "the command is only environment-variable assignments" }
+  }
+  const token = scanToken(rest, 0)
+  if (token.unterminated) return { problem: "the command has unbalanced quoting" }
+  return { word: rest.slice(0, token.end) }
+}
+
+interface AllowPatternParts {
+  /** The rule pattern itself (display-safe even when `problem` is set). */
+  pattern: string
+  literal: string
+  /** Set when the target could not be narrowed confidently at all. */
+  problem?: string
+}
+
+function computeAllowPatternParts(tool: string, target: string | undefined): AllowPatternParts {
+  if (tool === "bash" && target !== undefined) {
+    const { word, problem } = bashCommandWord(target)
+    if (word === undefined) {
+      return { pattern: target.trim(), literal: "", problem: problem ?? "the command is empty" }
+    }
+    return { pattern: `${word} *`, literal: word }
+  }
+  if ((tool === "edit" || tool === "read") && target !== undefined) {
+    const dir = dirname(target)
+    if (dir === "." || dir === "") return { pattern: target, literal: target }
+    const sep = target.includes("\\") && !target.includes("/") ? "\\" : "/"
+    return { pattern: `${dir}${sep}**`, literal: dir }
+  }
+  if (target !== undefined) return { pattern: target, literal: target }
+  return { pattern: "*", literal: "" }
 }
 
 export function computeAllowPattern(tool: string, target: string | undefined): string {
-  if (tool === "bash" && target !== undefined) return bashAllowPattern(target)
-  if ((tool === "edit" || tool === "read") && target !== undefined) {
-    return directoryAllowPattern(target)
-  }
-  if (target !== undefined) return target
-  return "*"
+  return computeAllowPatternParts(tool, target).pattern
 }
 
 function stripWildcards(pattern: string): string {
@@ -75,7 +106,20 @@ export function planQuickAdd(
   tool: string,
   target: string | undefined,
 ): QuickAddPlan {
-  const pattern = computeAllowPattern(tool, target)
+  const { pattern, literal, problem } = computeAllowPatternParts(tool, target)
+  if (problem !== undefined) {
+    return { ok: false, tool, pattern, reason: `cannot narrow this call to a rule: ${problem}` }
+  }
+  if (GLOB_METACHARACTER.test(literal)) {
+    return {
+      ok: false,
+      tool,
+      pattern,
+      reason:
+        `"${literal}" contains a glob wildcard and the rule language has no ` +
+        `escape syntax, so "${pattern}" would match more than this call`,
+    }
+  }
   const existing = rules[tool]
   if (existing === "deny") {
     return { ok: false, tool, pattern, reason: `"${tool}" is denied entirely by policy` }
