@@ -24,7 +24,7 @@ export interface ProviderErrorInfo {
 const DETAIL_CAP = 300
 
 const CONTEXT_LENGTH_TEXT_RE =
-  /context[ _-]?length|context window|maximum context|too many tokens|reduce the length/i
+  /context[ _-]?length|context window|context limit|maximum context|too many tokens|reduce the length|(?:prompt|input|message|request)s?\s+(?:is|are)\s+too long|too long:\s*\d|exceed(?:s|ed)?\s+(?:the\s+)?(?:maximum|max\b|model'?s|context\b|token)/i
 
 function classifyByTypeText(
   type: string | undefined,
@@ -97,6 +97,30 @@ function parseRetryAfterSec(headers: Record<string, string> | undefined): number
   return undefined
 }
 
+function capText(text: string, cap = DETAIL_CAP): string {
+  return text.length > cap ? `${text.slice(0, cap)}…` : text
+}
+
+function buildDetail(message: string, type?: string, code?: string): string | undefined {
+  const tags: string[] = []
+  const seen = new Set<string>()
+  for (const raw of [type, code]) {
+    const tag = typeof raw === "string" ? raw.trim() : ""
+    if (tag === "") continue
+    const key = tag.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    tags.push(tag)
+  }
+  if (tags.length === 0) return undefined
+
+  const human = message.trim()
+  const lower = human.toLowerCase()
+  const extra = tags.filter((tag) => !lower.includes(tag.toLowerCase()))
+  if (human === "") return extra.length > 0 ? capText(extra.join(" ")) : undefined
+  return capText(extra.length > 0 ? `${human} (${extra.join(" ")})` : human)
+}
+
 function safeStringifyCapped(value: unknown, cap = DETAIL_CAP): string {
   const seen = new WeakSet<object>()
   try {
@@ -108,7 +132,7 @@ function safeStringifyCapped(value: unknown, cap = DETAIL_CAP): string {
       }
       return v
     })
-    if (json !== undefined) return json.length > cap ? `${json.slice(0, cap)}…` : json
+    if (json !== undefined) return capText(json, cap)
   } catch {
     // fall through to the descriptive fallback below
   }
@@ -124,13 +148,14 @@ function classifyByShape(params: {
 }): ProviderErrorInfo {
   const { status, message, type, code, retryAfterSec } = params
   const typeKind = classifyByTypeText(type, code)
-  const detailText = [type, code].filter((v): v is string => Boolean(v)).join(" ")
+  const messageSaysContext = CONTEXT_LENGTH_TEXT_RE.test(message)
+  const detailText = buildDetail(message, type, code)
 
   const base: ProviderErrorInfo = {
     kind: "unknown",
     message,
     ...(status !== undefined ? { status } : {}),
-    ...(detailText !== "" ? { detail: detailText } : {}),
+    ...(detailText !== undefined ? { detail: detailText } : {}),
   }
   const withRetry: ProviderErrorInfo =
     retryAfterSec !== undefined ? { ...base, retryAfterSec } : base
@@ -145,11 +170,14 @@ function classifyByShape(params: {
   }
 
   if (typeKind !== undefined) {
+    if (typeKind === "bad_request" && messageSaysContext) {
+      return { ...base, kind: "context_length" }
+    }
     return typeKind === "rate_limit"
       ? { ...withRetry, kind: "rate_limit" }
       : { ...base, kind: typeKind }
   }
-  if ((status === undefined || status === 400) && CONTEXT_LENGTH_TEXT_RE.test(message)) {
+  if ((status === undefined || status === 400) && messageSaysContext) {
     return { ...base, kind: "context_length" }
   }
   if (status !== undefined && status >= 400 && status < 500) return { ...base, kind: "bad_request" }

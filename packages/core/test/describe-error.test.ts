@@ -155,7 +155,8 @@ test("plain-object OpenAI-shape body (no APICallError wrapper) classifies correc
   const info = classifyProviderError(raw)
   expect(info.kind).toBe("rate_limit")
   expect(info.message).toBe("Rate limit reached for gpt-4")
-  expect(info.detail).toBe("requests rate_limit_exceeded")
+  // detail is human-message-first with the deduped machine tags appended.
+  expect(info.detail).toBe("Rate limit reached for gpt-4 (requests rate_limit_exceeded)")
 })
 
 test("plain-object Anthropic-shape body (no wrapper, no HTTP status) classifies correctly", () => {
@@ -192,6 +193,166 @@ test("a FastAPI-style {detail} body still extracts", () => {
   const info = classifyProviderError({ detail: "model not found", status: 404 })
   expect(info.kind).toBe("bad_request")
   expect(info.message).toBe("model not found")
+})
+
+
+test("Anthropic's canonical 400 'prompt is too long' body classifies as context_length", () => {
+  const body = {
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "prompt is too long: 250000 tokens > 200000 maximum",
+    },
+  }
+  const error = apiCallError({
+    message: "prompt is too long: 250000 tokens > 200000 maximum",
+    statusCode: 400,
+    responseBody: JSON.stringify(body),
+    data: body,
+  })
+  const info = classifyProviderError(error)
+  expect(info.kind).toBe("context_length")
+  expect(info.status).toBe(400)
+  expect(describeProviderError(info)).toContain("/compact")
+})
+
+test("the same Anthropic overflow as a raw plain object (no wrapper, no status) classifies as context_length", () => {
+  const info = classifyProviderError({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "prompt is too long: 250000 tokens > 200000 maximum",
+    },
+  })
+  expect(info.kind).toBe("context_length")
+})
+
+test("Anthropic's 'input length and max_tokens exceed context limit' classifies as context_length", () => {
+  const info = classifyProviderError(
+    apiCallError({
+      message: "input length and `max_tokens` exceed context limit: 200000 + 8192 > 200000",
+      statusCode: 400,
+      data: {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "input length and `max_tokens` exceed context limit: 200000 + 8192 > 200000",
+        },
+      },
+    }),
+  )
+  expect(info.kind).toBe("context_length")
+})
+
+test("Gemini's 'input token count exceeds the maximum' invalid_argument classifies as context_length", () => {
+  const info = classifyProviderError({
+    error: {
+      code: 400,
+      message:
+        "The input token count (1189997) exceeds the maximum number of tokens allowed (1048575).",
+      status: "INVALID_ARGUMENT",
+      type: "invalid_argument",
+    },
+    status: 400,
+  })
+  expect(info.kind).toBe("context_length")
+})
+
+test("OpenAI's context_length_exceeded code classifies as context_length", () => {
+  const info = classifyProviderError(
+    apiCallError({
+      message: "This model's maximum context length is 8192 tokens.",
+      statusCode: 400,
+      data: {
+        error: {
+          message:
+            "This model's maximum context length is 8192 tokens. However, your messages resulted in 10000 tokens. Please reduce the length of the messages.",
+          type: "invalid_request_error",
+          code: "context_length_exceeded",
+        },
+      },
+    }),
+  )
+  expect(info.kind).toBe("context_length")
+})
+
+test("a genuine invalid_request_error that is NOT an overflow stays bad_request", () => {
+  const info = classifyProviderError(
+    apiCallError({
+      message: "messages: at least one message is required",
+      statusCode: 400,
+      data: {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "messages: at least one message is required",
+        },
+      },
+    }),
+  )
+  expect(info.kind).toBe("bad_request")
+  expect(describeProviderError(info)).not.toContain("/compact")
+})
+
+
+test("an OpenAI quota body (type AND code both insufficient_quota) never duplicates the tag", () => {
+  const human = "You exceeded your current quota, please check your plan and billing details."
+  const info = classifyProviderError(
+    apiCallError({
+      message: human,
+      statusCode: 429,
+      data: { error: { message: human, type: "insufficient_quota", code: "insufficient_quota" } },
+    }),
+  )
+  expect(info.kind).toBe("quota")
+  expect(info.detail).toBe(`${human} (insufficient_quota)`)
+  expect(info.detail?.match(/insufficient_quota/g)?.length).toBe(1)
+
+  const line = describeProviderError(info)
+  expect(line).toContain(human)
+  expect(line.match(/insufficient_quota/g)?.length).toBe(1)
+})
+
+test("tag dedupe is case-insensitive", () => {
+  const info = classifyProviderError({
+    status: 402,
+    error: {
+      message: "Billing hard limit reached",
+      type: "insufficient_quota",
+      code: "INSUFFICIENT_QUOTA",
+    },
+  })
+  expect(info.detail).toBe("Billing hard limit reached (insufficient_quota)")
+})
+
+test("a tag already stated by the human message is not appended again", () => {
+  const info = classifyProviderError({
+    status: 400,
+    error: {
+      message: "insufficient_quota",
+      type: "insufficient_quota",
+      code: "insufficient_quota",
+    },
+  })
+  expect(info.detail).toBe("insufficient_quota")
+})
+
+test("detail falls back to the tags alone when the body has no human message", () => {
+  const info = classifyProviderError({
+    status: 500,
+    error: { message: "", type: "overloaded_error" },
+  })
+  expect(info.detail).toBe("overloaded_error")
+})
+
+test("detail is capped like the JSON fallback", () => {
+  const human = "x".repeat(500)
+  const info = classifyProviderError({
+    status: 402,
+    error: { message: human, type: "insufficient_quota" },
+  })
+  expect(info.detail?.length).toBeLessThanOrEqual(301)
+  expect(info.detail?.endsWith("…")).toBe(true)
 })
 
 
