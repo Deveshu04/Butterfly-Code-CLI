@@ -1,8 +1,15 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { now, runCommand, SessionJournal } from "@butterfly/core"
+import { now, runCommand, SessionJournal, saveHandoff } from "@butterfly/core"
 import { testRender } from "@opentui/solid"
 import { App, clearTerminalProgress, timelineToMessages } from "../src/app"
 import { NEWLINE_MARKER } from "../src/paste"
@@ -1694,3 +1701,85 @@ test("atomic backspace works on a draft holding a ⏎ marker and an astral emoji
   expect(composer.value).toBe(`a${NEWLINE_MARKER}b😀`)
   t.renderer.destroy()
 }, 30_000)
+
+test("a pending handoff is preloaded on the first turn — and says so, naming the file", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const saved = saveHandoff(cwd, "## Goal\nBuild a widget\n", false, { append: () => {} })
+  const provider = hangingProvider()
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "hang/model", providers: { hang: { baseURL: provider.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      // Wide: the notice embeds an absolute path, and a wrapped line breaks
+      // substring predicates for reasons this test isn't about.
+      { width: 240, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("carry on")
+    t.mockInput.pressEnter()
+    const frame = await waitForFrameSlow(t, (f) => f.includes("loaded the handoff"))
+    expect(frame).toContain("handoff.md")
+    expect(frame).toContain("just now")
+    // Consumed exactly once: the pending pointer is retired.
+    expect(existsSync(saved.path)).toBe(false)
+    expect(existsSync(`${saved.path}.consumed`)).toBe(true)
+    t.renderer.destroy()
+  } finally {
+    provider.stop()
+  }
+}, 30_000)
+
+test("/handoff is metered like any other turn, and its own session never reinjects it", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const home = tempDir("bfly-home-")
+  // A fresh models.dev cache so the TUI can actually PRICE this model:
+  // $1,000,000 per 1M input tokens = $1/token, and the fake server reports
+  // 5 prompt tokens → a $5.00 turn, unmissable in the status bar.
+  const cacheDir = join(home, ".config", "butterfly")
+  mkdirSync(cacheDir, { recursive: true })
+  writeFileSync(
+    join(cacheDir, "models-cache.json"),
+    JSON.stringify({
+      fetchedAt: Date.now(),
+      data: {
+        fake: { models: { "mock-handoff": { limit: { context: 100_000 }, cost: { input: 1e6 } } } },
+      },
+    }),
+  )
+  const server = startFakeChatServer("## Goal\nShip the widget\n## Continue with\nRun the tests")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-handoff", providers: { fake: { baseURL: server.baseURL } } }}
+          home={home}
+        />
+      ),
+      { width: 240, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/handoff")
+    t.mockInput.pressEnter()
+    const frame = await waitForFrameSlow(t, (f) => f.includes("handoff saved"), 25_000)
+    expect(frame).toContain("$5.00")
+    expect(existsSync(join(cwd, ".butterfly", "handoff.md"))).toBe(true)
+
+    t.mockInput.typeText("one more thing")
+    t.mockInput.pressEnter()
+    const after = await waitForFrameSlow(t, (f) => f.includes("in 5 · out 3"), 25_000)
+    expect(after).not.toContain("loaded the handoff")
+    expect(existsSync(join(cwd, ".butterfly", "handoff.md"))).toBe(true)
+    expect(existsSync(join(cwd, ".butterfly", "handoff.md.consumed"))).toBe(false)
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 60_000)

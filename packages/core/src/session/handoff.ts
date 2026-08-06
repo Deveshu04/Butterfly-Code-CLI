@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { ProviderPort } from "../provider/port"
+import type { ModelCost } from "../provider/pricing"
 import { ToolRegistry } from "../tool/registry"
 import { now, type SessionEvent, type Usage } from "./events"
 import type { SessionJournal } from "./journal"
@@ -36,6 +37,8 @@ export interface RunHandoffTurnDeps {
   model: string
   system: string
   cwd: string
+  cost?: ModelCost
+  maxSpendUSD?: number
   onEvent?: (event: RunnerEvent) => void
   signal?: AbortSignal
 }
@@ -44,6 +47,9 @@ export interface HandoffTurnResult {
   doc: string
   truncated: boolean
   usage: Usage
+  costUSD: number
+  /** True when this turn alone met or passed `maxSpendUSD`. */
+  budgetExceeded: boolean
 }
 
 export async function runHandoffTurn(deps: RunHandoffTurnDeps): Promise<HandoffTurnResult> {
@@ -58,13 +64,21 @@ export async function runHandoffTurn(deps: RunHandoffTurnDeps): Promise<HandoffT
       system: deps.system,
       cwd: deps.cwd,
       maxSteps: 1,
+      ...(deps.cost ? { cost: deps.cost } : {}),
+      ...(deps.maxSpendUSD !== undefined ? { maxSpendUSD: deps.maxSpendUSD } : {}),
       ...(deps.onEvent ? { onEvent: deps.onEvent } : {}),
       ...(deps.signal ? { signal: deps.signal } : {}),
     },
     HANDOFF_PROMPT,
   )
   const { doc, truncated } = truncateHandoffDoc(outcome.text)
-  return { doc, truncated, usage: outcome.usage }
+  return {
+    doc,
+    truncated,
+    usage: outcome.usage,
+    costUSD: outcome.costUSD,
+    budgetExceeded: outcome.budgetExceeded,
+  }
 }
 
 export interface HandoffPaths {
@@ -137,4 +151,72 @@ export function consumeHandoff(cwd: string): string | undefined {
 /** Wraps a preloaded handoff doc for injection into a fresh session's first turn. */
 export function renderHandoffPreload(doc: string): string {
   return `[handoff from a previous session — goal/state/next-move/files]\n${doc}`
+}
+
+export function formatHandoffAge(ms: number): string {
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 1) return "just now"
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+function journalWroteHandoff(journalPath: string): boolean {
+  let text: string
+  try {
+    text = readFileSync(journalPath, "utf8")
+  } catch {
+    return false
+  }
+  if (!text.includes("session.handoff")) return false
+  for (const line of text.split("\n")) {
+    if (line === "" || !line.includes("session.handoff")) continue
+    try {
+      const parsed = JSON.parse(line) as { type?: unknown }
+      if (parsed.type === "session.handoff") return true
+    } catch {
+      // A corrupt line can't be a handoff record — keep scanning.
+    }
+  }
+  return false
+}
+
+export interface PreloadHandoffOptions {
+  journalPath?: string
+  /** Injected clock — age is reported against the pending file's mtime. */
+  now?: () => number
+}
+
+export interface PreloadHandoffResult {
+  /** `taskText` with the labelled handoff card prepended when one was loaded. */
+  taskText: string
+  loaded: boolean
+  notice?: string
+  skipped?: "self"
+}
+
+export function preloadHandoff(
+  cwd: string,
+  taskText: string,
+  opts: PreloadHandoffOptions = {},
+): PreloadHandoffResult {
+  const { main } = handoffPaths(cwd)
+  let mtimeMs: number
+  try {
+    mtimeMs = statSync(main).mtimeMs
+  } catch {
+    return { taskText, loaded: false }
+  }
+  if (opts.journalPath && journalWroteHandoff(opts.journalPath)) {
+    return { taskText, loaded: false, skipped: "self" }
+  }
+  const doc = consumeHandoff(cwd)
+  if (doc === undefined) return { taskText, loaded: false }
+  const age = formatHandoffAge(Math.max(0, (opts.now?.() ?? Date.now()) - mtimeMs))
+  return {
+    taskText: `${renderHandoffPreload(doc)}\n\n${taskText}`,
+    loaded: true,
+    notice: `loaded the handoff from your last session into this message — ${main} (written ${age}); it won't be loaded again`,
+  }
 }

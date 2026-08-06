@@ -12,7 +12,6 @@ import {
   buildSystem,
   clearProgressOsc,
   compactSession,
-  consumeHandoff,
   createExploreTool,
   createMcpTool,
   createMemoryTool,
@@ -56,6 +55,7 @@ import {
   parseModelRef,
   parseReviewArg,
   planQuickAdd,
+  preloadHandoff,
   prepareImageAttachments,
   project,
   type ReasoningEffort,
@@ -64,7 +64,6 @@ import {
   rankByFrecency,
   readTool,
   renderDoctorReport,
-  renderHandoffPreload,
   renderMentionBlock,
   restoreSnapshot,
   reviewTurn,
@@ -1349,7 +1348,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           model: ref,
           system: frozenSystem(ref),
           cwd: props.cwd,
+          ...(modelCost() ? { cost: modelCost() } : {}),
+          ...(config().maxSpendUSD !== undefined ? { maxSpendUSD: config().maxSpendUSD } : {}),
+          onEvent: (event) => {
+            if (event.type === "notice") push({ kind: "info", text: event.text })
+          },
         })
+        setSessionCost((c) => c + result.costUSD)
         if (result.doc === "") {
           push({ kind: "error", text: "handoff failed — the model returned nothing" })
           return
@@ -1358,7 +1363,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         push({ kind: "assistant", text: result.doc })
         push({
           kind: "info",
-          text: `handoff saved — ${saved.path} (+ archived copy)${result.truncated ? " — truncated to fit the cap" : ""}\n/new (or \`butterfly run --resume-handoff\`) will preload it into a fresh session`,
+          text: `handoff saved — ${saved.path} (+ archived copy)${result.truncated ? " — truncated to fit the cap" : ""}\nthe next session preloads it: /new, a fresh \`butterfly\`, or \`butterfly run --resume-handoff\` (this session won't reload it)`,
         })
       } catch (error) {
         push({
@@ -1534,10 +1539,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       taskText = `${mentionBlock}\n\n${taskText}`
     }
     if (firstTurn) {
-      const pendingHandoff = consumeHandoff(props.cwd)
-      if (pendingHandoff) {
-        taskText = `${renderHandoffPreload(pendingHandoff)}\n\n${taskText}`
-      }
+      const preload = preloadHandoff(props.cwd, taskText, {
+        journalPath: session.journal.path,
+      })
+      taskText = preload.taskText
+      if (preload.notice) push({ kind: "info", text: preload.notice })
       if (graph) {
         const mentionedWords = task.split(/[^A-Za-z0-9_]+/).filter((word) => word.length >= 3)
         const skeleton = buildSkeleton(graph, {

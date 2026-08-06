@@ -7,7 +7,6 @@ import {
   bashTool,
   buildSkeleton,
   buildSystem,
-  consumeHandoff,
   createExploreTool,
   createMcpTool,
   createMemoryTool,
@@ -36,9 +35,9 @@ import {
   type PermissionRules,
   type ProviderPort,
   parseModelRef,
+  preloadHandoff,
   type RunnerEvent,
   readTool,
-  renderHandoffPreload,
   renderMentionBlock,
   reviewTurn,
   runUserTurn,
@@ -102,10 +101,16 @@ export function taskToolOptions(deps: {
   }
 }
 
-export function applyResumeHandoff(cwd: string, taskText: string, resumeHandoff: boolean): string {
+export function applyResumeHandoff(
+  cwd: string,
+  taskText: string,
+  resumeHandoff: boolean,
+  notify?: (text: string) => void,
+): string {
   if (!resumeHandoff) return taskText
-  const pending = consumeHandoff(cwd)
-  return pending ? `${renderHandoffPreload(pending)}\n\n${taskText}` : taskText
+  const preload = preloadHandoff(cwd, taskText)
+  if (preload.notice) notify?.(preload.notice)
+  return preload.taskText
 }
 
 function makeRegistry(cwd: string): ToolRegistry {
@@ -221,7 +226,9 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     skeleton === ""
       ? withMentions
       : `[repository map — ranked symbols; use explore/read for bodies]\n${skeleton}\n\n${withMentions}`
-  const taskText = applyResumeHandoff(cwd, withSkeleton, opts.resumeHandoff ?? false)
+  const taskText = applyResumeHandoff(cwd, withSkeleton, opts.resumeHandoff ?? false, (text) => {
+    if (!opts.json) process.stdout.write(`[handoff: ${text}]\n`)
+  })
   if (!opts.json && (sync.scanned > 0 || sync.removed > 0)) {
     process.stdout.write(`[graph: ${sync.scanned} scanned, ${sync.skipped} cached]\n`)
   }

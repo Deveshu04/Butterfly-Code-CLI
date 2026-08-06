@@ -42,3 +42,18 @@ test("--resume-handoff preloads a pending handoff ahead of the task and consumes
   expect(existsSync(saved.path)).toBe(false)
   expect(applyResumeHandoff(cwd, "continue again", true)).toBe("continue again")
 })
+
+test("--resume-handoff reports what it loaded through the notify seam (never silent)", () => {
+  const cwd = tempDir("bfly-resume-notice-")
+  const journal = SessionJournal.create(join(cwd, ".butterfly", "sessions"))
+  const saved = saveHandoff(cwd, "## Goal\nBuild a widget\n", false, journal)
+  const notices: string[] = []
+
+  applyResumeHandoff(cwd, "continue please", true, (text) => notices.push(text))
+
+  expect(notices.length).toBe(1)
+  expect(notices[0]).toContain(saved.path)
+  // Nothing pending → nothing announced.
+  applyResumeHandoff(cwd, "continue please", true, (text) => notices.push(text))
+  expect(notices.length).toBe(1)
+})

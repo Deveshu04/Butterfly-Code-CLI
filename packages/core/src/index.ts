@@ -196,6 +196,7 @@ export {
 export { JournalHeader, now, SessionEvent, type Usage } from "./session/events"
 export {
   consumeHandoff,
+  formatHandoffAge,
   HANDOFF_MAX_CHARS,
   HANDOFF_PROMPT,
   HANDOFF_TRUNCATION_MARKER,
@@ -203,6 +204,9 @@ export {
   type HandoffPaths,
   type HandoffTurnResult,
   handoffPaths,
+  type PreloadHandoffOptions,
+  type PreloadHandoffResult,
+  preloadHandoff,
   type RunHandoffTurnDeps,
   renderHandoffPreload,
   runHandoffTurn,
