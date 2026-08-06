@@ -1,4 +1,14 @@
-import type { LoopEvent, LoopOutcome, StopReason, TaskStatus, Usage } from "@butterfly/core"
+import {
+  computeCostUSD,
+  type LoopEvent,
+  type LoopOutcome,
+  type ModelCost,
+  type PermissionDecision,
+  type PermissionRules,
+  type StopReason,
+  type TaskStatus,
+  type Usage,
+} from "@butterfly/core"
 
 
 export interface LoopCardState {
@@ -69,6 +79,88 @@ export function loopCardText(state: LoopCardState): string {
   const tokens = state.usage.input + state.usage.output
   if (tokens > 0) parts.push(`${tokens.toLocaleString()} tok`)
   return parts.join("  ·  ")
+}
+
+
+/** How many offending entries a warning lists before eliding the rest. */
+const GUARD_LIST_LIMIT = 8
+
+function listSample(items: string[]): string {
+  const shown = items.slice(0, GUARD_LIST_LIMIT)
+  const rest = items.length - shown.length
+  return shown.map((item) => `  ${item}`).join("\n") + (rest > 0 ? `\n  …and ${rest} more` : "")
+}
+
+export function dirtyLoopLines(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .filter((line) => line.trim() !== "" && !line.slice(3).startsWith(".butterfly/"))
+}
+
+export function dirtyTreeRefusal(lines: string[]): string {
+  return [
+    `/loop run refused: ${lines.length} uncommitted change(s) in the working tree.`,
+    "The loop commits with `git add -A` after every green gate, so these would be swept into a `loop: <task>` commit that isn't yours.",
+    listSample(lines),
+    "Commit or stash them first — or run `/loop run --allow-dirty` if you really mean to include them.",
+  ].join("\n")
+}
+
+export function dirtyTreeOverride(lines: string[]): string {
+  return [
+    `--allow-dirty: starting with ${lines.length} uncommitted change(s) — the loop's \`git add -A\` commits WILL be included in them.`,
+    listSample(lines),
+  ].join("\n")
+}
+
+export function askBearingRules(rules: PermissionRules): string[] {
+  const found: string[] = []
+  for (const [tool, entry] of Object.entries(rules)) {
+    if (entry === "ask") {
+      found.push(tool === "*" ? '"*" (default)' : tool)
+    } else if (typeof entry === "object") {
+      for (const [pattern, decision] of Object.entries(
+        entry as Record<string, PermissionDecision>,
+      )) {
+        if (decision === "ask") found.push(`${tool}: ${pattern}`)
+      }
+    }
+  }
+  if (typeof rules["*"] !== "string") {
+    found.push('"*" (no root default — unmatched calls resolve to ask)')
+  }
+  return found
+}
+
+export function askRulesWarning(entries: string[]): string {
+  return [
+    'warning: your permission rules contain "ask" entries, and loop iterations run UNATTENDED (no approval prompt exists during a loop).',
+    'Every ask-classified tool call will FAIL with "no approver available" instead of pausing, so iterations flail until the no-progress guard stops the loop.',
+    listSample(entries),
+    'Consider a loop-safe set in butterfly.jsonc, e.g. {"*":"allow","edit":{".env*":"deny"}}. Starting anyway — Ctrl+C to stop.',
+  ].join("\n")
+}
+
+export function spendCapNotice(cap: number): string {
+  return `note: maxSpendUSD ($${cap.toFixed(2)}) is a per-turn cap and is not enforced across /loop run — the supervisor takes no cost port. Loop spend is metered live into the session total in the status bar; Ctrl+C stops the loop.`
+}
+
+export interface LoopSpendCredit {
+  /** New running total of loop dollars already added to the session cost. */
+  credited: number
+  /** What to add to the session cost right now (0 when nothing is new). */
+  delta: number
+}
+
+export function loopSpendCredit(
+  usage: Usage,
+  cost: ModelCost | undefined,
+  alreadyCredited: number,
+): LoopSpendCredit {
+  if (!cost) return { credited: alreadyCredited, delta: 0 }
+  const total = computeCostUSD(usage, cost)
+  if (!(total > alreadyCredited)) return { credited: alreadyCredited, delta: 0 }
+  return { credited: total, delta: total - alreadyCredited }
 }
 
 export function loopSummaryText(outcome: LoopOutcome): string {

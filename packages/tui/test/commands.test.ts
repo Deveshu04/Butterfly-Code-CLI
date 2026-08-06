@@ -217,16 +217,42 @@ test("/loop plan with no goal reports usage via error, not a crash", () => {
   expect(errors[0]).toContain("/loop plan")
 })
 
-test("/loop run dispatches to CommandActions.loopRun", () => {
+test("/loop run dispatches to CommandActions.loopRun with allowDirty false", () => {
   const match = findCommand("/loop run")
-  let called = 0
+  const calls: boolean[] = []
   const actions = {
-    loopRun: async () => {
-      called += 1
+    loopRun: async (allowDirty: boolean) => {
+      calls.push(allowDirty)
     },
   } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
   if (match && "command" in match) void match.command.run(match.arg, actions)
-  expect(called).toBe(1)
+  expect(calls).toEqual([false])
+})
+
+test("/loop run --allow-dirty is an EXPLICIT opt-out, passed through to loopRun", () => {
+  const match = findCommand("/loop run --allow-dirty")
+  const calls: boolean[] = []
+  const actions = {
+    loopRun: async (allowDirty: boolean) => {
+      calls.push(allowDirty)
+    },
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(calls).toEqual([true])
+})
+
+test("/loop run with an unknown flag errors instead of silently ignoring it", () => {
+  const match = findCommand("/loop run --force")
+  const errors: string[] = []
+  const actions = {
+    error: (text: string) => errors.push(text),
+    loopRun: async () => {
+      throw new Error("must not start a loop on an unrecognized flag")
+    },
+  } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
+  if (match && "command" in match) void match.command.run(match.arg, actions)
+  expect(errors.length).toBe(1)
+  expect(errors[0]).toContain("--allow-dirty")
 })
 
 test("/loop with an unrecognized sub-verb reports usage via error, not a crash", () => {

@@ -69,6 +69,7 @@ import {
   renderMentionBlock,
   restoreSnapshot,
   reviewTurn,
+  runCommand,
   runHandoffTurn,
   runHooks,
   runLoop,
@@ -88,6 +89,7 @@ import {
   ToolRegistry,
   todoTool,
   touchFrecency,
+  type Usage,
   WorkQueue,
   withFrecencyTouch,
   writeCommitMessageFile,
@@ -114,10 +116,17 @@ import {
 import { formatToolResult, stripThink } from "./format"
 import {
   applyLoopEvent,
+  askBearingRules,
+  askRulesWarning,
+  dirtyLoopLines,
+  dirtyTreeOverride,
+  dirtyTreeRefusal,
   INITIAL_LOOP_CARD,
   type LoopCardState,
   loopCardText,
+  loopSpendCredit,
   loopSummaryText,
+  spendCapNotice,
 } from "./loop-card"
 import { buildPagerDoc, type PagerDoc, searchPagerLines, stepLine } from "./pager"
 import { PagerView } from "./pager-view"
@@ -314,6 +323,8 @@ const LOOP_TUI_RULES: PermissionRules = {
   "*": "allow",
   edit: { "**/.env*": "deny", ".env*": "deny" },
 }
+
+const GIT_STATUS_TIMEOUT_MS = 15_000
 
 const LOOP_PLANNER_PROMPT = `You are the planning stage of an autonomous coding loop. Break the specification into 2-10 SMALL, independently verifiable tasks. Each task must be completable in one focused session and checkable by the project's test/build gates.
 
@@ -1248,7 +1259,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         })
       }
     },
-    loopRun: async () => {
+    loopRun: async (allowDirty: boolean) => {
       if (planMode()) {
         push({
           kind: "error",
@@ -1271,6 +1282,27 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       setBusy(true)
       loopAbort = new AbortController()
+      const gitStatus = await runCommand("git status --porcelain", {
+        cwd: props.cwd,
+        timeoutMs: GIT_STATUS_TIMEOUT_MS,
+      })
+      const dirty =
+        gitStatus.exitCode === 0 && !gitStatus.timedOut ? dirtyLoopLines(gitStatus.stdout) : []
+      const abandonBeforeStart = (): void => {
+        setBusy(false)
+        loopAbort = undefined
+        drainQueue()
+      }
+      if (dirty.length > 0 && !allowDirty) {
+        push({ kind: "error", text: dirtyTreeRefusal(dirty) })
+        abandonBeforeStart()
+        return
+      }
+      if (loopAbort.signal.aborted) {
+        abandonBeforeStart()
+        return
+      }
+      if (dirty.length > 0) push({ kind: "info", text: dirtyTreeOverride(dirty) })
       setLoopCard(INITIAL_LOOP_CARD)
       const attentionState = () => ({
         focus: focused() ? ("focused" as const) : ("blurred" as const),
@@ -1280,6 +1312,17 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       applyAttention(decideAttention({ kind: "turn.start" }, attentionState(), attentionConfig()))
       let loopDetail: string | undefined
       let queue: WorkQueue | undefined
+      let loopCredited = 0
+      const creditLoopSpend = (usage: Usage) => {
+        const credit = loopSpendCredit(usage, modelCost(), loopCredited)
+        loopCredited = credit.credited
+        if (credit.delta > 0) setSessionCost((c) => c + credit.delta)
+      }
+      const cap = config().maxSpendUSD
+      if (cap !== undefined) push({ kind: "info", text: spendCapNotice(cap) })
+      const rules = config().permissions ?? LOOP_TUI_RULES
+      const asks = askBearingRules(rules)
+      if (asks.length > 0) push({ kind: "info", text: askRulesWarning(asks) })
       try {
         const queuePaths = loopPaths(props.cwd)
         queue = WorkQueue.open(queuePaths.queue)
@@ -1287,7 +1330,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           queue,
           provider: freshProvider(),
           makeRegistry: buildLoopRegistry,
-          rules: config().permissions ?? LOOP_TUI_RULES,
+          rules,
           model: ref,
           system: frozenSystem(ref),
           cwd: props.cwd,
@@ -1296,9 +1339,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           handoffPath: queuePaths.handoff,
           signal: loopAbort.signal,
           ...(config().small_model ? { smallModel: config().small_model } : {}),
-          onEvent: (event: LoopEvent) =>
-            setLoopCard((prev) => applyLoopEvent(prev ?? INITIAL_LOOP_CARD, event)),
+          onEvent: (event: LoopEvent) => {
+            if ("progress" in event) creditLoopSpend(event.progress.usage)
+            setLoopCard((prev) => applyLoopEvent(prev ?? INITIAL_LOOP_CARD, event))
+          },
         })
+        creditLoopSpend(outcome.usage)
         loopDetail = `${outcome.stopReason}: ${outcome.closed} closed, ${outcome.blocked} blocked`
         push({ kind: "info", text: loopSummaryText(outcome) })
       } catch (error) {

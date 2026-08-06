@@ -1948,3 +1948,191 @@ test("plan mode denies /loop run (mutating) but still allows /loop plan (read-on
     server.stop()
   }
 }, 60_000)
+
+
+/**
+ * A fresh models.dev cache under the test's HOME, so catalog-driven pricing
+ * is available with no network (ModelsCatalog.load short-circuits on a cache
+ * younger than 24h). Costs are USD per 1M tokens.
+ */
+function seedCatalogCache(
+  home: string,
+  providerId: string,
+  modelId: string,
+  cost: { input: number; output: number },
+): void {
+  const dir = join(home, ".config", "butterfly")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    join(dir, "models-cache.json"),
+    JSON.stringify({
+      fetchedAt: Date.now(),
+      data: { [providerId]: { models: { [modelId]: { limit: { context: 128_000 }, cost } } } },
+    }),
+  )
+}
+
+test("/loop run refuses to start on a dirty working tree — nothing claimed, no supervisor", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  writeFileSync(join(cwd, "app.ts"), "export const v = 999\n")
+  const queuePath = join(cwd, ".butterfly", "queue.db")
+  const seed = WorkQueue.open(queuePath)
+  seed.addTask({ title: "stall task", spec: "do work" })
+  seed.closeDb()
+
+  const t = await testRender(
+    () => (
+      <App
+        cwd={cwd}
+        config={{ model: "mock/model", gates: [{ name: "ok", command: "exit 0" }] }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 140, height: 40 },
+  )
+  await t.renderOnce()
+
+  t.mockInput.typeText("/loop run")
+  t.mockInput.pressEnter()
+  const refused = await waitForFrameSlow(t, (f) => f.includes("/loop run refused"))
+  expect(refused).toContain("app.ts")
+  expect(refused).toContain("--allow-dirty")
+  // The card never appeared: no supervisor was started.
+  expect(refused).not.toContain("loop running")
+
+  expect(existsSync(join(cwd, ".butterfly", "loop.jsonl"))).toBe(false)
+
+  // busy cleared — the composer is usable again, not wedged.
+  const idle = await waitForFrameSlow(t, (f) => f.includes("describe a task"))
+  expect(idle).not.toContain("loop running")
+  t.renderer.destroy()
+}, 30_000)
+
+test("/loop run --allow-dirty is an explicit, loud opt-out that does start the loop", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  writeFileSync(join(cwd, "app.ts"), "export const v = 999\n")
+  const queuePath = join(cwd, ".butterfly", "queue.db")
+  const seed = WorkQueue.open(queuePath)
+  seed.addTask({ title: "solo task", spec: "do the one thing" })
+  seed.closeDb()
+  const server = startFakeChatServer("done")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-loop",
+            providers: { fake: { baseURL: server.baseURL } },
+            gates: [{ name: "ok", command: "exit 0" }],
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 140, height: 40 },
+    )
+    await t.renderOnce()
+
+    t.mockInput.typeText("/loop run --allow-dirty")
+    t.mockInput.pressEnter()
+    const warned = await waitForFrameSlow(t, (f) => f.includes("--allow-dirty: starting"))
+    expect(warned).toContain("WILL be included")
+    expect(warned).toContain("app.ts")
+
+    const summary = await waitForFrameSlow(
+      t,
+      (frame) => frame.includes("loop stopped (drained)"),
+      25_000,
+    )
+    expect(summary).toContain("1 closed")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 60_000)
+
+test("/loop run warns that ask rules break unattended iterations and that maxSpendUSD is not enforced", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const t = await testRender(
+    () => (
+      <App
+        cwd={cwd}
+        config={{
+          model: "mock/model",
+          gates: [{ name: "ok", command: "exit 0" }],
+          // The default-shaped tree a user actually ships with: every
+          // ask-classified call would hard-error inside an unattended loop.
+          permissions: { "*": "ask", bash: { "git *": "allow" } },
+          maxSpendUSD: 5,
+        }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 140, height: 40 },
+  )
+  await t.renderOnce()
+
+  // Empty queue: runLoop stops "drained" before any iteration, so this test
+  // needs neither a model server nor a network at all.
+  t.mockInput.typeText("/loop run")
+  t.mockInput.pressEnter()
+  const warned = await waitForFrameSlow(t, (f) => f.includes("UNATTENDED"), 20_000)
+  expect(warned).toContain('"ask" entries')
+  expect(warned).toContain("no-progress")
+  // …and warn-and-proceed, not warn-and-block: the loop still ran.
+  const capped = await waitForFrameSlow(t, (f) => f.includes("maxSpendUSD"), 20_000)
+  expect(capped).toContain("$5.00")
+  expect(capped).toContain("not enforced")
+  const summary = await waitForFrameSlow(t, (f) => f.includes("loop stopped (drained)"), 20_000)
+  expect(summary).toContain("0 closed")
+  t.renderer.destroy()
+}, 30_000)
+
+test("/loop run meters its token usage into the session cost — a loop never reads as free", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const home = tempDir("bfly-home-")
+  // $200/1M in and out; the fake server reports 5 prompt + 3 completion
+  // tokens per call, so one iteration costs exactly (5+3) * 200 / 1e6 * 1e4…
+  // => $1.60, a figure no other code path in this test can produce.
+  seedCatalogCache(home, "fake", "mock-loop", { input: 200_000, output: 200_000 })
+  const seed = WorkQueue.open(join(cwd, ".butterfly", "queue.db"))
+  seed.addTask({ title: "solo task", spec: "do the one thing" })
+  seed.closeDb()
+  const server = startFakeChatServer("done")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-loop",
+            providers: { fake: { baseURL: server.baseURL } },
+            gates: [{ name: "ok", command: "exit 0" }],
+          }}
+          home={home}
+        />
+      ),
+      { width: 140, height: 40 },
+    )
+    await t.renderOnce()
+
+    t.mockInput.typeText("/loop run")
+    t.mockInput.pressEnter()
+    const summary = await waitForFrameSlow(
+      t,
+      (frame) => frame.includes("loop stopped (drained)"),
+      25_000,
+    )
+    // The status bar's session-cost readout (same accumulator ordinary turns
+    // and /handoff feed) — credited live off LoopEvent.progress.usage, so it
+    // is already correct on the frame the summary lands in.
+    expect(summary).toContain("$1.60")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 60_000)

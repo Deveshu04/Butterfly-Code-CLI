@@ -41,7 +41,7 @@ export interface CommandActions {
   killTask(id: string): void
   showTask(id: string): string
   loopPlan(goal: string): Promise<void>
-  loopRun(): Promise<void>
+  loopRun(allowDirty: boolean): Promise<void>
   loopStatusText(): string
 }
 
@@ -258,7 +258,7 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: "loop",
-    args: "plan <goal> | run | status",
+    args: "plan <goal> | run [--allow-dirty] | status",
     description:
       "autonomous multi-task loop: plan tasks, run the supervisor, or check queue status",
     run: (arg, a) => {
@@ -267,8 +267,13 @@ export const COMMANDS: SlashCommand[] = [
         a.info(a.loopStatusText())
         return
       }
-      if (trimmed === "run") {
-        return a.loopRun()
+      if (trimmed === "run" || trimmed.startsWith("run ")) {
+        const flag = trimmed.slice(3).trim()
+        if (flag !== "" && flag !== "--allow-dirty") {
+          a.error(`unknown option "${flag}" — usage: /loop run [--allow-dirty]`)
+          return
+        }
+        return a.loopRun(flag === "--allow-dirty")
       }
       if (trimmed === "plan" || trimmed.startsWith("plan ")) {
         const goal = trimmed.slice(4).trim()
@@ -278,7 +283,7 @@ export const COMMANDS: SlashCommand[] = [
         }
         return a.loopPlan(goal)
       }
-      a.error("usage: /loop plan <goal> | /loop run | /loop status")
+      a.error("usage: /loop plan <goal> | /loop run [--allow-dirty] | /loop status")
     },
   },
   {
