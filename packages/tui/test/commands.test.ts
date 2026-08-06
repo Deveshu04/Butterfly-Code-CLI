@@ -66,6 +66,45 @@ test("help covers every command and hints narrow while typing", () => {
   expect(commandHints("plain text")).toBe("")
 })
 
+
+test("help wraps every long description with a hanging indent instead of overflowing the usage column", () => {
+  const help = renderHelp()
+  const lines = help.split("\n")
+  const reviewIndex = lines.findIndex((line) => line.trimStart().startsWith("/review"))
+  expect(reviewIndex).toBeGreaterThan(-1)
+  const reviewLine = lines[reviewIndex] ?? ""
+  expect(reviewLine).toContain("read-only subagent review")
+  const usageIndent = reviewLine.match(/^\s*/)?.[0].length ?? 0
+  for (let i = reviewIndex + 1; i < lines.length && !/^\s*\/\w/.test(lines[i] ?? ""); i++) {
+    const line = lines[i] ?? ""
+    if (line.trim() === "") break
+    const indent = line.match(/^\s*/)?.[0].length ?? 0
+    expect(indent).toBeGreaterThan(usageIndent)
+  }
+})
+
+test("an oversized usage (/loop) gets its own line — never crowds or truncates the description", () => {
+  const help = renderHelp()
+  const lines = help.split("\n")
+  const loopIndex = lines.findIndex((line) => line.trimStart().startsWith("/loop"))
+  expect(loopIndex).toBeGreaterThan(-1)
+  expect(lines[loopIndex]?.trim()).toBe("/loop plan <goal> | run [--allow-dirty] | status")
+  // The description starts on the very next line, indented under it.
+  const next = lines[loopIndex + 1] ?? ""
+  expect(next.trim().length).toBeGreaterThan(0)
+  expect(next.startsWith("    ")).toBe(true)
+})
+
+test("the keys line is one key per row, not a 3-line wall of text", () => {
+  const help = renderHelp()
+  expect(help).toContain("keys:")
+  expect(help).toContain("Ctrl+C interrupts, twice quits")
+  expect(help).toContain("Ctrl+O opens the transcript pager")
+  const lines = help.split("\n")
+  const ctrlCLine = lines.find((line) => line.includes("Ctrl+C interrupts"))
+  expect(ctrlCLine).not.toContain("Ctrl+O")
+})
+
 test("/review is registered and dispatches with its range/--staged argument", () => {
   expect(COMMANDS.some((c) => c.name === "review")).toBe(true)
   const bare = findCommand("/review")

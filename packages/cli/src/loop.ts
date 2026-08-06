@@ -18,6 +18,7 @@ import {
   GraphDb,
   globTool,
   grepTool,
+  type LoopEvent,
   loadConfig,
   loadMemory,
   memoryPaths,
@@ -34,6 +35,12 @@ import {
   WorkQueue,
 } from "@butterfly/core"
 import { applyHeadlessAttention, installProgressExitClear } from "./attention-headless"
+
+export function formatLoopTaskEvent(event: LoopEvent): string | undefined {
+  if (event.type === "task.closed") return `ok ${event.title}`
+  if (event.type === "task.failed") return `FAIL ${event.title} (attempt ${event.attempts})`
+  return undefined
+}
 
 const PLANNER_PROMPT = `You are the planning stage of an autonomous coding loop. Break the specification into 2-10 SMALL, independently verifiable tasks. Each task must be completable in one focused session and checkable by the project's test/build gates.
 
@@ -225,10 +232,8 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
             handoffPath: paths.handoff,
             ...(config.small_model ? { smallModel: config.small_model } : {}),
             onEvent: (event) => {
-              if (event.type === "task.closed") console.log(`✓ ${event.title}`)
-              else if (event.type === "task.failed") {
-                console.log(`✗ ${event.title} (attempt ${event.attempts})`)
-              }
+              const line = formatLoopTaskEvent(event)
+              if (line !== undefined) console.log(line)
             },
           })
         } finally {

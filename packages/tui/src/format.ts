@@ -1,5 +1,20 @@
 /** Display-side text hygiene. Journals always keep the raw text. */
 
+export function humanizeTokens(n: number): string {
+  const value = Math.max(0, n)
+  if (value < 1000) return String(Math.round(value))
+  return `${(value / 1000).toFixed(1)}k`
+}
+
+export function middleEllipsize(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text
+  if (maxLen <= 1) return "…".slice(0, Math.max(0, maxLen))
+  const keep = maxLen - 1
+  const head = Math.ceil(keep / 2)
+  const tail = keep - head
+  return `${text.slice(0, head)}…${text.slice(text.length - tail)}`
+}
+
 export interface ThinkSplit {
   rest: string
   thinking: string
@@ -34,7 +49,7 @@ export function formatToolResult(output: string, isError: boolean): string {
   const { shown, hidden } = previewLines(output, isError)
   const body = shown.map((line) => `  ${line}`)
   if (hidden > 0) body.push(`  … ${hidden} more line${hidden === 1 ? "" : "s"}`)
-  return `${isError ? "✗" : "✓"} ${body.join("\n").trimStart()}`
+  return `${isError ? "failed" : "ok"} ${body.join("\n").trimStart()}`
 }
 
 export function formatCommandBody(output: string, isError: boolean): string {

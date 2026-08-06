@@ -115,7 +115,13 @@ import {
   loadCustomCommands,
   type SlashCommand,
 } from "./commands"
-import { formatCommandBody, formatToolResult, splitThink } from "./format"
+import {
+  formatCommandBody,
+  formatToolResult,
+  humanizeTokens,
+  middleEllipsize,
+  splitThink,
+} from "./format"
 import {
   applyLoopEvent,
   askBearingRules,
@@ -172,6 +178,8 @@ interface Message {
   errorInfo?: ProviderErrorInfo
   thinkStartedAt?: number
   thinkClosedAt?: number
+  isCall?: boolean
+  structured?: boolean
 }
 
 function filetypeOf(path: string | undefined): string | undefined {
@@ -271,8 +279,42 @@ function metaBash(meta: unknown): { command: string; exitCode: number } | undefi
   return undefined
 }
 
+function capAtTokenBoundary(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text
+  const slice = text.slice(0, maxLen)
+  const boundary = Math.max(
+    slice.lastIndexOf(","),
+    slice.lastIndexOf(" "),
+    slice.lastIndexOf(":"),
+    slice.lastIndexOf("{"),
+  )
+  const cut = boundary > maxLen * 0.5 ? slice.slice(0, boundary) : slice
+  return `${cut}…`
+}
+
+function toolCallArgs(name: string, input: unknown): string {
+  const args = input && typeof input === "object" ? (input as Record<string, unknown>) : {}
+  const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined)
+  if (name === "read" || name === "edit") {
+    const path = str(args.file_path)
+    if (path !== undefined) return path
+  }
+  if (name === "glob") {
+    const pattern = str(args.pattern)
+    if (pattern !== undefined) return pattern
+  }
+  if (name === "grep") {
+    const pattern = str(args.pattern)
+    if (pattern !== undefined) {
+      const glob = str(args.glob)
+      return glob ? `${pattern} ${glob}` : pattern
+    }
+  }
+  return capAtTokenBoundary(JSON.stringify(input), 100)
+}
+
 function toolCallMessage(name: string, input: unknown): Message {
-  return { kind: "tool", text: `${name} ${JSON.stringify(input).slice(0, 120)}` }
+  return { kind: "tool", text: `${name} ${toolCallArgs(name, input)}`, isCall: true }
 }
 
 function toolResultMessage(output: string, isError: boolean, meta: unknown): Message {
@@ -339,6 +381,56 @@ function ThinkingBlock(props: {
       </Show>
     </box>
   )
+}
+
+function splitLabelValue(line: string): { label: string; value: string } | undefined {
+  const match = line.match(/^(\s*\S(?:.*\S)?)( {2,})(\S.*)$/)
+  if (!match) return undefined
+  const [, label, gap, value] = match
+  if (label === undefined || gap === undefined || value === undefined) return undefined
+  return { label: `${label}${gap}`, value }
+}
+
+function MessageLine(props: { line: string; tone: string | undefined; structured: boolean }) {
+  const split = () => (props.structured ? splitLabelValue(props.line) : undefined)
+  return (
+    <Show when={split()} fallback={<text fg={props.tone}>{props.line}</text>}>
+      {(pair: Accessor<{ label: string; value: string }>) => (
+        <box flexDirection="row">
+          <text fg={themeTokens().muted}>{pair().label}</text>
+          <text>{pair().value}</text>
+        </box>
+      )}
+    </Show>
+  )
+}
+
+function MessageLines(props: { text: string; tone: string | undefined; structured?: boolean }) {
+  return (
+    <box flexDirection="column">
+      <For each={props.text.split("\n")}>
+        {(line) => <MessageLine line={line} tone={props.tone} structured={props.structured ?? false} />}
+      </For>
+    </box>
+  )
+}
+
+function ToolCallRow(props: { text: string }) {
+  const spaceIndex = () => props.text.indexOf(" ")
+  const name = () => (spaceIndex() === -1 ? props.text : props.text.slice(0, spaceIndex()))
+  const args = () => (spaceIndex() === -1 ? "" : props.text.slice(spaceIndex() + 1))
+  return (
+    <box flexDirection="row">
+      <text>{name()}</text>
+      <Show when={args() !== ""}>
+        <text fg={themeTokens().muted}>{` ${args()}`}</text>
+      </Show>
+    </box>
+  )
+}
+
+function messageMarginTop(message: Message): number {
+  return message.kind === "user" || message.kind === "info" || message.isCall ? 1 : 0
 }
 
 function isMentionTrigger(previous: string, value: string): boolean {
@@ -459,6 +551,8 @@ function loopPaths(cwd: string): { queue: string; handoff: string; sessions: str
 
 export function App(props: { cwd: string; config: ButterflyConfig; home?: string }) {
   const home = props.home ?? homedir()
+  const displayPath = (path: string): string =>
+    middleEllipsize(path.startsWith(home) ? `~${path.slice(home.length)}` : path, 70)
   const dimensions = useTerminalDimensions()
   const renderer = useRenderer()
 
@@ -753,7 +847,6 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const push = (message: Message) => {
     setMessages([...messages(), message])
-    scroll?.scrollTo(scroll.scrollHeight)
   }
 
   const showApprovalPrompt = (text: string, quickAdd?: QuickAddOffer): Promise<"allow" | "deny"> =>
@@ -827,7 +920,6 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     if (last?.kind === "assistant") all[all.length - 1] = updated
     else all.push(updated)
     setMessages(all)
-    scroll?.scrollTo(scroll.scrollHeight)
   }
 
   const openMentionPicker = () => {
@@ -852,8 +944,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     setPagerSearchActive(false)
     setPagerMatches([])
     setPagerLine(0)
-    setPagerNotice("")
+    setPagerNotice("rendering…")
     setPagerOpen(true)
+    setTimeout(() => {
+      setPagerNotice((current) => (current === "rendering…" ? "" : current))
+    }, 500)
   }
   const closePager = () => setPagerOpen(false)
 
@@ -940,7 +1035,6 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       all.push({ kind: "thinking", text, thinkStartedAt: Date.now() })
     }
     setMessages(all)
-    scroll?.scrollTo(scroll.scrollHeight)
   }
 
   const finalizeOpenThinking = () => {
@@ -1120,7 +1214,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   }
 
   const actions: CommandActions = {
-    info: (text) => push({ kind: "info", text }),
+    info: (text, structured) => push({ kind: "info", text, ...(structured ? { structured: true } : {}) }),
     error: (text) => push({ kind: "error", text }),
     openSetup: () => setSetup({ stage: "provider" }),
     quit,
@@ -1165,7 +1259,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         `thinking   ${reasoning() ?? "provider default"}`,
         `spend      ${formatUSD(sessionCost())} this session${config().maxSpendUSD !== undefined ? ` (cap $${config().maxSpendUSD?.toFixed(2)}/turn)` : ""}`,
         `small      ${config().small_model ?? "not set"}`,
-        `journal    ${session.journal.path}`,
+        `journal    ${displayPath(session.journal.path)}`,
         `last turn  ${status() || "—"}`,
       ].join("\n")
     },
@@ -1225,7 +1319,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     skillsText: () =>
       skillsIndex(skillDirs) || "no skills yet — add .butterfly/skills/<name>/SKILL.md",
     listSessionsText: () => {
-      lastListing = listSessions(join(props.cwd, ".butterfly", "sessions"))
+      lastListing = listSessions(join(props.cwd, ".butterfly", "sessions")).filter(
+        (s) => s.title !== "(empty session)" || s.path === session.journal.path,
+      )
       if (lastListing.length === 0) return "no sessions yet"
       const lines = lastListing.map(
         (s, i) =>
@@ -1364,7 +1460,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         const width = Math.round((tokens / limit) * 30)
         return `  ${"█".repeat(Math.min(30, Math.max(tokens > 0 ? 1 : 0, width)))}`
       }
-      return renderDoctorReport(report, { bar })
+      return renderDoctorReport(
+        { ...report, journal: { ...report.journal, path: report.journal.path && displayPath(report.journal.path) } },
+        { bar },
+      )
     },
     hooksText: () => {
       const hooks = config().hooks ?? []
@@ -2203,7 +2302,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       .then((outcome) => {
         setSessionCost((c) => c + outcome.costUSD)
         setStatus(
-          `in ${outcome.usage.input} · out ${outcome.usage.output} · cached ${outcome.usage.cacheRead} · ${outcome.steps} steps`,
+          `in ${humanizeTokens(outcome.usage.input)} · out ${humanizeTokens(outcome.usage.output)} · cached ${humanizeTokens(outcome.usage.cacheRead)} · ${outcome.steps} steps`,
         )
         void (async () => {
           try {
@@ -2493,15 +2592,24 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const mark = renderWordmark()
   const markMode = () => wordmarkMode(dimensions().width)
-  const showBigMark = () => messages().length === 0 && !setup() && markMode() !== "plain"
+  const anyOverlayOpen = () =>
+    Boolean(picker()) ||
+    Boolean(pendingAsk()) ||
+    Boolean(providerKeyStep()) ||
+    Boolean(loopCard()) ||
+    cmdList().length > 0
+  const showBigMark = () =>
+    messages().length === 0 && !setup() && !anyOverlayOpen() && markMode() !== "plain"
+  const showPlainWelcome = () =>
+    messages().length === 0 && !setup() && !anyOverlayOpen() && markMode() === "plain"
   const markRows = () => [0, 1, 2, 3, 4, 5]
 
   const ctxGauge = () => {
     const limit = ctxLimit()
     const used = ctxUsed()
-    if (!limit) return used > 0 ? `ctx ${(used / 1000).toFixed(1)}k` : ""
+    if (!limit) return used > 0 ? `ctx ${humanizeTokens(used)}` : ""
     const pct = Math.min(100, Math.round((used / limit) * 100))
-    return `ctx ${pct}% of ${Math.round(limit / 1000)}k`
+    return `ctx ${humanizeTokens(used)}/${humanizeTokens(limit)} (${pct}%)`
   }
   const ctxDanger = () => {
     const limit = ctxLimit()
@@ -2654,6 +2762,24 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 </box>
               }
             >
+              <Show
+                when={!showPlainWelcome()}
+                fallback={
+                  <box flexGrow={1} justifyContent="center" alignItems="center" flexDirection="column">
+                    <box flexDirection="row">
+                      <text fg={themeTokens().muted}>butterfly </text>
+                      <text>
+                        <b>code</b>
+                      </text>
+                    </box>
+                    <box marginTop={1}>
+                      <text fg={themeTokens().muted}>
+                        the harness-first coding agent — /help for commands
+                      </text>
+                    </box>
+                  </box>
+                }
+              >
               <scrollbox
                 ref={(r: ScrollBoxRenderable) => {
                   scroll = r
@@ -2661,6 +2787,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 stickyScroll
                 stickyStart="bottom"
                 flexGrow={1}
+                viewportOptions={{ paddingRight: 2 }}
+                verticalScrollbarOptions={{
+                  trackOptions: {
+                    backgroundColor: themeTokens().bg,
+                    foregroundColor: themeTokens().border,
+                  },
+                }}
               >
                 <For each={messages()}>
                   {(message, index) => {
@@ -2672,7 +2805,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                           <Show
                             when={message.kind === "thinking"}
                             fallback={
-                              <box marginTop={message.kind === "user" ? 1 : 0} flexDirection="column">
+                              <box marginTop={messageMarginTop(message)} flexDirection="column">
                                 <Show
                                   when={message.errorInfo}
                                   fallback={
@@ -2682,17 +2815,28 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                         <Show
                                           when={message.command !== undefined}
                                           fallback={
-                                            <text
-                                              fg={
-                                                message.kind === "tool" || message.kind === "info"
-                                                  ? themeTokens().muted
-                                                  : message.kind === "error"
-                                                    ? themeTokens().error
-                                                    : undefined
+                                            <Show
+                                              when={message.isCall}
+                                              fallback={
+                                                <MessageLines
+                                                  text={
+                                                    message.kind === "user"
+                                                      ? `❯ ${message.text}`
+                                                      : message.text
+                                                  }
+                                                  tone={
+                                                    message.kind === "tool" || message.kind === "info"
+                                                      ? themeTokens().muted
+                                                      : message.kind === "error"
+                                                        ? themeTokens().error
+                                                        : undefined
+                                                  }
+                                                  structured={message.structured}
+                                                />
                                               }
                                             >
-                                              {message.kind === "user" ? `❯ ${message.text}` : message.text}
-                                            </text>
+                                              <ToolCallRow text={message.text} />
+                                            </Show>
                                           }
                                         >
                                           <box flexDirection="column">
@@ -2818,6 +2962,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                   }}
                 </For>
               </scrollbox>
+              </Show>
             </Show>
           </Show>
         </Show>
@@ -2847,22 +2992,24 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             borderStyle="rounded"
             borderColor={themeTokens().accent}
             paddingLeft={1}
-            flexDirection="row"
+            flexDirection="column"
           >
-            <text fg={themeTokens().accent}>approve? </text>
-            <text>{ask().text} </text>
+            <box flexDirection="row">
+              <text fg={themeTokens().accent}>approve? </text>
+              <text>{middleEllipsize(ask().text, Math.max(20, dimensions().width - 14))}</text>
+            </box>
             <Show
               when={!pagerOpen()}
               fallback={<text fg={themeTokens().warn}>close the pager (Esc) to answer</text>}
             >
-              <text fg={themeTokens().muted}>[y]es / [n]o</text>
-              <Show when={ask().quickAdd}>
-                {(qa: Accessor<QuickAddOffer>) => (
-                  <text
-                    fg={themeTokens().muted}
-                  >{` / [a]lways ${qa().tool}: "${qa().pattern}"`}</text>
-                )}
-              </Show>
+              <box flexDirection="row">
+                <text fg={themeTokens().muted}>[y]es · [n]o</text>
+                <Show when={ask().quickAdd}>
+                  {(qa: Accessor<QuickAddOffer>) => (
+                    <text fg={themeTokens().muted}>{` · [a]lways "${qa().pattern}"`}</text>
+                  )}
+                </Show>
+              </box>
             </Show>
           </box>
         )}
@@ -2985,7 +3132,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       <Show when={attachedImages().length > 0}>
         <box flexShrink={0} paddingLeft={1} flexDirection="row">
           <text fg={themeTokens().accent}>
-            {`📎 ${attachedImages().length} image${attachedImages().length === 1 ? "" : "s"}: `}
+            {`attached: ${attachedImages().length} image${attachedImages().length === 1 ? "" : "s"} — `}
           </text>
           <text fg={themeTokens().muted}>
             {attachedImages()
@@ -3051,7 +3198,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
       <box flexShrink={0} height={1} paddingLeft={1} flexDirection="row">
         <text fg={busy() ? themeTokens().accent : themeTokens().muted}>
-          {busy() ? `${SPINNER[spin()]} thinking… ` : status() ? `${status()}  ` : ""}
+          {busy()
+            ? `${SPINNER[spin()]} thinking… `
+            : status()
+              ? `${status()}  `
+              :
+                `${modelRef() ?? "not configured"}  ·  ${basename(props.cwd)}  ·  /help for commands`}
         </text>
         <Show when={ctxGauge() !== ""}>
           <text fg={ctxDanger() ? themeTokens().warn : themeTokens().muted}>{ctxGauge()}</text>

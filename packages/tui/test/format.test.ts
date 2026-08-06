@@ -1,5 +1,39 @@
 import { expect, test } from "bun:test"
-import { formatCommandBody, formatToolResult, splitThink, stripThink } from "../src/format"
+import {
+  formatCommandBody,
+  formatToolResult,
+  humanizeTokens,
+  middleEllipsize,
+  splitThink,
+  stripThink,
+} from "../src/format"
+
+
+test("humanizeTokens prints small counts as plain integers, never a '0.0k'-style suffix", () => {
+  expect(humanizeTokens(0)).toBe("0")
+  expect(humanizeTokens(5)).toBe("5")
+  expect(humanizeTokens(999)).toBe("999")
+})
+
+test("humanizeTokens abbreviates thousands with one decimal", () => {
+  expect(humanizeTokens(2400)).toBe("2.4k")
+  expect(humanizeTokens(124032)).toBe("124.0k")
+  expect(humanizeTokens(1000)).toBe("1.0k")
+})
+
+
+test("middleEllipsize leaves short text untouched", () => {
+  expect(middleEllipsize("short", 20)).toBe("short")
+})
+
+test("middleEllipsize trims the middle, keeping the prefix and suffix identifiable", () => {
+  const path = 'git commit -F "C:\\Users\\dev\\AppData\\Local\\Temp\\bfly\\COMMIT_EDITMSG"'
+  const result = middleEllipsize(path, 30)
+  expect(result.length).toBe(30)
+  expect(result).toContain("…")
+  expect(result.startsWith("git commit")).toBe(true)
+  expect(result.endsWith('MSG"')).toBe(true)
+})
 
 test("closed think blocks disappear, keeping the answer", () => {
   expect(stripThink("<think>\nreasoning here\n</think>\nThe answer is 4")).toBe("The answer is 4")
@@ -19,6 +53,18 @@ test("tool results show more lines for errors than successes", () => {
   expect(ok).toContain("5 more")
   expect(err).toContain("line5")
   expect(err).toContain("2 more")
+})
+
+
+test("formatToolResult prefixes plain 'ok'/'failed' words, never a check/cross glyph", () => {
+  const ok = formatToolResult("all good", false)
+  const failed = formatToolResult("broke", true)
+  expect(ok.startsWith("ok ")).toBe(true)
+  expect(failed.startsWith("failed ")).toBe(true)
+  for (const text of [ok, failed]) {
+    expect(text).not.toContain("✓")
+    expect(text).not.toContain("✗")
+  }
 })
 
 

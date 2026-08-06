@@ -125,7 +125,7 @@ function makeRegistry(cwd: string): ToolRegistry {
   return registry
 }
 
-function renderEvent(event: RunnerEvent, json: boolean): void {
+export function renderEvent(event: RunnerEvent, json: boolean): void {
   if (json) {
     console.log(JSON.stringify({ event: event.type, ...event }))
     return
@@ -135,11 +135,11 @@ function renderEvent(event: RunnerEvent, json: boolean): void {
       process.stdout.write(event.text)
       break
     case "tool-call":
-      process.stdout.write(`\n→ ${event.name} ${JSON.stringify(event.input).slice(0, 160)}\n`)
+      process.stdout.write(`\n-> ${event.name} ${JSON.stringify(event.input).slice(0, 160)}\n`)
       break
     case "tool-result": {
       const head = event.output.split("\n", 2)[0] ?? ""
-      process.stdout.write(`  ${event.isError ? "✗" : "✓"} ${head.slice(0, 160)}\n`)
+      process.stdout.write(`  ${event.isError ? "failed" : "ok"} ${head.slice(0, 160)}\n`)
       break
     }
     default:

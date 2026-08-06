@@ -4,6 +4,7 @@ export {
   type BenchDeps,
   type BenchSummary,
   type BenchTask,
+  type BenchTaskResult,
   DEFAULT_SUITE,
   runBenchSuite,
   runBenchTask,

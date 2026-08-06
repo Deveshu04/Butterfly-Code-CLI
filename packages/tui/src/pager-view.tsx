@@ -22,10 +22,21 @@ export function PagerView(props: PagerViewProps) {
 
   return (
     <box flexDirection="column" flexGrow={1} minHeight={0}>
-      <box flexShrink={0} height={1}>
+      <box flexShrink={0} height={1} marginTop={1}>
         <text fg={themeTokens().muted}>{HELP_LINE}</text>
       </box>
-      <scrollbox ref={props.scrollRef} flexGrow={1} minHeight={0}>
+      <scrollbox
+        ref={props.scrollRef}
+        flexGrow={1}
+        minHeight={0}
+        viewportOptions={{ paddingRight: 2 }}
+        verticalScrollbarOptions={{
+          trackOptions: {
+            backgroundColor: themeTokens().bg,
+            foregroundColor: themeTokens().border,
+          },
+        }}
+      >
         <markdown content={props.doc.source} syntaxStyle={SYNTAX} internalBlockMode="top-level" />
       </scrollbox>
       <box flexShrink={0} height={1} flexDirection="row">

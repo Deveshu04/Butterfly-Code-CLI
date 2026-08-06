@@ -4,7 +4,7 @@ import type { ReasoningEffort } from "@butterfly/core"
 
 
 export interface CommandActions {
-  info(text: string): void
+  info(text: string, structured?: boolean): void
   error(text: string): void
   openSetup(): void
   quit(): void
@@ -69,7 +69,7 @@ export const COMMANDS: SlashCommand[] = [
     name: "help",
     args: "",
     description: "list commands",
-    run: (_arg, a) => a.info(renderHelp()),
+    run: (_arg, a) => a.info(renderHelp(), true),
   },
   {
     name: "setup",
@@ -138,7 +138,7 @@ export const COMMANDS: SlashCommand[] = [
     args: "",
     description: "model, context usage, tokens, session paths",
     aliases: ["usage", "cost"],
-    run: (_arg, a) => a.info(a.status()),
+    run: (_arg, a) => a.info(a.status(), true),
   },
   {
     name: "memory",
@@ -164,7 +164,7 @@ export const COMMANDS: SlashCommand[] = [
     description: "list past sessions, or resume one by number/id",
     aliases: ["resume", "continue"],
     run: (arg, a) => {
-      if (arg === "") a.info(a.listSessionsText())
+      if (arg === "") a.info(a.listSessionsText(), true)
       else a.resumeSession(arg)
     },
   },
@@ -209,7 +209,7 @@ export const COMMANDS: SlashCommand[] = [
     name: "context",
     args: "",
     description: "show what fills the context window",
-    run: (_arg, a) => a.info(a.contextText()),
+    run: (_arg, a) => a.info(a.contextText(), true),
   },
   {
     name: "init",
@@ -228,7 +228,7 @@ export const COMMANDS: SlashCommand[] = [
     args: "",
     description: "context audit: prefix, journal, MCP savings, config lint",
     aliases: ["checkup"],
-    run: (_arg, a) => a.info(a.doctorText()),
+    run: (_arg, a) => a.info(a.doctorText(), true),
   },
   {
     name: "hooks",
@@ -380,12 +380,46 @@ export function expandTemplate(template: string, argsLine: string): string {
   return out
 }
 
+const HELP_USAGE_COL = 26
+const HELP_DESC_WIDTH = 54
+
+function wrapHanging(text: string, indent: number, width: number): string {
+  const words = text.split(/\s+/).filter((w) => w !== "")
+  const pad = " ".repeat(indent)
+  const lines: string[] = []
+  let current = ""
+  for (const word of words) {
+    const next = current === "" ? word : `${current} ${word}`
+    if (next.length > width && current !== "") {
+      lines.push(current)
+      current = word
+    } else {
+      current = next
+    }
+  }
+  if (current !== "") lines.push(current)
+  return lines.map((line, i) => (i === 0 ? line : `${pad}${line}`)).join("\n")
+}
+
 export function renderHelp(): string {
   const lines = COMMANDS.map((command) => {
     const usage = `/${command.name}${command.args ? ` ${command.args}` : ""}`
-    return `  ${usage.padEnd(18)} ${command.description}`
+    if (usage.length <= HELP_USAGE_COL) {
+      const wrapped = wrapHanging(command.description, 2 + HELP_USAGE_COL + 2, HELP_DESC_WIDTH)
+      return `  ${usage.padEnd(HELP_USAGE_COL)}  ${wrapped}`
+    }
+    const wrapped = wrapHanging(command.description, 4, HELP_DESC_WIDTH)
+    return `  ${usage}\n    ${wrapped}`
   })
-  return `commands:\n${lines.join("\n")}\nkeys: y/n answers approvals · Ctrl+C interrupts, twice quits · Esc cancels setup · Ctrl+O opens the transcript pager · Ctrl+R expands/collapses the last thinking block (this session's view only — reasoning is never journaled, so it does not survive /resume)`
+  const keys = [
+    "y/n answers approvals",
+    "Ctrl+C interrupts, twice quits",
+    "Esc cancels setup",
+    "Ctrl+O opens the transcript pager",
+    "Ctrl+R expands/collapses the last thinking block (this session's view only — reasoning is never journaled, so it does not survive /resume)",
+  ]
+  const keyLines = keys.map((key) => `  ${wrapHanging(key, 4, HELP_DESC_WIDTH)}`)
+  return `commands:\n${lines.join("\n")}\nkeys:\n${keyLines.join("\n")}`
 }
 
 export interface CommandMatch {

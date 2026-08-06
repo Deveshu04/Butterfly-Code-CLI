@@ -4,6 +4,7 @@ import { parseArgs } from "node:util"
 import {
   AiSdkProvider,
   type BenchTask,
+  type BenchTaskResult,
   bashTool,
   buildSystem,
   createModelResolver,
@@ -18,6 +19,11 @@ import {
   todoTool,
 } from "@butterfly/core"
 
+
+export function formatBenchResultLine(result: BenchTaskResult): string {
+  const m = result.metrics
+  return `${result.solved ? "ok" : "FAIL"} ${result.id}  in=${m.usage.input} out=${m.usage.output} steps=${m.steps} edits=${m.editCalls} malformed=${m.malformedEdits}${result.solved ? "" : `  [check: ${result.checkOutput.slice(0, 120)}]`}`
+}
 export async function runBenchCommand(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
@@ -74,10 +80,7 @@ export async function runBenchCommand(argv: string[]): Promise<number> {
 
   console.log("")
   for (const result of summary.results) {
-    const m = result.metrics
-    console.log(
-      `${result.solved ? "✓" : "✗"} ${result.id}  in=${m.usage.input} out=${m.usage.output} steps=${m.steps} edits=${m.editCalls} malformed=${m.malformedEdits}${result.solved ? "" : `  [check: ${result.checkOutput.slice(0, 120)}]`}`,
-    )
+    console.log(formatBenchResultLine(result))
   }
   console.log("")
   console.log(

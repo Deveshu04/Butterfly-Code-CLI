@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 import {
   loadConfig,
   now,
@@ -298,6 +298,68 @@ test("narrow terminals fall back to the plain header, no pixel mark", async () =
   t.renderer.destroy()
 })
 
+test("the narrow empty state is not a blank screen — it renders the plain wordmark + tagline centered", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 60, height: 20 },
+  )
+  await t.renderOnce()
+  const frame = t.captureCharFrame()
+  const bodyLines = frame.split("\n").slice(1)
+  const body = bodyLines.join("\n")
+  expect(body).toContain("butterfly")
+  expect(body).toContain("code")
+  expect(body).toContain("harness-first coding agent")
+  t.renderer.destroy()
+})
+
+test("an open picker hides the big wordmark instead of clipping it mid-glyph", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    // Wide enough that an empty session would otherwise show the big
+    // block-pixel mark (wordmarkMode !== "plain").
+    { width: 100, height: 32 },
+  )
+  await t.renderOnce()
+  expect(t.captureCharFrame()).toContain("██")
+  t.mockInput.typeText("/theme")
+  t.mockInput.pressEnter()
+  await t.waitForFrame((frame: string) => frame.includes("theme —"))
+  expect(t.captureCharFrame()).not.toContain("██")
+  t.renderer.destroy()
+})
+
+test("the status bar is never a dead row at idle — it shows model · cwd · a hint", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  const frame = t.captureCharFrame()
+  const lastLine =
+    frame
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .at(-1) ?? ""
+  expect(lastLine).toContain("mock/model")
+  expect(lastLine).toContain(basename(cwd))
+  expect(lastLine).toContain("/help")
+  t.renderer.destroy()
+})
+
 test("without a model the setup flow opens and lists providers", async () => {
   const t = await testRender(
     () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
@@ -368,7 +430,7 @@ test("/help lists commands in a configured session", async () => {
         home={tempDir("bfly-home-")}
       />
     ),
-    { width: 100, height: 48 },
+    { width: 100, height: 64 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/help")
@@ -377,6 +439,73 @@ test("/help lists commands in a configured session", async () => {
   expect(t.captureCharFrame()).toContain("/quit")
   t.renderer.destroy()
 })
+
+test("/permissions shows the full rule set — the opening line is not scrolled out of view", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/permissions")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (frame: string) => frame.includes('"web"'))
+  const frame = t.captureCharFrame()
+  const lines = frame.split("\n").map((line) => line.trim())
+  const webIndex = lines.findIndex((line) => line.includes('"web"'))
+  expect(webIndex).toBeGreaterThan(0)
+  expect(lines.slice(0, webIndex)).toContain("{")
+  t.renderer.destroy()
+})
+
+test("the transcript scrollbar reserves a gutter — a near-full-width line is never cut by the thumb", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const marker = `${"a".repeat(90)}TAILMARKER`
+  const server = startFakeSequenceServer([
+    toolCallStreamBody("bash", { command: `echo ${marker}` }, "call1"),
+    textStreamBody("done"),
+  ])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-h2",
+            providers: { fake: { baseURL: server.baseURL } },
+            permissions: { "*": "allow" },
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 20 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("/help")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (frame: string) => frame.includes("/quit"))
+    t.mockInput.typeText("echo it")
+    t.mockInput.pressEnter()
+    const frame = await waitForFrameSlow(t, (f: string) => f.includes("done"), 25_000)
+    const lines = frame.split("\n")
+    let sawFiller = false
+    for (const line of lines) {
+      const lastA = line.lastIndexOf("a")
+      if (lastA === -1) continue
+      sawFiller = true
+      expect(line.length - 1 - lastA).toBeGreaterThanOrEqual(2)
+    }
+    expect(sawFiller).toBe(true)
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
 
 test("/sessions lists past sessions with the current one marked", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -389,6 +518,31 @@ test("/sessions lists past sessions with the current one marked", async () => {
   t.mockInput.pressEnter()
   await t.waitForFrame((frame: string) => frame.includes("sessions (newest first)"))
   expect(t.captureCharFrame()).toContain("(current)")
+  t.renderer.destroy()
+})
+
+test("/sessions drops dead '(empty session)' rows from past launches, keeping only the current one", async () => {
+  const cwd = tempDir("bfly-tui-")
+  for (let i = 0; i < 3; i++) {
+    const past = await testRender(
+      () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+      { width: 100, height: 30 },
+    )
+    await past.renderOnce()
+    past.renderer.destroy()
+  }
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/sessions")
+  t.mockInput.pressEnter()
+  await t.waitForFrame((frame: string) => frame.includes("sessions (newest first)"))
+  const frame = t.captureCharFrame()
+  const rows = frame.split("\n").filter((line) => /^\s*\d+\s+\d{4}-\d{2}-\d{2}/.test(line))
+  expect(rows.length).toBe(1)
+  expect(rows[0]).toContain("(current)")
   t.renderer.destroy()
 })
 
@@ -484,6 +638,38 @@ test("/doctor prints a context audit with prefix, journal, and config lint secti
   t.renderer.destroy()
 })
 
+test("/status and /doctor ellipsize an overlong journal path instead of wrapping it under the label column", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/status")
+  t.mockInput.pressEnter()
+  const statusFrame = await waitForFrameSlow(t, (f: string) => f.includes("last turn"))
+  const statusLines = statusFrame.split("\n")
+  const journalIndex = statusLines.findIndex((line) => line.trim().startsWith("journal"))
+  expect(journalIndex).toBeGreaterThan(-1)
+  expect(statusLines[journalIndex]).toContain("…")
+  expect(statusLines[journalIndex + 1]?.trim().startsWith("last turn")).toBe(true)
+
+  t.mockInput.typeText("/doctor")
+  t.mockInput.pressEnter()
+  const doctorFrame = await waitForFrameSlow(t, (f: string) => f.includes("config lint"))
+  const doctorLines = doctorFrame.split("\n")
+  const pathIndex = doctorLines.findIndex((line) => line.trim().startsWith("path"))
+  expect(pathIndex).toBeGreaterThan(-1)
+  expect(doctorLines[pathIndex]).toContain("…")
+  expect(doctorLines[pathIndex + 1]?.trim().startsWith("events")).toBe(true)
+  t.renderer.destroy()
+})
+
 test("/review in a clean git repo reports nothing to review, no model call needed", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
@@ -569,6 +755,29 @@ test("/commit in a clean git repo offers to stage; approving finds nothing left 
   t.renderer.destroy()
 }, 30_000)
 
+test("the approval card is two lines — the question and the [y]es/[n]o answers never share a row", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/commit")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(t, (f) => f.includes("stage all tracked modifications"))
+  const lines = frame.split("\n")
+  const questionLine = lines.find((line) => line.includes("approve?"))
+  const answerLine = lines.find((line) => line.includes("[y]es"))
+  expect(questionLine).toBeDefined()
+  expect(answerLine).toBeDefined()
+  expect(questionLine).not.toBe(answerLine)
+  expect(questionLine).not.toContain("[y]es")
+  t.mockInput.pressKey("n")
+  await waitForFrameSlow(t, (f) => f.includes("commit cancelled"))
+  t.renderer.destroy()
+}, 30_000)
+
 
 test("a plain confirmation (no tool/target) never offers [a]lways", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -609,7 +818,8 @@ test("a real permission ask (reached via a REAL staged diff + provider round-tri
   const frame = await waitForFrameSlow(t, (f) => f.includes("[a]lways"), 25_000)
   expect(frame).toContain("approve?")
   expect(frame).toContain("bash")
-  expect(frame).toContain('[a]lways bash: "git *"')
+  expect(frame).toContain('[a]lways "git *"')
+  expect(frame).not.toContain("[a]lways bash:")
   t.mockInput.pressKey("a")
   await waitForFrameSlow(t, (f) => f.includes("saved to"), 15_000)
   const written = JSON.parse(readFileSync(join(cwd, "butterfly.jsonc"), "utf8"))
@@ -798,7 +1008,7 @@ test("Enter on a bare / runs the selected command, not the raw slash", async () 
         home={tempDir("bfly-home-")}
       />
     ),
-    { width: 100, height: 45 },
+    { width: 100, height: 64 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/")
@@ -1397,9 +1607,9 @@ test("typing a path to an existing image attaches it as a chip and clears it fro
   )
   await t.renderOnce()
   t.mockInput.typeText("look at shot.png")
-  await t.waitForFrame((frame: string) => frame.includes("📎"))
+  await t.waitForFrame((frame: string) => frame.includes("attached:"))
   const frame = t.captureCharFrame()
-  expect(frame).toContain("📎 1 image")
+  expect(frame).toContain("attached: 1 image")
   expect(frame).toContain("shot.png")
   const composer = findComposer(t.renderer.root)
   expect(composer?.value.trim()).toBe("look at")
@@ -1416,9 +1626,9 @@ test("attaching a second image increments the chip count", async () => {
   )
   await t.renderOnce()
   t.mockInput.typeText("a.png ")
-  await t.waitForFrame((frame: string) => frame.includes("📎 1 image"))
+  await t.waitForFrame((frame: string) => frame.includes("attached: 1 image"))
   t.mockInput.typeText("b.jpg")
-  await t.waitForFrame((frame: string) => frame.includes("📎 2 images"))
+  await t.waitForFrame((frame: string) => frame.includes("attached: 2 images"))
   t.renderer.destroy()
 }, 30_000)
 
@@ -1437,7 +1647,7 @@ test("a path-like token that isn't a real file is left alone — no false-positi
   t.mockInput.typeText("see cat.png for details")
   await t.renderOnce()
   const frame = t.captureCharFrame()
-  expect(frame).not.toContain("📎")
+  expect(frame).not.toContain("attached:")
   expect(frame).toContain("cat.png")
   t.renderer.destroy()
 }, 30_000)
@@ -1656,6 +1866,51 @@ test("Ctrl+O opens and closes the transcript pager", async () => {
   expect(t.captureCharFrame()).toContain("q/Esc")
   t.mockInput.pressKey("o", { ctrl: true })
   await t.waitForFrame((frame: string) => !frame.includes("PAGER"))
+  t.renderer.destroy()
+})
+
+test("opening the pager shows an honest 'rendering…' notice instead of a silent near-blank frame", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 32 },
+  )
+  await t.renderOnce()
+  t.mockInput.pressKey("o", { ctrl: true })
+  const frame = await waitForFrameSlow(t, (f: string) => f.includes("PAGER"))
+  expect(frame).toContain("rendering…")
+  await waitForFrameSlow(t, (f: string) => !f.includes("rendering…"), 3_000)
+  t.renderer.destroy()
+})
+
+test("the pager's own header row is not glued to the app header — there's a blank row of separation", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 32 },
+  )
+  await t.renderOnce()
+  t.mockInput.pressKey("o", { ctrl: true })
+  const frame = await waitForFrameSlow(t, (f: string) => f.includes("PAGER"))
+  const lines = frame.split("\n")
+  const appHeaderIndex = lines.findIndex(
+    (line) => line.includes("butterfly") && line.includes("code"),
+  )
+  const pagerHeaderIndex = lines.findIndex((line) => line.includes("-- PAGER --"))
+  expect(appHeaderIndex).toBeGreaterThanOrEqual(0)
+  expect(pagerHeaderIndex).toBeGreaterThan(appHeaderIndex)
+  // At least one row of separation, not the very next row.
+  expect(pagerHeaderIndex - appHeaderIndex).toBeGreaterThanOrEqual(2)
   t.renderer.destroy()
 })
 
@@ -2057,9 +2312,9 @@ test("a pasted image path is NOT chipped — the image-chip path still owns it",
   )
   await t.renderOnce()
   await t.mockInput.pasteBracketedText("shot.png")
-  await t.waitForFrame((frame: string) => frame.includes("📎"))
+  await t.waitForFrame((frame: string) => frame.includes("attached:"))
   const frame = t.captureCharFrame()
-  expect(frame).toContain("📎 1 image")
+  expect(frame).toContain("attached: 1 image")
   expect(frame).not.toContain("[Pasted #")
   t.renderer.destroy()
 }, 30_000)
