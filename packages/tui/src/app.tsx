@@ -103,10 +103,11 @@ import {
   useKeyboard,
   usePaste,
   useRenderer,
+  useSelectionHandler,
   useTerminalDimensions,
 } from "@opentui/solid"
 import { type Accessor, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
-import { saveClipboardImage } from "./clipboard"
+import { buildOsc52Copy, saveClipboardImage } from "./clipboard"
 import {
   type CommandActions,
   commandMatches,
@@ -117,6 +118,7 @@ import {
   type SlashCommand,
 } from "./commands"
 import {
+  copyStatusText,
   formatCommandBody,
   formatDuration,
   formatToolResult,
@@ -607,6 +609,19 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const [busy, setBusy] = createSignal(false)
   const [pendingAsk, setPendingAsk] = createSignal<PendingAsk | null>(null)
   const [status, setStatus] = createSignal("")
+
+  useSelectionHandler((selection) => {
+    const text = selection.getSelectedText()
+    if (!text) return
+    const { osc, truncated } = buildOsc52Copy(text)
+    try {
+      writeOsc(osc)
+    } catch {
+      return
+    }
+    setStatus(copyStatusText(truncated))
+  })
+
   const [ctxUsed, setCtxUsed] = createSignal(0)
   const [ctxLimit, setCtxLimit] = createSignal<number | undefined>(undefined)
   const [reasoning, setReasoning] = createSignal<ReasoningEffort | undefined>(

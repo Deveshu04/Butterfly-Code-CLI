@@ -1252,6 +1252,98 @@ test("at narrow widths the meters drop instead of colliding with the status text
   }
 }, 30_000)
 
+
+test("dragging over transcript text auto-copies via OSC 52 through the renderer's output path, with a transient 'copied' status notice", async () => {
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+
+  const routed: string[] = []
+  const renderer = t.renderer as unknown as { writeOut: (chunk: string) => boolean }
+  renderer.writeOut = (chunk: string) => {
+    routed.push(chunk)
+    return true
+  }
+
+  const lines = t.captureCharFrame().split("\n")
+  const y = lines.findIndex((l) => l.includes("for commands"))
+  expect(y).toBeGreaterThan(-1)
+  const line = lines[y] ?? ""
+  const x = line.indexOf("for commands")
+  expect(x).toBeGreaterThan(-1)
+
+  await t.mockMouse.drag(x, y, line.length - 1, y)
+  await t.renderOnce()
+
+  const oscEntry = routed.find((chunk) => chunk.startsWith("\x1b]52;c;"))
+  expect(oscEntry).toBeDefined()
+  const match = oscEntry?.match(/^\x1b\]52;c;(.*)\x07$/)
+  expect(match).not.toBeNull()
+  const decoded = Buffer.from(match?.[1] ?? "", "base64").toString("utf-8")
+  expect(decoded).toContain("for commands")
+
+  const frame = await waitForFrameSlow(t, (f) => f.includes("copied"), 5_000)
+  expect(frame).toContain("copied")
+  t.renderer.destroy()
+}, 30_000)
+
+test("a click with no drag yields an empty selection — no OSC write, no status noise", async () => {
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  const routed: string[] = []
+  const renderer = t.renderer as unknown as { writeOut: (chunk: string) => boolean }
+  renderer.writeOut = (chunk: string) => {
+    routed.push(chunk)
+    return true
+  }
+  const before = t.captureCharFrame()
+  const lines = before.split("\n")
+  const y = lines.findIndex((l) => l.includes("for commands"))
+  const x = (lines[y] ?? "").indexOf("for commands")
+
+  await t.mockMouse.click(x, y)
+  await t.renderOnce()
+
+  expect(routed.some((chunk) => chunk.includes("52;c;"))).toBe(false)
+  // The idle line is unchanged — no "copied" ever landed on it.
+  expect(t.captureCharFrame()).not.toContain("copied")
+  t.renderer.destroy()
+})
+
+test("an oversized selection is trimmed to the cap, with a truncation-specific status notice", async () => {
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  const routed: string[] = []
+  const renderer = t.renderer as unknown as {
+    writeOut: (chunk: string) => boolean
+    emit: (event: string, ...args: unknown[]) => boolean
+  }
+  renderer.writeOut = (chunk: string) => {
+    routed.push(chunk)
+    return true
+  }
+  renderer.emit("selection", { getSelectedText: () => "y".repeat(250_000) })
+  await t.renderOnce()
+
+  const oscEntry = routed.find((chunk) => chunk.startsWith("\x1b]52;c;"))
+  expect(oscEntry).toBeDefined()
+  const match = oscEntry?.match(/^\x1b\]52;c;(.*)\x07$/)
+  const b64 = match?.[1] ?? ""
+  expect(b64.length).toBeLessThanOrEqual(100_000)
+
+  const frame = await waitForFrameSlow(t, (f) => f.includes("selection truncated"), 5_000)
+  expect(frame).toContain("copied 100KB (selection truncated)")
+  t.renderer.destroy()
+})
+
 test("/plan toggles read-only mode with a header badge", async () => {
   const t = await testRender(
     () => (

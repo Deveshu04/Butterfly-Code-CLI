@@ -77,3 +77,7 @@ export const STATUS_METERS_MIN_WIDTH = 80
 export function metersFitAt(columns: number): boolean {
   return columns >= STATUS_METERS_MIN_WIDTH
 }
+
+export function copyStatusText(truncated: boolean): string {
+  return truncated ? "copied 100KB (selection truncated)" : "copied"
+}

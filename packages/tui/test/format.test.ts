@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import {
+  copyStatusText,
   formatCommandBody,
   formatDuration,
   formatToolResult,
@@ -155,4 +156,13 @@ test("metersFitAt is a pinned cutoff at STATUS_METERS_MIN_WIDTH, not a soft/orga
   expect(metersFitAt(STATUS_METERS_MIN_WIDTH - 1)).toBe(false)
   expect(metersFitAt(STATUS_METERS_MIN_WIDTH)).toBe(true)
   expect(metersFitAt(STATUS_METERS_MIN_WIDTH + 40)).toBe(true)
+})
+
+
+test("copyStatusText: plain 'copied' for a selection under the cap", () => {
+  expect(copyStatusText(false)).toBe("copied")
+})
+
+test("copyStatusText: truncation notice names the cap and says what happened", () => {
+  expect(copyStatusText(true)).toBe("copied 100KB (selection truncated)")
 })
