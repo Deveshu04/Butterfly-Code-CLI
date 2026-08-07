@@ -30,6 +30,7 @@ export type RunnerEvent =
       meta?: unknown
     }
   | { type: "notice"; text: string }
+  | { type: "step-retracted"; attempt: number }
 
 export interface RunnerDeps {
   provider: ProviderPort
@@ -139,6 +140,8 @@ function raceAbortAfterArmed<T>(
   signal: AbortSignal | undefined,
 ): Promise<T | typeof ABORTED> {
   if (!signal) return promise
+  let settled = false
+  let removeAbortListener = (): void => {}
   const abortedAfterArm: Promise<typeof ABORTED> = armed.then(
     () =>
       new Promise<typeof ABORTED>((resolve) => {
@@ -146,10 +149,24 @@ function raceAbortAfterArmed<T>(
           resolve(ABORTED)
           return
         }
-        signal.addEventListener("abort", () => resolve(ABORTED), { once: true })
+        if (settled) return
+        const onAbort = () => resolve(ABORTED)
+        signal.addEventListener("abort", onAbort, { once: true })
+        removeAbortListener = () => signal.removeEventListener("abort", onAbort)
       }),
   )
-  return Promise.race([promise, abortedAfterArm])
+  const race = Promise.race([promise, abortedAfterArm])
+  race.then(
+    () => {
+      settled = true
+      removeAbortListener()
+    },
+    () => {
+      settled = true
+      removeAbortListener()
+    },
+  )
+  return race
 }
 
 /** Tools that mutate the worktree — the ones that get a pre-call checkpoint. */
@@ -258,6 +275,7 @@ export async function runUserTurn(
     let finish: { reason: FinishReason; usage: Usage } | undefined
 
     const maxRetries = deps.retries ?? DEFAULT_RETRIES
+    let abortedInBackoff = false
     let attempt = 0
     for (;;) {
       attempt += 1
@@ -302,17 +320,20 @@ export async function runUserTurn(
         throw new Error(`Provider error: ${failure.message}`)
       }
 
+      deps.onEvent?.({ type: "step-retracted", attempt })
+
       const waitMs = computeRetryBackoffMs(attempt, failure.info?.retryAfterSec)
       deps.onEvent?.({
         type: "notice",
         text: `retrying (${attempt}/${maxRetries}) in ${Math.round(waitMs / 1000)}s — ${retryReasonClause(failure.info)}`,
       })
-      const aborted = await sleepAbortable(waitMs, deps.signal)
-      if (aborted) {
-        deps.onEvent?.(failure)
-        throw new Error(`Provider error: ${failure.message}`)
+      if (await sleepAbortable(waitMs, deps.signal)) {
+        interrupted = true
+        abortedInBackoff = true
+        break
       }
     }
+    if (abortedInBackoff) break
 
     if (finish) {
       totals.input += finish.usage.input

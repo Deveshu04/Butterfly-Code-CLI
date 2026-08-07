@@ -295,6 +295,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
           ? { maxSpendUSD: opts.maxSpendUSD ?? config.maxSpendUSD }
           : {}),
         ...(config.hooks?.length ? { hooks: config.hooks } : {}),
+        ...(config.retries !== undefined ? { retries: config.retries } : {}),
         ...(entry ? { limits: { context: entry.context, output: entry.output } } : {}),
         imageInputSupported: entry?.imageInput === true,
         ...(config.small_model ? { smallModel: config.small_model } : {}),

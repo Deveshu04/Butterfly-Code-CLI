@@ -199,8 +199,26 @@ test("deps.retries overrides the default cap", async () => {
   expect(provider.requests.length).toBe(2) // 1 initial + 1 retry only
 })
 
+test("retries: 0 disables step retry entirely — one attempt, then the usual throw", async () => {
+  const provider = new MockProvider([
+    [
+      {
+        type: "error",
+        message: "rate limited",
+        info: { kind: "rate_limit", message: "rate limited", retryAfterSec: 0 },
+      },
+    ],
+  ])
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, { retries: 0, onEvent: (event) => seen.push(event) })
+  await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: rate limited")
+  expect(provider.requests.length).toBe(1)
+  expect(seen.some((e) => e.type === "notice")).toBe(false)
+  expect(seen.some((e) => e.type === "error")).toBe(true)
+})
 
-test("an already-aborted signal short-circuits the backoff — fails fast, never retries", async () => {
+
+test("an already-aborted signal short-circuits the backoff — settles interrupted, fails fast, never retries", async () => {
   const provider = new MockProvider([
     [
       {
@@ -212,11 +230,14 @@ test("an already-aborted signal short-circuits the backoff — fails fast, never
   ])
   const abort = new AbortController()
   abort.abort()
-  const deps = makeDeps(provider, { signal: abort.signal })
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, { signal: abort.signal, onEvent: (event) => seen.push(event) })
   const start = Date.now()
-  await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: network blip")
+  const outcome = await runUserTurn(deps, "go")
+  expect(outcome.interrupted).toBe(true)
   expect(Date.now() - start).toBeLessThan(500)
   expect(provider.requests.length).toBe(1)
+  expect(seen.some((e) => e.type === "error")).toBe(false)
 })
 
 test("abort fired MID-backoff cancels the wait immediately rather than running the full 2s out", async () => {
@@ -233,9 +254,149 @@ test("abort fired MID-backoff cancels the wait immediately rather than running t
   const deps = makeDeps(provider, { signal: abort.signal })
   setTimeout(() => abort.abort(), 20)
   const start = Date.now()
-  await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: slow provider")
+  const outcome = await runUserTurn(deps, "go")
   const elapsed = Date.now() - start
+  expect(outcome.interrupted).toBe(true)
   expect(elapsed).toBeGreaterThanOrEqual(15)
   expect(elapsed).toBeLessThan(1_900) // the full base-2s(*2^0) ceiling never ran out
   expect(provider.requests.length).toBe(1) // the abort pre-empted the retry entirely
+})
+
+test("an abort mid-backoff journals turn.completed and nothing for the doomed step", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "text-delta", text: "half a sentence that never lands" },
+      { type: "tool-call", callId: "ghost", name: "echo", input: {} },
+      {
+        type: "error",
+        message: "overloaded",
+        info: { kind: "unavailable", message: "overloaded" },
+      },
+    ],
+  ])
+  const abort = new AbortController()
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, { signal: abort.signal, onEvent: (event) => seen.push(event) })
+  setTimeout(() => abort.abort(), 20)
+  const outcome = await runUserTurn(deps, "go")
+
+  expect(outcome.interrupted).toBe(true)
+  expect(outcome.text).toBe("") // the doomed attempt's text is NOT the turn's text
+  const { events } = SessionJournal.replay(deps.journal.path)
+  // Exactly one turn.completed, and the interrupted step left no assistant
+  // message and no dangling tool.call behind it.
+  expect(events.filter((e) => e.type === "turn.completed").length).toBe(1)
+  expect(events.some((e) => e.type === "message.assistant")).toBe(false)
+  expect(events.some((e) => e.type === "tool.call")).toBe(false)
+  // A user abort is not a provider failure: no error event reached the UI.
+  expect(seen.some((e) => e.type === "error")).toBe(false)
+})
+
+
+test("a failed attempt emits step-retracted BEFORE its retry notice, so the UI drops the ghost first", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "text-delta", text: "ghost text" },
+      { type: "tool-call", callId: "ghost-call", name: "echo", input: {} },
+      {
+        type: "error",
+        message: "overloaded",
+        info: { kind: "unavailable", message: "overloaded", retryAfterSec: 0 },
+      },
+    ],
+    [
+      { type: "text-delta", text: "real answer" },
+      { type: "finish", reason: "stop", usage },
+    ],
+  ])
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, { onEvent: (event) => seen.push(event) })
+  const outcome = await runUserTurn(deps, "go")
+  expect(outcome.text).toBe("real answer")
+
+  const types = seen.map((e) => e.type)
+  const retracted = types.indexOf("step-retracted")
+  expect(retracted).toBeGreaterThan(-1)
+  expect(types.indexOf("text-delta")).toBeLessThan(retracted)
+  expect(types.indexOf("tool-call")).toBeLessThan(retracted)
+  expect(types.indexOf("notice")).toBeGreaterThan(retracted)
+  const event = seen[retracted]
+  expect(event).toEqual({ type: "step-retracted", attempt: 1 })
+  // Exactly one retraction — the successful attempt is never retracted.
+  expect(types.filter((t) => t === "step-retracted").length).toBe(1)
+})
+
+test("a clean turn emits no step-retracted at all", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "text-delta", text: "fine" },
+      { type: "finish", reason: "stop", usage },
+    ],
+  ])
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, { onEvent: (event) => seen.push(event) })
+  await runUserTurn(deps, "go")
+  expect(seen.some((e) => e.type === "step-retracted")).toBe(false)
+})
+
+test("a FINAL failure does NOT retract — nothing is coming to replace what it streamed", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "text-delta", text: "ghost text" },
+      { type: "error", message: "nope", info: { kind: "auth", message: "nope" } },
+    ],
+  ])
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, { onEvent: (event) => seen.push(event) })
+  await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: nope")
+  expect(seen.map((e) => e.type)).toEqual(["text-delta", "error"])
+})
+
+test("retries EXHAUSTED does not retract the last attempt either — only the ones actually re-run", async () => {
+  const failStep = () => [
+    { type: "text-delta" as const, text: "partial" },
+    {
+      type: "error" as const,
+      message: "still overloaded",
+      info: { kind: "unavailable" as const, message: "still overloaded", retryAfterSec: 0 },
+    },
+  ]
+  const provider = new MockProvider([failStep(), failStep()])
+  const seen: RunnerEvent[] = []
+  const deps = makeDeps(provider, { retries: 1, onEvent: (event) => seen.push(event) })
+  await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: still overloaded")
+  // Attempt 1 was retried (retracted); attempt 2 was the end of the road.
+  expect(seen.map((e) => e.type)).toEqual([
+    "text-delta",
+    "step-retracted",
+    "notice",
+    "text-delta",
+    "error",
+  ])
+})
+
+test("the retraction's attempt number tracks the attempt that failed", async () => {
+  const failStep = () => [
+    {
+      type: "error" as const,
+      message: "still overloaded",
+      info: { kind: "unavailable" as const, message: "still overloaded", retryAfterSec: 0 },
+    },
+  ]
+  const provider = new MockProvider([
+    failStep(),
+    failStep(),
+    [
+      { type: "text-delta", text: "third time lucky" },
+      { type: "finish", reason: "stop", usage },
+    ],
+  ])
+  const attempts: number[] = []
+  const deps = makeDeps(provider, {
+    onEvent: (event) => {
+      if (event.type === "step-retracted") attempts.push(event.attempt)
+    },
+  })
+  await runUserTurn(deps, "go")
+  expect(attempts).toEqual([1, 2])
 })

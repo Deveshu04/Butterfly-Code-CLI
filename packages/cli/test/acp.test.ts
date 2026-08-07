@@ -956,3 +956,125 @@ test("an explicit Reject from the client still reads as the user's decision", as
   expect(wire).not.toContain("never answered")
   expect(existsSync(join(cwd, "a.txt"))).toBe(false)
 }, 20_000)
+
+
+/** A classified-retryable stream failure with a ZERO backoff, so the retry
+ * path runs instantly instead of sleeping out a jittered 0-2s ceiling. */
+function retryableFailure(message = "overloaded"): TurnEvent[] {
+  return [
+    {
+      type: "error",
+      message,
+      info: { kind: "unavailable", message, retryAfterSec: 0 },
+    },
+  ]
+}
+
+test("butterfly.jsonc `retries: 0` reaches the runner — a retryable failure is NOT retried", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ retries: 0 }))
+
+  // Two scripts available; a correctly-wired retries:0 consumes only one.
+  const provider = new MockProvider([
+    retryableFailure(),
+    [
+      { type: "text-delta", text: "recovered" },
+      { type: "finish", reason: "stop", usage: zeroUsage },
+    ],
+  ])
+  const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "go" }] },
+    }),
+  )
+
+  expect(provider.requests.length).toBe(1)
+  const response = parsed(sent).find((m) => m.id === 2)
+  expect(response.error.message).toContain("overloaded")
+}, 20_000)
+
+test("butterfly.jsonc `retries: 1` reaches the runner — exactly one retry, then success", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ retries: 1 }))
+
+  const provider = new MockProvider([
+    retryableFailure(),
+    [
+      { type: "text-delta", text: "recovered" },
+      { type: "finish", reason: "stop", usage: zeroUsage },
+    ],
+  ])
+  const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "go" }] },
+    }),
+  )
+
+  expect(provider.requests.length).toBe(2)
+  const response = parsed(sent).find((m) => m.id === 2)
+  expect(response.result.stopReason).toBe("end_turn")
+}, 20_000)
+
+test("a retried step marks the doomed attempt's tool_call card failed instead of leaving it in_progress", async () => {
+  const home = tempDir("bfly-acp-home-")
+  const cwd = gitCwd("bfly-acp-cwd-")
+  writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ permissions: { "*": "allow" } }))
+
+  const provider = new MockProvider([
+    [
+      { type: "tool-call", callId: "ghost", name: "read", input: { file_path: "a.txt" } },
+      {
+        type: "error",
+        message: "overloaded",
+        info: { kind: "unavailable", message: "overloaded", retryAfterSec: 0 },
+      },
+    ],
+    [
+      { type: "text-delta", text: "recovered" },
+      { type: "finish", reason: "stop", usage: zeroUsage },
+    ],
+  ])
+  const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
+
+  await peer.handleLine(
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd } }),
+  )
+  const sessionId = parsed(sent)[0].result.sessionId as string
+  await peer.handleLine(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text: "read it" }] },
+    }),
+  )
+
+  const updates = parsed(sent)
+    .filter((m) => m.method === "session/update")
+    .map((m) => m.params.update)
+  const ghostUpdates = updates.filter((u) => u.toolCallId === "ghost")
+  expect(ghostUpdates.length).toBeGreaterThanOrEqual(3)
+  expect(ghostUpdates.at(-1).status).toBe("failed")
+  const response = parsed(sent).find((m) => m.id === 2)
+  expect(response.result.stopReason).toBe("end_turn")
+}, 20_000)

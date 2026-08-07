@@ -1042,6 +1042,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   let providerErrorRendered = false
 
+  let stepAnchor = 0
+
   const appendReasoning = (text: string) => {
     const all = [...messages()]
     const last = all.at(-1)
@@ -1086,7 +1088,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         break
       case "tool-result":
         push(toolResultMessage(event.output, event.isError, event.meta))
+        stepAnchor = messages().length
         break
+      case "step-retracted": {
+        const settled = messages().slice(0, stepAnchor)
+        if (settled.length !== messages().length) setMessages(settled)
+        break
+      }
       case "finish":
         finalizeOpenThinking()
         // Live context gauge: the last step's input+output IS the window size.
@@ -1104,6 +1112,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       case "notice":
         push({ kind: "info", text: event.text })
+        stepAnchor = messages().length
         break
       default:
         break
@@ -1592,6 +1601,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             system: LOOP_PLANNER_PROMPT,
             cwd: props.cwd,
             maxSteps: 1,
+            ...(config().retries !== undefined ? { retries: config().retries } : {}),
           },
           goal,
         )
@@ -1721,6 +1731,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           sessionsDir: queuePaths.sessions,
           handoffPath: queuePaths.handoff,
           signal: loopAbort.signal,
+          ...(config().retries !== undefined ? { retries: config().retries } : {}),
           ...(config().small_model ? { smallModel: config().small_model } : {}),
           onEvent: (event: LoopEvent) => {
             if ("progress" in event) creditLoopSpend(event.progress.usage)
@@ -2298,6 +2309,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     let turnDetail: string | undefined
     providerErrorRendered = false
     const turnRules = planMode() ? PLAN_RULES : (config().permissions ?? TUI_DEFAULT_RULES)
+    stepAnchor = messages().length
     runUserTurn(
       {
         provider: freshProvider(),
@@ -2317,6 +2329,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(config().hooks?.length ? { hooks: config().hooks } : {}),
         ...(reasoning() !== undefined ? { reasoning: reasoning() } : {}),
         ...(limit ? { limits: { context: limit } } : {}),
+        ...(config().retries !== undefined ? { retries: config().retries } : {}),
         ...(config().small_model ? { smallModel: config().small_model } : {}),
         imageInputSupported: imageInputSupported(),
         ask: (request) => askPermission(request, turnRules),

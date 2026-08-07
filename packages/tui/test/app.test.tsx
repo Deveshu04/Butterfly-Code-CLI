@@ -4007,3 +4007,86 @@ test("the rendered call row shows the summary, not the JSON the model sent", asy
     server.stop()
   }
 }, 30_000)
+
+function startFakeErrorThenTextServer(
+  ghostText: string,
+  replyText: string,
+): { baseURL: string; stop: () => void } {
+  const doomed =
+    sseChunk({
+      id: "1",
+      choices: [
+        { index: 0, delta: { role: "assistant", content: ghostText }, finish_reason: null },
+      ],
+    }) + sseChunk({ error: { message: "the upstream model fell over", type: "overloaded_error" } })
+  return startFakeSequenceServer([doomed, textStreamBody(replyText)])
+}
+
+test("a retried step retracts the doomed attempt's ghost text — the retry's answer stands alone, with the retry notice kept", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeErrorThenTextServer("GHOSTTEXT", "the real answer")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("hello")
+    t.mockInput.pressEnter()
+
+    // The retry breadcrumb is an INFO row, deliberately NOT retracted — the
+    // user must still be told why the answer restarted.
+    await waitForFrameSlow(t, (f) => f.includes("retrying (1/3)"))
+    const settled = await waitForFrameSlow(t, (f) => f.includes("the real answer"))
+    // The ghost is gone entirely — not merged into the real answer, not
+    // lingering above it.
+    expect(settled).not.toContain("GHOSTTEXT")
+    expect(settled).toContain("retrying (1/3)")
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("butterfly.jsonc `retries: 0` reaches the runner from the TUI — the failure is not retried", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const errorBody = sseChunk({
+    error: { message: "the upstream model fell over", type: "overloaded_error" },
+  })
+  const server = startFakeSequenceServer([errorBody])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock",
+            providers: { fake: { baseURL: server.baseURL } },
+            retries: 0,
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("hello")
+    t.mockInput.pressEnter()
+
+    const frame = await waitForFrameSlow(t, (f) => f.includes("provider unavailable"))
+    expect(frame).not.toContain("retrying")
+
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)

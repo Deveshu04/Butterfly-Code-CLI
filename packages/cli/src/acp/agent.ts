@@ -98,6 +98,7 @@ interface AcpSession {
   rules: PermissionRules
   model: string
   system: string
+  retries?: number
   state: Record<string, unknown>
   bgTasks: BgTaskRegistry
   episodic: EpisodicIndex
@@ -352,6 +353,7 @@ export class AcpAgent {
       rules: config.permissions ?? DEFAULT_RULES,
       model: modelRef,
       system,
+      ...(config.retries !== undefined ? { retries: config.retries } : {}),
       state,
       bgTasks,
       episodic,
@@ -534,6 +536,7 @@ export class AcpAgent {
           cwd: session.cwd,
           ask,
           state: session.state,
+          ...(session.retries !== undefined ? { retries: session.retries } : {}),
           createSnapshot,
           listUntracked,
           signal: abortController.signal,
@@ -688,6 +691,17 @@ export class AcpAgent {
             })
           }
         }
+        break
+      }
+      case "step-retracted": {
+        for (const callId of session.pendingCalls.keys()) {
+          this.sendUpdate(session, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: callId,
+            status: "failed",
+          })
+        }
+        session.pendingCalls.clear()
         break
       }
       default:

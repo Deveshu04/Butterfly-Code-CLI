@@ -37,6 +37,7 @@ export interface LoopDeps {
   /** Where handoff.json lives (loop.jsonl sits beside it). */
   handoffPath: string
   smallModel?: string
+  retries?: number
   onEvent?: (event: LoopEvent) => void
   signal?: AbortSignal
   /** Commit hook override (tests). Defaults to git add+commit. */
@@ -196,6 +197,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
             ? { budgetTokens: Math.max(1, deps.budgetTokens - spent) }
             : {}),
           ...(deps.smallModel ? { smallModel: deps.smallModel } : {}),
+          ...(deps.retries !== undefined ? { retries: deps.retries } : {}),
           signal: deps.signal,
         },
         renderTaskPrompt(task, handoff),

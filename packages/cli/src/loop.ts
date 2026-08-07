@@ -105,6 +105,7 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
           system: PLANNER_PROMPT,
           cwd,
           maxSteps: 1,
+          ...(config.retries !== undefined ? { retries: config.retries } : {}),
         },
         spec,
       )
@@ -231,6 +232,7 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
             sessionsDir: paths.sessions,
             handoffPath: paths.handoff,
             ...(config.small_model ? { smallModel: config.small_model } : {}),
+            ...(config.retries !== undefined ? { retries: config.retries } : {}),
             onEvent: (event) => {
               const line = formatLoopTaskEvent(event)
               if (line !== undefined) console.log(line)

@@ -157,7 +157,7 @@ export class AiSdkProvider implements ProviderPort {
         ? { maxOutputTokens: request.maxOutputTokens }
         : {}),
       ...(request.signal ? { abortSignal: request.signal } : {}),
-      maxRetries: 2,
+      maxRetries: 0,
       // Local models (Ollama/LM Studio) cold-start into RAM on first request,
       // and CPU-only prompt eval can take minutes. Generous per-chunk, no
       // total cap; BUTTERFLY_STREAM_TIMEOUT_MS overrides for slow machines.
