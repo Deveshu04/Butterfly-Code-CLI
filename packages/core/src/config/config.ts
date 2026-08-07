@@ -26,6 +26,7 @@ export const ButterflyConfig = z.object({
   reasoning: z.enum(["none", "minimal", "low", "medium", "high"]).optional(),
   /** Hard dollar ceiling per turn (priced from models.dev). */
   maxSpendUSD: z.number().positive().optional(),
+  retries: z.number().int().min(0).optional(),
   notifications: z.boolean().optional(),
   theme: z.string().optional(),
   mcp: z

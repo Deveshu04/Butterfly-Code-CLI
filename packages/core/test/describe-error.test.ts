@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test"
 import { APICallError, RetryError } from "ai"
-import { classifyProviderError, describeProviderError } from "../src/provider/describe-error"
+import {
+  classifyProviderError,
+  describeProviderError,
+  isRetryableProviderError,
+  RETRYABLE_ERROR_KINDS,
+} from "../src/provider/describe-error"
 
 
 function apiCallError(opts: {
@@ -373,6 +378,27 @@ test("a DOMException named TimeoutError (chunk-timeout shape) classifies as time
   const info = classifyProviderError(error)
   expect(info.kind).toBe("timeout")
   expect(info.message).toContain("timeout")
+})
+
+
+test("RETRYABLE_ERROR_KINDS / isRetryableProviderError are exactly: rate_limit, unavailable, timeout, network", () => {
+  const expectedRetryable = ["rate_limit", "unavailable", "timeout", "network"]
+  const expectedNotRetryable = ["quota", "auth", "context_length", "bad_request", "unknown"]
+  for (const kind of expectedRetryable) {
+    expect(RETRYABLE_ERROR_KINDS.has(kind as never)).toBe(true)
+    expect(isRetryableProviderError(kind as never)).toBe(true)
+  }
+  for (const kind of expectedNotRetryable) {
+    expect(RETRYABLE_ERROR_KINDS.has(kind as never)).toBe(false)
+    expect(isRetryableProviderError(kind as never)).toBe(false)
+  }
+})
+
+
+test("the AI SDK's 'Tool result is missing for tool call' Error classifies as bad_request (not unknown) and is not retryable", () => {
+  const info = classifyProviderError(new Error("Tool result is missing for tool call call-abc123."))
+  expect(info.kind).toBe("bad_request")
+  expect(isRetryableProviderError(info.kind)).toBe(false)
 })
 
 test("REGRESSION: an unclassifiable plain object never renders as [object Object]", () => {

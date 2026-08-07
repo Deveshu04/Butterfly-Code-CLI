@@ -21,6 +21,17 @@ export interface ProviderErrorInfo {
   detail?: string
 }
 
+export const RETRYABLE_ERROR_KINDS: ReadonlySet<ProviderErrorKind> = new Set([
+  "rate_limit",
+  "unavailable",
+  "timeout",
+  "network",
+])
+
+export function isRetryableProviderError(kind: ProviderErrorKind): boolean {
+  return RETRYABLE_ERROR_KINDS.has(kind)
+}
+
 const DETAIL_CAP = 300
 
 const CONTEXT_LENGTH_TEXT_RE =
@@ -225,6 +236,9 @@ export function classifyProviderError(error: unknown): ProviderErrorInfo {
 
   if (error instanceof Error) {
     if (error.name === "TimeoutError") return { kind: "timeout", message: error.message }
+    if (/tool result is missing for tool call/i.test(error.message)) {
+      return { kind: "bad_request", message: error.message }
+    }
     return { kind: "unknown", message: error.message !== "" ? error.message : error.toString() }
   }
 

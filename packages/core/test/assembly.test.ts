@@ -2,7 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { assemble } from "../src/session/assembly"
+import { assemble, UNANSWERED_CALL_OUTPUT } from "../src/session/assembly"
 import { now, type SessionEvent } from "../src/session/events"
 
 const t = now()
@@ -179,6 +179,87 @@ test("message.user without images keeps plain string content — unchanged histo
   expect(messages[1]).toEqual({ role: "user", content: "hi" })
 })
 
+
+
+test("a dangling tool.call at the END of the timeline heals into a synthesized isError tool message", () => {
+  const timeline: SessionEvent[] = [
+    { type: "message.user", id: "u1", text: "do it", time: t },
+    { type: "message.assistant", id: "a1", text: "", time: t },
+    { type: "tool.call", callId: "c1", name: "bash", input: { command: "sleep 100" }, time: t },
+  ]
+  const messages = assemble({ system: "s", timeline })
+  expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"])
+  const tool = messages[3]
+  if (tool?.role !== "tool") throw new Error("expected tool")
+  expect(tool.callId).toBe("c1")
+  expect(tool.name).toBe("bash")
+  expect(tool.isError).toBe(true)
+  expect(tool.output).toBe(UNANSWERED_CALL_OUTPUT)
+
+  const assistant = messages[2]
+  if (assistant?.role !== "assistant") throw new Error("expected assistant")
+  expect(assistant.toolCalls?.map((c) => c.callId)).toEqual(["c1"])
+})
+
+test("a dangling tool.call heals BEFORE the next turn's user message, not after (provider ordering)", () => {
+  const timeline: SessionEvent[] = [
+    { type: "message.user", id: "u1", text: "do it", time: t },
+    { type: "message.assistant", id: "a1", text: "", time: t },
+    { type: "tool.call", callId: "c1", name: "bash", input: { command: "x" }, time: t },
+    { type: "message.user", id: "u2", text: "continue", time: t },
+    { type: "message.assistant", id: "a2", text: "done", time: t },
+  ]
+  const messages = assemble({ system: "s", timeline })
+  expect(messages.map((m) => m.role)).toEqual([
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "user",
+    "assistant",
+  ])
+  const tool = messages[3]
+  if (tool?.role !== "tool") throw new Error("expected tool")
+  expect(tool.callId).toBe("c1")
+  expect(tool.output).toBe(UNANSWERED_CALL_OUTPUT)
+})
+
+test("multiple dangling calls in one batch all heal, in call order; the one real result is untouched", () => {
+  const timeline: SessionEvent[] = [
+    { type: "message.user", id: "u1", text: "go", time: t },
+    { type: "message.assistant", id: "a1", text: "", time: t },
+    { type: "tool.call", callId: "c1", name: "echo", input: {}, time: t },
+    { type: "tool.call", callId: "c2", name: "echo", input: {}, time: t },
+    { type: "tool.call", callId: "c3", name: "echo", input: {}, time: t },
+    { type: "tool.result", callId: "c1", output: "real result", isError: false, time: t },
+  ]
+  const messages = assemble({ system: "s", timeline })
+  const toolMsgs = messages.filter((m) => m.role === "tool")
+  expect(toolMsgs.map((m) => (m.role === "tool" ? m.callId : ""))).toEqual(["c1", "c2", "c3"])
+  const [r1, r2, r3] = toolMsgs
+  if (r1?.role !== "tool" || r2?.role !== "tool" || r3?.role !== "tool") {
+    throw new Error("expected tool messages")
+  }
+  expect(r1.output).toBe("real result")
+  expect(r1.isError).toBeUndefined()
+  expect(r2.output).toBe(UNANSWERED_CALL_OUTPUT)
+  expect(r2.isError).toBe(true)
+  expect(r3.output).toBe(UNANSWERED_CALL_OUTPUT)
+  expect(r3.isError).toBe(true)
+})
+
+test("a fully-answered timeline is completely untouched by the repair (no phantom messages)", () => {
+  const timeline: SessionEvent[] = [
+    { type: "message.user", id: "u1", text: "go", time: t },
+    { type: "message.assistant", id: "a1", text: "", time: t },
+    { type: "tool.call", callId: "c1", name: "echo", input: {}, time: t },
+    { type: "tool.result", callId: "c1", output: "fine", isError: false, time: t },
+    { type: "message.assistant", id: "a2", text: "done", time: t },
+  ]
+  const messages = assemble({ system: "s", timeline })
+  expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool", "assistant"])
+  expect(messages.filter((m) => m.role === "tool")).toHaveLength(1)
+})
 
 test("tool.result.meta (todo/bash/edit UI hints) never rides into the assembled tool message", () => {
   const timeline: SessionEvent[] = [

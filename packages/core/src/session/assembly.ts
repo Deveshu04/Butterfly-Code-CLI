@@ -11,13 +11,31 @@ export interface AssembleOptions {
   imageInputSupported?: boolean
 }
 
+export const UNANSWERED_CALL_OUTPUT = "[no result recorded — session was interrupted]"
+
 export function assemble(opts: AssembleOptions): ChatMessage[] {
   const messages: ChatMessage[] = [{ role: "system", content: opts.system }]
   const callNames = new Map<string, string>()
+  const answeredCalls = new Set<string>()
+
+  const closeOrphanedCalls = (): void => {
+    for (const [callId, name] of callNames) {
+      if (answeredCalls.has(callId)) continue
+      messages.push({
+        role: "tool",
+        callId,
+        name,
+        output: UNANSWERED_CALL_OUTPUT,
+        isError: true,
+      })
+      answeredCalls.add(callId)
+    }
+  }
 
   for (const event of opts.timeline) {
     switch (event.type) {
       case "message.user":
+        closeOrphanedCalls()
         if (event.images && event.images.length > 0) {
           const parts: ChatMessagePart[] = []
           if (event.text !== "") parts.push({ type: "text", text: event.text })
@@ -50,6 +68,7 @@ export function assemble(opts: AssembleOptions): ChatMessage[] {
         break
       }
       case "tool.result":
+        answeredCalls.add(event.callId)
         messages.push({
           role: "tool",
           callId: event.callId,
@@ -79,6 +98,7 @@ export function assemble(opts: AssembleOptions): ChatMessage[] {
         break
     }
   }
+  closeOrphanedCalls()
 
   return messages
 }

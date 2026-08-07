@@ -53,3 +53,15 @@ test("ButterflyConfig validates a realistic config", () => {
   })
   expect(parsed.model).toContain("deepseek")
 })
+
+
+test("ButterflyConfig accepts an optional non-negative integer `retries`", () => {
+  expect(ButterflyConfig.parse({ retries: 5 }).retries).toBe(5)
+  expect(ButterflyConfig.parse({ retries: 0 }).retries).toBe(0)
+  expect(ButterflyConfig.parse({}).retries).toBeUndefined()
+})
+
+test("ButterflyConfig rejects a negative or non-integer `retries`", () => {
+  expect(() => ButterflyConfig.parse({ retries: -1 })).toThrow()
+  expect(() => ButterflyConfig.parse({ retries: 1.5 })).toThrow()
+})
