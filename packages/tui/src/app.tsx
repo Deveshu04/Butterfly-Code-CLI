@@ -110,6 +110,7 @@ import { saveClipboardImage } from "./clipboard"
 import {
   type CommandActions,
   commandMatches,
+  commandMatchLabel,
   expandTemplate,
   findCommand,
   loadCustomCommands,
@@ -117,10 +118,13 @@ import {
 } from "./commands"
 import {
   formatCommandBody,
+  formatDuration,
   formatToolResult,
   humanizeTokens,
+  metersFitAt,
   middleEllipsize,
   splitThink,
+  turnMarker,
 } from "./format"
 import {
   applyLoopEvent,
@@ -667,6 +671,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     if (busy()) setSpin((s) => (s + 1) % SPINNER.length)
   }, 80)
   onCleanup(() => clearInterval(spinTimer))
+
+  const [turnStartedAt, setTurnStartedAt] = createSignal<number | undefined>(undefined)
+  const [elapsedTick, setElapsedTick] = createSignal(0)
+  const elapsedTimer = setInterval(() => {
+    if (busy()) setElapsedTick((t) => t + 1)
+  }, 1000)
+  onCleanup(() => clearInterval(elapsedTimer))
+  const elapsedText = (): string => {
+    elapsedTick() // subscribe: re-render once a second while busy
+    const start = turnStartedAt()
+    return start === undefined ? "" : formatDuration(Date.now() - start)
+  }
 
   const modelRef = () => config().model
 
@@ -1647,6 +1663,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         return
       }
       setBusy(true)
+      setTurnStartedAt(Date.now())
       loopAbort = new AbortController()
       const gitStatus = await runCommand("git status --porcelain", {
         cwd: props.cwd,
@@ -1930,6 +1947,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       push({ kind: "info", text: "reviewing…" })
       setBusy(true)
+      setTurnStartedAt(Date.now())
       try {
         const diffOpts = parseReviewArg(arg)
         const result = await runReview(props.cwd, taskToolOpts, diffOpts)
@@ -2042,6 +2060,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       push({ kind: "info", text: "writing handoff…" })
       setBusy(true)
+      setTurnStartedAt(Date.now())
       try {
         const result = await runHandoffTurn({
           provider: freshProvider(),
@@ -2267,6 +2286,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
     firstTurn = false
     setBusy(true)
+    setTurnStartedAt(Date.now())
     abort = new AbortController()
     const limit = ctxLimit()
     const attentionState = () => ({
@@ -2306,9 +2326,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     )
       .then((outcome) => {
         setSessionCost((c) => c + outcome.costUSD)
-        setStatus(
-          `in ${humanizeTokens(outcome.usage.input)} · out ${humanizeTokens(outcome.usage.output)} · cached ${humanizeTokens(outcome.usage.cacheRead)} · ${outcome.steps} steps`,
-        )
+        const start = turnStartedAt()
+        setStatus(turnMarker(outcome.usage, outcome.steps, Date.now() - (start ?? Date.now())))
         void (async () => {
           try {
             episodic.indexJournal(session.journal.path)
@@ -2577,7 +2596,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       if (key.name === "tab") {
         const command = matches[Math.min(cmdIndex(), matches.length - 1)]
         if (command) {
-          setDraft(`/${command.name} `)
+          setDraft(`/${commandMatchLabel(command, draft())} `)
           setCmdIndex(0)
         }
         return
@@ -3115,19 +3134,27 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 .map((command, offset) => ({ command, absolute: start + offset }))
             })()}
           >
-            {(row) => (
-              <box flexDirection="row">
-                <text fg={row.absolute === cmdIndex() ? themeTokens().accent : themeTokens().muted}>
-                  {row.absolute === cmdIndex() ? "❯ " : "  "}
-                </text>
-                <text fg={row.absolute === cmdIndex() ? undefined : themeTokens().muted}>
-                  {`/${row.command.name}${row.command.args ? ` ${row.command.args}` : ""}`.padEnd(
-                    18,
-                  )}
-                </text>
-                <text fg={themeTokens().muted}>{row.command.description}</text>
-              </box>
-            )}
+            {(row) => {
+              const label = () => commandMatchLabel(row.command, draft())
+              const viaAlias = () => label() !== row.command.name
+              return (
+                <box flexDirection="row">
+                  <text
+                    fg={row.absolute === cmdIndex() ? themeTokens().accent : themeTokens().muted}
+                  >
+                    {row.absolute === cmdIndex() ? "❯ " : "  "}
+                  </text>
+                  <text fg={row.absolute === cmdIndex() ? undefined : themeTokens().muted}>
+                    {`/${label()}${row.command.args ? ` ${row.command.args}` : ""}`.padEnd(18)}
+                  </text>
+                  <text fg={themeTokens().muted}>
+                    {viaAlias()
+                      ? `${row.command.description} (alias of /${row.command.name})`
+                      : row.command.description}
+                  </text>
+                </box>
+              )
+            }}
           </For>
           <text fg={themeTokens().muted}>
             {` ↑↓ select · Tab complete · Enter run${cmdList().length > 8 ? ` · ${cmdList().length} commands` : ""}`}
@@ -3205,20 +3232,24 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       <box flexShrink={0} height={1} paddingLeft={1} flexDirection="row">
         <text fg={busy() ? themeTokens().accent : themeTokens().muted}>
           {busy()
-            ? `${SPINNER[spin()]} thinking… `
+            ?
+              `${SPINNER[spin()]} thinking… ${elapsedText()}  `
             : status()
               ? `${status()}  `
               :
                 `${modelRef() ?? "not configured"}  ·  ${basename(props.cwd)}  ·  /help for commands`}
         </text>
-        <Show when={ctxGauge() !== ""}>
-          <text fg={ctxDanger() ? themeTokens().warn : themeTokens().muted}>{ctxGauge()}</text>
-        </Show>
-        <Show when={sessionCost() > 0}>
-          <text fg={themeTokens().muted}>{`  ·  ${formatUSD(sessionCost())}`}</text>
-        </Show>
-        <Show when={queued().length > 0}>
-          <text fg={themeTokens().warn}>{`  ·  ${queued().length} (queued)`}</text>
+        <Show when={metersFitAt(dimensions().width)}>
+          <box flexGrow={1} />
+          <Show when={ctxGauge() !== ""}>
+            <text fg={ctxDanger() ? themeTokens().warn : themeTokens().muted}>{ctxGauge()}</text>
+          </Show>
+          <Show when={sessionCost() > 0}>
+            <text fg={themeTokens().muted}>{`  ·  ${formatUSD(sessionCost())}`}</text>
+          </Show>
+          <Show when={queued().length > 0}>
+            <text fg={themeTokens().warn}>{`  ·  ${queued().length} (queued)`}</text>
+          </Show>
         </Show>
       </box>
     </box>

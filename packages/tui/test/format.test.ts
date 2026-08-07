@@ -1,11 +1,15 @@
 import { expect, test } from "bun:test"
 import {
   formatCommandBody,
+  formatDuration,
   formatToolResult,
   humanizeTokens,
+  metersFitAt,
   middleEllipsize,
+  STATUS_METERS_MIN_WIDTH,
   splitThink,
   stripThink,
+  turnMarker,
 } from "../src/format"
 
 
@@ -115,4 +119,40 @@ test("formatCommandBody shows more lines for a failing command, matching formatT
   expect(body).toContain("l5")
   expect(body).not.toContain("l6")
   expect(body).toContain("2 more")
+})
+
+
+test("formatDuration prints seconds-only under a minute", () => {
+  expect(formatDuration(0)).toBe("0s")
+  expect(formatDuration(9_400)).toBe("9s")
+  expect(formatDuration(59_000)).toBe("59s")
+})
+
+test("formatDuration prints minutes+seconds at/above a minute", () => {
+  expect(formatDuration(72_000)).toBe("1m 12s")
+  expect(formatDuration(60_000)).toBe("1m 0s")
+  expect(formatDuration(59_600)).toBe("1m 0s") // rounds to 60s first, then splits
+})
+
+test("formatDuration clamps negative input instead of printing a negative duration", () => {
+  expect(formatDuration(-500)).toBe("0s")
+})
+
+test("turnMarker appends the duration when given one", () => {
+  const usage = { input: 5, output: 3, cacheRead: 0, cacheWrite: 0 }
+  expect(turnMarker(usage, 1, 83_000)).toBe("in 5 · out 3 · cached 0 · 1 steps · 1m 23s")
+})
+
+test("turnMarker omits the duration segment entirely when none is given — replay must never fabricate one", () => {
+  const usage = { input: 5, output: 3, cacheRead: 0, cacheWrite: 0 }
+  const marker = turnMarker(usage, 1)
+  expect(marker).toBe("in 5 · out 3 · cached 0 · 1 steps")
+  expect(marker).not.toMatch(/\d+s$/)
+})
+
+
+test("metersFitAt is a pinned cutoff at STATUS_METERS_MIN_WIDTH, not a soft/organic one", () => {
+  expect(metersFitAt(STATUS_METERS_MIN_WIDTH - 1)).toBe(false)
+  expect(metersFitAt(STATUS_METERS_MIN_WIDTH)).toBe(true)
+  expect(metersFitAt(STATUS_METERS_MIN_WIDTH + 40)).toBe(true)
 })

@@ -443,15 +443,31 @@ export function findCommand(input: string): CommandMatch | { suggestions: SlashC
   return { suggestions: prefix }
 }
 
+function draftToken(draft: string): string {
+  return draft.startsWith("/") ? (draft.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "") : ""
+}
+
 export function commandMatches(draft: string): SlashCommand[] {
   if (!draft.startsWith("/")) return []
-  const token = draft.slice(1).split(/\s+/)[0]?.toLowerCase() ?? ""
-  return COMMANDS.filter((command) => command.name.startsWith(token))
+  const token = draftToken(draft)
+  return COMMANDS.filter(
+    (command) =>
+      command.name.startsWith(token) ||
+      (command.aliases?.some((alias) => alias.startsWith(token)) ?? false),
+  )
+}
+
+export function commandMatchLabel(command: SlashCommand, draft: string): string {
+  const token = draftToken(draft)
+  if (command.name.startsWith(token)) return command.name
+  return command.aliases?.find((alias) => alias.startsWith(token)) ?? command.name
 }
 
 /** Hint line for the input area while typing a command. */
 export function commandHints(draft: string): string {
   const matches = commandMatches(draft).slice(0, 5)
   if (matches.length === 0) return ""
-  return matches.map((command) => `/${command.name} — ${command.description}`).join("   ")
+  return matches
+    .map((command) => `/${commandMatchLabel(command, draft)} — ${command.description}`)
+    .join("   ")
 }

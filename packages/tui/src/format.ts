@@ -1,5 +1,7 @@
 /** Display-side text hygiene. Journals always keep the raw text. */
 
+import type { Usage } from "@butterfly/core"
+
 export function humanizeTokens(n: number): string {
   const value = Math.max(0, n)
   if (value < 1000) return String(Math.round(value))
@@ -56,4 +58,22 @@ export function formatCommandBody(output: string, isError: boolean): string {
   const { shown, hidden } = previewLines(output, isError)
   if (hidden > 0) shown.push(`… ${hidden} more line${hidden === 1 ? "" : "s"}`)
   return shown.join("\n")
+}
+
+export function formatDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000))
+  const m = Math.floor(totalSec / 60)
+  const s = totalSec % 60
+  return m > 0 ? `${m}m ${s}s` : `${s}s`
+}
+
+export function turnMarker(usage: Usage, steps: number, durationMs?: number): string {
+  const base = `in ${humanizeTokens(usage.input)} · out ${humanizeTokens(usage.output)} · cached ${humanizeTokens(usage.cacheRead)} · ${steps} steps`
+  return durationMs === undefined ? base : `${base} · ${formatDuration(durationMs)}`
+}
+
+export const STATUS_METERS_MIN_WIDTH = 80
+
+export function metersFitAt(columns: number): boolean {
+  return columns >= STATUS_METERS_MIN_WIDTH
 }

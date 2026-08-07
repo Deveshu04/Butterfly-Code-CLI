@@ -5,6 +5,8 @@ import { join } from "node:path"
 import {
   COMMANDS,
   commandHints,
+  commandMatches,
+  commandMatchLabel,
   expandTemplate,
   findCommand,
   loadCustomCommands,
@@ -363,6 +365,26 @@ test("/provider <name> dispatches to CommandActions.selectProvider with the trim
   } as unknown as Parameters<(typeof COMMANDS)[number]["run"]>[1]
   if (match && "command" in match) void match.command.run(match.arg, actions)
   expect(calls).toEqual(["select:openai"])
+})
+
+
+test("commandMatches surfaces alias rows — /res must include /sessions (aliased /resume)", () => {
+  const withoutAlias = commandMatches("/res")
+  expect(withoutAlias.map((c) => c.name)).toContain("sessions")
+  expect(commandMatches("/rev").map((c) => c.name)).toContain("review")
+})
+
+test("commandMatches never double-lists a command that matches by both name and alias", () => {
+  const matches = commandMatches("/provider")
+  expect(matches.filter((c) => c.name === "provider").length).toBe(1)
+})
+
+test("commandMatchLabel prefers the alias that actually matched the draft over the primary name", () => {
+  const sessions = COMMANDS.find((c) => c.name === "sessions")
+  if (!sessions) throw new Error("sessions command missing")
+  expect(commandMatchLabel(sessions, "/res")).toBe("resume")
+  expect(commandMatchLabel(sessions, "/sess")).toBe("sessions")
+  expect(commandMatchLabel(sessions, "/sessions")).toBe("sessions")
 })
 
 test("/paste-img is registered and invokes CommandActions.pasteImage", () => {

@@ -1079,6 +1079,179 @@ test("Enter on a bare / runs the selected command, not the raw slash", async () 
   t.renderer.destroy()
 })
 
+
+test("/res surfaces the resume row (alias of /sessions), and Enter dispatches it", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 32 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/res")
+  await t.waitForFrame((frame: string) => frame.includes("↑↓ select"))
+  const frame = t.captureCharFrame()
+  expect(frame).toContain("/resume")
+  expect(frame).toContain("alias of /sessions")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("sessions (newest first)"))
+  expect(t.captureCharFrame()).toContain("(current)")
+  t.renderer.destroy()
+})
+
+test("Tab-completing an alias-matched row completes to the alias, not the primary name", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 32 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/res")
+  await t.waitForFrame((frame: string) => frame.includes("↑↓ select"))
+  await t.mockInput.pressTab()
+  await t.waitForFrame((frame: string) => frame.includes("/resume "))
+  expect(t.captureCharFrame()).toContain("/resume")
+  t.renderer.destroy()
+})
+
+
+test("the busy line ticks a live elapsed time, and the completed turn's marker gets a final duration suffix", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeChatServer("done", { delayMs: 1_500 })
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-timer", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("hi")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (frame) => frame.includes("thinking…"))
+    const ticked = await waitForFrameSlow(
+      t,
+      (frame) => {
+        const m = frame.match(/thinking… (\d+)s/)
+        return m !== null && Number(m[1]) >= 1
+      },
+      3_000,
+    )
+    expect(ticked).toMatch(/thinking… \d+s/)
+    const settled = await waitForFrameSlow(t, (frame) => frame.includes("in 5 · out 3"), 10_000)
+    expect(settled).toMatch(/in 5 · out 3 · cached 0 · 1 steps · \d+s/)
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("/new clears any stale duration from the status bar — replay must never fabricate one", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeChatServer("done")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-timer2", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("hi")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (frame) => /in 5 · out 3 · cached 0 · 1 steps · \d+s/.test(frame))
+    t.mockInput.typeText("/new")
+    t.mockInput.pressEnter()
+    const after = await waitForFrameSlow(t, (frame) => frame.includes("fresh session started"))
+    const lastLine = after.split("\n").filter((l) => l.trim() !== "").at(-1) ?? ""
+    expect(lastLine).not.toContain("in 5 · out 3")
+    expect(lastLine).not.toMatch(/\d+s\b/)
+    expect(lastLine).toContain("/help for commands")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+
+test("the ctx gauge right-aligns to the row's far edge, not clumped against the status text", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeChatServer("done")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-ctx", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("hi")
+    t.mockInput.pressEnter()
+    const frame = await waitForFrameSlow(t, (f) => f.includes("ctx 8"), 15_000)
+    const lastLine = frame.split("\n").filter((l) => l.trim() !== "").at(-1) ?? ""
+    const idx = lastLine.indexOf("ctx 8")
+    expect(idx).toBeGreaterThan(-1)
+    expect(lastLine.length - (idx + "ctx 8".length)).toBeLessThanOrEqual(2)
+    expect(idx).toBeGreaterThan(20)
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
+test("at narrow widths the meters drop instead of colliding with the status text", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeChatServer("done")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/mock-ctx-narrow",
+            providers: { fake: { baseURL: server.baseURL } },
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 60, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("hi")
+    t.mockInput.pressEnter()
+    const frame = await waitForFrameSlow(
+      t,
+      (f) => /in 5 · out 3 · cached 0 · 1 steps · \d+s/.test(f),
+      15_000,
+    )
+    const lastLine = frame.split("\n").filter((l) => l.trim() !== "").at(-1) ?? ""
+    expect(lastLine).not.toContain("ctx ")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)
+
 test("/plan toggles read-only mode with a header badge", async () => {
   const t = await testRender(
     () => (
