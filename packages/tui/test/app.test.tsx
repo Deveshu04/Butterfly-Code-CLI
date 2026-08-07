@@ -20,6 +20,8 @@ import {
 import type { CapturedFrame } from "@opentui/core"
 import { testRender } from "@opentui/solid"
 import { App, clearTerminalProgress, splitLabelValue, timelineToMessages } from "../src/app"
+import { OSC52_BASE64_CAP, OSC52_TEXT_CAP_BYTES } from "../src/clipboard"
+import { COPY_UNSUPPORTED_TEXT, copyStatusText } from "../src/format"
 import { NEWLINE_MARKER } from "../src/paste"
 import { installWin32ConsoleGuard } from "../src/terminal-win32"
 import { builtinTheme, DARK_TOKENS, LIGHT_TOKENS, themeTokens } from "../src/theme"
@@ -1253,19 +1255,30 @@ test("at narrow widths the meters drop instead of colliding with the status text
 }, 30_000)
 
 
-test("dragging over transcript text auto-copies via OSC 52 through the renderer's output path, with a transient 'copied' status notice", async () => {
+function stubClipboardApi(
+  t: { renderer: unknown },
+  opts: { supported?: boolean; ok?: boolean } = {},
+) {
+  const copied: string[] = []
+  const renderer = t.renderer as unknown as {
+    copyToClipboardOSC52: (text: string) => boolean
+    isOsc52Supported: () => boolean
+  }
+  renderer.isOsc52Supported = () => opts.supported ?? true
+  renderer.copyToClipboardOSC52 = (text: string) => {
+    copied.push(text)
+    return opts.ok ?? true
+  }
+  return copied
+}
+
+test("dragging over transcript text auto-copies through OpenTUI's public clipboard API, with a transient 'copied' status notice", async () => {
   const t = await testRender(
     () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
     { width: 100, height: 30 },
   )
   await t.renderOnce()
-
-  const routed: string[] = []
-  const renderer = t.renderer as unknown as { writeOut: (chunk: string) => boolean }
-  renderer.writeOut = (chunk: string) => {
-    routed.push(chunk)
-    return true
-  }
+  const copied = stubClipboardApi(t)
 
   const lines = t.captureCharFrame().split("\n")
   const y = lines.findIndex((l) => l.includes("for commands"))
@@ -1277,30 +1290,21 @@ test("dragging over transcript text auto-copies via OSC 52 through the renderer'
   await t.mockMouse.drag(x, y, line.length - 1, y)
   await t.renderOnce()
 
-  const oscEntry = routed.find((chunk) => chunk.startsWith("\x1b]52;c;"))
-  expect(oscEntry).toBeDefined()
-  const match = oscEntry?.match(/^\x1b\]52;c;(.*)\x07$/)
-  expect(match).not.toBeNull()
-  const decoded = Buffer.from(match?.[1] ?? "", "base64").toString("utf-8")
-  expect(decoded).toContain("for commands")
+  expect(copied.length).toBe(1)
+  expect(copied[0]).toContain("for commands")
 
   const frame = await waitForFrameSlow(t, (f) => f.includes("copied"), 5_000)
   expect(frame).toContain("copied")
   t.renderer.destroy()
 }, 30_000)
 
-test("a click with no drag yields an empty selection — no OSC write, no status noise", async () => {
+test("a click with no drag yields an empty selection — no clipboard write, no status noise", async () => {
   const t = await testRender(
     () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
     { width: 100, height: 30 },
   )
   await t.renderOnce()
-  const routed: string[] = []
-  const renderer = t.renderer as unknown as { writeOut: (chunk: string) => boolean }
-  renderer.writeOut = (chunk: string) => {
-    routed.push(chunk)
-    return true
-  }
+  const copied = stubClipboardApi(t)
   const before = t.captureCharFrame()
   const lines = before.split("\n")
   const y = lines.findIndex((l) => l.includes("for commands"))
@@ -1309,40 +1313,132 @@ test("a click with no drag yields an empty selection — no OSC write, no status
   await t.mockMouse.click(x, y)
   await t.renderOnce()
 
-  expect(routed.some((chunk) => chunk.includes("52;c;"))).toBe(false)
+  expect(copied.length).toBe(0)
   // The idle line is unchanged — no "copied" ever landed on it.
   expect(t.captureCharFrame()).not.toContain("copied")
   t.renderer.destroy()
 })
 
-test("an oversized selection is trimmed to the cap, with a truncation-specific status notice", async () => {
+test("an oversized selection is trimmed to the cap BEFORE the API sees it, with a truncation notice naming the real size", async () => {
   const t = await testRender(
     () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
     { width: 100, height: 30 },
   )
   await t.renderOnce()
-  const routed: string[] = []
+  const copied = stubClipboardApi(t)
   const renderer = t.renderer as unknown as {
-    writeOut: (chunk: string) => boolean
     emit: (event: string, ...args: unknown[]) => boolean
-  }
-  renderer.writeOut = (chunk: string) => {
-    routed.push(chunk)
-    return true
   }
   renderer.emit("selection", { getSelectedText: () => "y".repeat(250_000) })
   await t.renderOnce()
 
-  const oscEntry = routed.find((chunk) => chunk.startsWith("\x1b]52;c;"))
-  expect(oscEntry).toBeDefined()
-  const match = oscEntry?.match(/^\x1b\]52;c;(.*)\x07$/)
-  const b64 = match?.[1] ?? ""
-  expect(b64.length).toBeLessThanOrEqual(100_000)
+  expect(copied.length).toBe(1)
+  // The cap is applied JS-side, so the native API never receives more than
+  // the wire can carry.
+  const payload = copied[0] ?? ""
+  expect(Buffer.from(payload, "utf-8").length).toBe(OSC52_TEXT_CAP_BYTES)
+  expect(Buffer.from(payload, "utf-8").toString("base64").length).toBeLessThanOrEqual(
+    OSC52_BASE64_CAP,
+  )
 
   const frame = await waitForFrameSlow(t, (f) => f.includes("selection truncated"), 5_000)
-  expect(frame).toContain("copied 100KB (selection truncated)")
+  expect(frame).toContain(copyStatusText(true))
+  // The honest figure, not the base64 wire size.
+  expect(frame).not.toContain("copied 100KB")
   t.renderer.destroy()
 })
+
+test("a terminal without OSC 52 gets an honest notice ONCE — never a false 'copied'", async () => {
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  const copied = stubClipboardApi(t, { supported: false })
+  const renderer = t.renderer as unknown as {
+    emit: (event: string, ...args: unknown[]) => boolean
+  }
+
+  renderer.emit("selection", { getSelectedText: () => "some selected text" })
+  renderer.emit("selection", { getSelectedText: () => "more selected text" })
+  await t.renderOnce()
+
+  // Gated: nothing was handed to the clipboard API at all.
+  expect(copied.length).toBe(0)
+  const frame = await waitForFrameSlow(t, (f) => f.includes(COPY_UNSUPPORTED_TEXT), 5_000)
+  expect(frame).toContain(COPY_UNSUPPORTED_TEXT)
+  // Never claims success.
+  expect(frame).not.toContain("copied")
+  // Once per session, not once per selection — two selections, one line.
+  const occurrences = frame.split(COPY_UNSUPPORTED_TEXT).length - 1
+  expect(occurrences).toBe(1)
+  t.renderer.destroy()
+}, 30_000)
+
+test("a clipboard write that returns false makes no 'copied' claim", async () => {
+  const t = await testRender(
+    () => <App cwd={tempDir("bfly-tui-")} config={{}} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  // Supported per the capability gate, but the native write itself fails.
+  const copied = stubClipboardApi(t, { ok: false })
+  const renderer = t.renderer as unknown as {
+    emit: (event: string, ...args: unknown[]) => boolean
+  }
+
+  renderer.emit("selection", { getSelectedText: () => "some selected text" })
+  await t.renderOnce()
+
+  expect(copied.length).toBe(1) // it was attempted…
+  expect(t.captureCharFrame()).not.toContain("copied") // …but never announced
+  t.renderer.destroy()
+})
+
+test("a select-to-copy notice never becomes /status's 'last turn' — that stays the real turn marker", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeChatServer("done")
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-copy", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    stubClipboardApi(t)
+    const renderer = t.renderer as unknown as {
+      emit: (event: string, ...args: unknown[]) => boolean
+    }
+
+    // A real turn settles and writes the turn marker.
+    t.mockInput.typeText("hi")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => /in 5 · out 3 · cached 0 · 1 steps/.test(f), 25_000)
+
+    // Then a selection claims the transient status line.
+    renderer.emit("selection", { getSelectedText: () => "some selected text" })
+    const copiedFrame = await waitForFrameSlow(t, (f) => f.includes("copied"), 5_000)
+    expect(copiedFrame).toContain("copied")
+
+    // /status must still report the TURN, not the copy notice — the two
+    // signals are separate (status bar = freshest, /status = last turn).
+    t.mockInput.typeText("/status")
+    t.mockInput.pressEnter()
+    const statusFrame = await waitForFrameSlow(t, (f) => f.includes("last turn"), 10_000)
+    const lastTurnLine = statusFrame.split("\n").find((l) => l.trim().startsWith("last turn")) ?? ""
+    expect(lastTurnLine).toMatch(/in 5 · out 3 · cached 0 · 1 steps/)
+    expect(lastTurnLine).not.toContain("copied")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 40_000)
 
 test("/plan toggles read-only mode with a header badge", async () => {
   const t = await testRender(

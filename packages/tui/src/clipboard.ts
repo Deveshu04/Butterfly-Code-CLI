@@ -53,18 +53,28 @@ export async function saveClipboardImage(
   }
 }
 
+
 export const OSC52_BASE64_CAP = 100_000
 
-export interface Osc52Copy {
-  osc: string
+export const OSC52_TEXT_CAP_BYTES = Math.floor(OSC52_BASE64_CAP / 4) * 3
+
+export function osc52CapLabel(): string {
+  return `~${Math.round(OSC52_TEXT_CAP_BYTES / 1024)}KB`
+}
+
+export interface Osc52Payload {
+  text: string
   truncated: boolean
 }
 
-export function buildOsc52Copy(text: string, capBase64Bytes: number = OSC52_BASE64_CAP): Osc52Copy {
+export function capOsc52Text(
+  text: string,
+  capBase64Bytes: number = OSC52_BASE64_CAP,
+): Osc52Payload {
   const bytes = Buffer.from(text, "utf-8")
-  const full = bytes.toString("base64")
-  if (full.length <= capBase64Bytes) return { osc: `\x1b]52;c;${full}\x07`, truncated: false }
-  const byteBudget = Math.floor(capBase64Bytes / 4) * 3
-  const trimmed = bytes.subarray(0, byteBudget).toString("base64")
-  return { osc: `\x1b]52;c;${trimmed}\x07`, truncated: true }
+  const budget = Math.floor(capBase64Bytes / 4) * 3
+  if (bytes.length <= budget) return { text, truncated: false }
+  let end = budget
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--
+  return { text: bytes.subarray(0, end).toString("utf-8"), truncated: true }
 }

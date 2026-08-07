@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test"
+import { OSC52_TEXT_CAP_BYTES, osc52CapLabel } from "../src/clipboard"
 import {
+  COPY_UNSUPPORTED_TEXT,
   copyStatusText,
   formatCommandBody,
   formatDuration,
@@ -164,5 +166,17 @@ test("copyStatusText: plain 'copied' for a selection under the cap", () => {
 })
 
 test("copyStatusText: truncation notice names the cap and says what happened", () => {
-  expect(copyStatusText(true)).toBe("copied 100KB (selection truncated)")
+  expect(copyStatusText(true)).toBe(`copied first ${osc52CapLabel()} (selection truncated)`)
+})
+
+test("copyStatusText: the truncation figure is the RAW size the clipboard got, derived from the one constant", () => {
+  const notice = copyStatusText(true)
+  expect(notice).toContain(`~${Math.round(OSC52_TEXT_CAP_BYTES / 1024)}KB`)
+  expect(notice).not.toContain("100KB")
+  expect(notice).toContain(osc52CapLabel())
+})
+
+test("COPY_UNSUPPORTED_TEXT: honest, plain, and never claims a copy happened", () => {
+  expect(COPY_UNSUPPORTED_TEXT).toBe("clipboard copy not supported by this terminal")
+  expect(COPY_UNSUPPORTED_TEXT).not.toContain("copied")
 })

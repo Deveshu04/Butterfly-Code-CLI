@@ -107,7 +107,7 @@ import {
   useTerminalDimensions,
 } from "@opentui/solid"
 import { type Accessor, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
-import { buildOsc52Copy, saveClipboardImage } from "./clipboard"
+import { capOsc52Text, saveClipboardImage } from "./clipboard"
 import {
   type CommandActions,
   commandMatches,
@@ -118,6 +118,7 @@ import {
   type SlashCommand,
 } from "./commands"
 import {
+  COPY_UNSUPPORTED_TEXT,
   copyStatusText,
   formatCommandBody,
   formatDuration,
@@ -609,16 +610,31 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const [busy, setBusy] = createSignal(false)
   const [pendingAsk, setPendingAsk] = createSignal<PendingAsk | null>(null)
   const [status, setStatus] = createSignal("")
+  const [lastTurnMarker, setLastTurnMarker] = createSignal("")
+  const resetTurnStatus = () => {
+    setStatus("")
+    setLastTurnMarker("")
+  }
 
+  let osc52UnsupportedNotified = false
   useSelectionHandler((selection) => {
     const text = selection.getSelectedText()
     if (!text) return
-    const { osc, truncated } = buildOsc52Copy(text)
+    if (!renderer.isOsc52Supported()) {
+      if (!osc52UnsupportedNotified) {
+        osc52UnsupportedNotified = true
+        push({ kind: "info", text: COPY_UNSUPPORTED_TEXT })
+      }
+      return
+    }
+    const { text: payload, truncated } = capOsc52Text(text)
+    let copied = false
     try {
-      writeOsc(osc)
+      copied = renderer.copyToClipboardOSC52(payload)
     } catch {
       return
     }
+    if (!copied) return
     setStatus(copyStatusText(truncated))
   })
 
@@ -1253,7 +1269,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       session.journal.append({ type: "session.rewound", toIndex, time: now() })
       const { header, events } = SessionJournal.replay(session.journal.path)
       setMessages(timelineToMessages(project(header, events).timeline))
-      setStatus("")
+      resetTurnStatus()
     }
     push({ kind: "info", text: `rewound (${mode}) to ${checkpointLabel(checkpoint.event)}` })
   }
@@ -1266,7 +1282,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     newSession: () => {
       session.journal = SessionJournal.create(join(props.cwd, ".butterfly", "sessions"))
       setMessages([])
-      setStatus("")
+      resetTurnStatus()
       setCtxUsed(0)
       firstTurn = true
       push({ kind: "info", text: "fresh session started" })
@@ -1305,7 +1321,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         `spend      ${formatUSD(sessionCost())} this session${config().maxSpendUSD !== undefined ? ` (cap $${config().maxSpendUSD?.toFixed(2)}/turn)` : ""}`,
         `small      ${config().small_model ?? "not set"}`,
         `journal    ${displayPath(session.journal.path)}`,
-        `last turn  ${status() || "—"}`,
+        `last turn  ${lastTurnMarker() || "—"}`,
       ].join("\n")
     },
     showModels: async () => {
@@ -1389,7 +1405,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         const { header, events } = SessionJournal.replay(target.path)
         session.journal = journal
         setMessages(timelineToMessages(project(header, events).timeline))
-        setStatus("")
+        resetTurnStatus()
         setCtxUsed(0)
         firstTurn = false
         push({ kind: "info", text: `resumed session ${target.id.slice(0, 8)} — ${target.title}` })
@@ -1906,7 +1922,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       session.journal.append({ type: "session.rewound", toIndex: snapshotIndex, time: now() })
       const after = SessionJournal.replay(session.journal.path)
       setMessages(timelineToMessages(project(header, after.events).timeline))
-      setStatus("")
+      resetTurnStatus()
       push({
         kind: "info",
         text:
@@ -2355,7 +2371,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       .then((outcome) => {
         setSessionCost((c) => c + outcome.costUSD)
         const start = turnStartedAt()
-        setStatus(turnMarker(outcome.usage, outcome.steps, Date.now() - (start ?? Date.now())))
+        const marker = turnMarker(outcome.usage, outcome.steps, Date.now() - (start ?? Date.now()))
+        setStatus(marker)
+        setLastTurnMarker(marker)
         void (async () => {
           try {
             episodic.indexJournal(session.journal.path)

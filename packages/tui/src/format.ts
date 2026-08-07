@@ -1,6 +1,7 @@
 /** Display-side text hygiene. Journals always keep the raw text. */
 
 import type { Usage } from "@butterfly/core"
+import { osc52CapLabel } from "./clipboard"
 
 export function humanizeTokens(n: number): string {
   const value = Math.max(0, n)
@@ -79,5 +80,7 @@ export function metersFitAt(columns: number): boolean {
 }
 
 export function copyStatusText(truncated: boolean): string {
-  return truncated ? "copied 100KB (selection truncated)" : "copied"
+  return truncated ? `copied first ${osc52CapLabel()} (selection truncated)` : "copied"
 }
+
+export const COPY_UNSUPPORTED_TEXT = "clipboard copy not supported by this terminal"
