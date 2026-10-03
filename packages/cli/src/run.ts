@@ -7,6 +7,7 @@ import {
   bashTool,
   buildSkeleton,
   buildSystem,
+  CodeGraph,
   createExploreTool,
   createMcpTool,
   createMemoryTool,
@@ -21,7 +22,6 @@ import {
   expandMentions,
   formatUSD,
   frecencyStorePath,
-  GraphDb,
   globTool,
   grepTool,
   listUntracked,
@@ -30,6 +30,7 @@ import {
   McpHub,
   ModelsCatalog,
   memoryPaths,
+  moduleOverview,
   mutatingSubagentRegistry,
   OfflineMockProvider,
   type PermissionRules,
@@ -43,7 +44,6 @@ import {
   runUserTurn,
   SessionJournal,
   skillsIndex,
-  syncRepo,
   type TaskToolOptions,
   ToolRegistry,
   todoTool,
@@ -197,9 +197,11 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     mcpHub = await McpHub.connect(config.mcp).catch(() => undefined)
   }
 
-  const graph = GraphDb.open(join(cwd, ".butterfly", "graph.db"))
-  const sync = await syncRepo(cwd, graph)
-  registry.register(createExploreTool({ db: () => graph, cwd }))
+  const codeGraph = CodeGraph.open(cwd)
+  const sync = await codeGraph.sync().catch(() => ({ scanned: 0, skipped: 0, removed: 0 }))
+  const graph = codeGraph.db
+  const graphRefresh = () => codeGraph.fresh()
+  registry.register(createExploreTool({ db: () => graph, cwd, refresh: graphRefresh }))
   registry.register(
     createTaskTool(
       taskToolOptions({
@@ -208,7 +210,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
         provider: () => provider,
         model: () => modelRef,
         extras: (sub) => {
-          sub.register(createExploreTool({ db: () => graph, cwd }))
+          sub.register(createExploreTool({ db: () => graph, cwd, refresh: graphRefresh }))
           sub.register(createWebTool({ config: () => config.web }))
         },
       }),
@@ -222,10 +224,12 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     chatFiles: mentions.map((m) => m.path),
   })
   const withMentions = mentionBlock === "" ? opts.task : `${mentionBlock}\n\n${opts.task}`
+  const overview = moduleOverview(graph)
+  const mapBlock = [overview, skeleton].filter((part) => part !== "").join("\n\n")
   const withSkeleton =
-    skeleton === ""
+    mapBlock === ""
       ? withMentions
-      : `[repository map — ranked symbols; use explore/read for bodies]\n${skeleton}\n\n${withMentions}`
+      : `[repository map — modules + ranked symbols; explore op=map|outline|symbol|deps for more]\n${mapBlock}\n\n${withMentions}`
   const taskText = applyResumeHandoff(cwd, withSkeleton, opts.resumeHandoff ?? false, (text) => {
     if (!opts.json) process.stdout.write(`[handoff: ${text}]\n`)
   })
@@ -326,6 +330,8 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     } catch {
       // non-fatal
     }
+    // Leave graph.db + project-map.md matching the code this run produced.
+    await codeGraph.sync().catch(() => {})
     if (config.small_model) {
       await reviewTurn({
         provider,

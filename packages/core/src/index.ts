@@ -87,13 +87,21 @@ export { estimateTokens } from "./context/tokens"
 // Edit pipeline
 export { applyEdit } from "./edit/apply"
 // Graph engine
-export { type DefRow, GraphDb, type RefRow } from "./graph/db"
+export { CodeGraph } from "./graph/code-graph"
+export { type DefRow, type FileEdge, GraphDb, type GraphStats, type RefRow } from "./graph/db"
 export { createExploreTool } from "./graph/explore-tool"
 export { languageForPath } from "./graph/languages"
+export {
+  analyzeProject,
+  moduleOverview,
+  PROJECT_MAP_FILE,
+  renderProjectMap,
+  writeProjectMap,
+} from "./graph/project-map"
 export { rankedDefinitions, rankFiles } from "./graph/rank"
 export { disposeScanners, scanFile, type Tag } from "./graph/scan"
-export { buildSkeleton, DEFAULT_SKELETON_TOKENS } from "./graph/skeleton"
-export { syncRepo } from "./graph/sync"
+export { buildSkeleton, DEFAULT_SKELETON_TOKENS, focusedSkeleton } from "./graph/skeleton"
+export { listSourceFiles, syncRepo } from "./graph/sync"
 // Loop orchestration
 export { type Gate, type GateRunResult, runGates } from "./loop/gates"
 export { type LoopTask, MAX_ATTEMPTS, type TaskStatus, WorkQueue } from "./loop/queue"

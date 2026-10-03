@@ -11,6 +11,25 @@ export interface DefRow {
   endRow: number
 }
 
+export interface FileStat {
+  mtime: number
+  size: number
+}
+
+export interface GraphStats {
+  files: number
+  symbols: number
+  refs: number
+  lastSync?: number
+}
+
+/** file → file dependency: `from` references `weight` symbols defined in `to`. */
+export interface FileEdge {
+  from: string
+  to: string
+  weight: number
+}
+
 export interface RefRow {
   file: string
   name: string
@@ -35,14 +54,25 @@ export class GraphDb {
     db.run("CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file)")
     db.run("CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name)")
     db.run("CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file)")
+    db.run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    const columns = (db.query("PRAGMA table_info(files)").all() as { name: string }[]).map(
+      (c) => c.name,
+    )
+    if (!columns.includes("mtime")) db.run("ALTER TABLE files ADD COLUMN mtime REAL")
+    if (!columns.includes("size")) db.run("ALTER TABLE files ADD COLUMN size INTEGER")
     return new GraphDb(db)
   }
 
-  upsertFile(path: string, sha256: string, tags: Tag[]): void {
+  upsertFile(path: string, sha256: string, tags: Tag[], stat?: FileStat): void {
     const tx = this.db.transaction(() => {
       this.db.run("DELETE FROM symbols WHERE file = ?", [path])
       this.db.run("DELETE FROM refs WHERE file = ?", [path])
-      this.db.run("INSERT OR REPLACE INTO files (path, sha256) VALUES (?, ?)", [path, sha256])
+      this.db.run("INSERT OR REPLACE INTO files (path, sha256, mtime, size) VALUES (?, ?, ?, ?)", [
+        path,
+        sha256,
+        stat?.mtime ?? null,
+        stat?.size ?? null,
+      ])
 
       const refCounts = new Map<string, number>()
       for (const tag of tags) {
@@ -73,6 +103,114 @@ export class GraphDb {
       sha256: string
     } | null
     return row?.sha256
+  }
+
+  fileStat(path: string): FileStat | undefined {
+    const row = this.db.query("SELECT mtime, size FROM files WHERE path = ?").get(path) as {
+      mtime: number | null
+      size: number | null
+    } | null
+    if (!row || row.mtime === null || row.size === null) return undefined
+    return { mtime: row.mtime, size: row.size }
+  }
+
+  /** Content unchanged (same hash) but the stat moved — record it so the next sync stays on the fast path. */
+  touchStat(path: string, stat: FileStat): void {
+    this.db.run("UPDATE files SET mtime = ?, size = ? WHERE path = ?", [
+      stat.mtime,
+      stat.size,
+      path,
+    ])
+  }
+
+  setMeta(key: string, value: string): void {
+    this.db.run("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [key, value])
+  }
+
+  getMeta(key: string): string | undefined {
+    const row = this.db.query("SELECT value FROM meta WHERE key = ?").get(key) as {
+      value: string
+    } | null
+    return row?.value
+  }
+
+  stats(): GraphStats {
+    const count = (sql: string) => (this.db.query(sql).get() as { n: number }).n
+    const last = Number(this.getMeta("lastSync"))
+    return {
+      files: count("SELECT COUNT(*) AS n FROM files"),
+      symbols: count("SELECT COUNT(*) AS n FROM symbols"),
+      refs: count("SELECT COUNT(*) AS n FROM refs"),
+      ...(Number.isFinite(last) && last > 0 ? { lastSync: last } : {}),
+    }
+  }
+
+  /** Definitions in one file, in source order — the cheap alternative to reading it. */
+  fileDefs(path: string): DefRow[] {
+    const rows = this.db
+      .query(
+        "SELECT file, name, kind as symbolKind, row, endRow FROM symbols WHERE file = ? ORDER BY row",
+      )
+      .all(path) as DefRow[]
+    const seen = new Set<string>()
+    return rows.filter((row) => {
+      const key = `${row.name}:${row.row}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  /** Indexed paths matching a path fragment (exact first, then suffix, then substring). */
+  findFiles(fragment: string): string[] {
+    const needle = fragment.replaceAll("\\", "/").replace(/^\.\//, "")
+    const exact = this.db.query("SELECT path FROM files WHERE path = ?").get(needle) as {
+      path: string
+    } | null
+    if (exact) return [exact.path]
+    const rows = this.db
+      .query("SELECT path FROM files WHERE path LIKE ? ORDER BY length(path), path LIMIT 20")
+      .all(`%${needle}%`) as { path: string }[]
+    const suffix = rows.filter((r) => r.path.endsWith(`/${needle}`) || r.path.endsWith(needle))
+    return (suffix.length > 0 ? suffix : rows).map((r) => r.path)
+  }
+
+  /** Files referencing `name` (excluding its definers), heaviest first — indexed, no full scan. */
+  callers(name: string): RefRow[] {
+    return this.db
+      .query(
+        "SELECT file, name, count FROM refs WHERE name = ? AND file NOT IN (SELECT file FROM symbols WHERE name = ?) ORDER BY count DESC, file",
+      )
+      .all(name, name) as RefRow[]
+  }
+
+  /**
+   * File-level dependency edges derived from symbol references. Names
+   * defined in more than `maxDefiners` files ("get", "run", "init") carry
+   * no real dependency signal and are skipped — otherwise every file
+   * "depends on" every other one.
+   */
+  fileEdges(maxDefiners = 3): FileEdge[] {
+    return this.db
+      .query(
+        `WITH definers AS (
+           SELECT name, file FROM symbols
+           WHERE name IN (SELECT name FROM symbols GROUP BY name HAVING COUNT(DISTINCT file) <= ?)
+             AND length(name) >= 4
+             AND (name GLOB '*[A-Z_]*' OR length(name) >= 8)
+             AND file NOT GLOB '*.test.*' AND file NOT GLOB '*.spec.*'
+             AND file NOT GLOB 'test/*' AND file NOT GLOB '*/test/*'
+             AND file NOT GLOB 'tests/*' AND file NOT GLOB '*/tests/*'
+             AND file NOT GLOB '*/__tests__/*'
+           GROUP BY name, file
+         )
+         SELECT r.file AS "from", d.file AS "to", SUM(r.count) AS weight
+         FROM refs r JOIN definers d ON d.name = r.name
+         WHERE r.file != d.file
+         GROUP BY r.file, d.file
+         ORDER BY weight DESC`,
+      )
+      .all(maxDefiners) as FileEdge[]
   }
 
   allFiles(): string[] {

@@ -450,7 +450,8 @@ test("full setup path saves model and key to the global config", async () => {
   })
   await t.renderOnce()
 
-  t.mockInput.typeText("1")
+  // provider by name: openai (needs key)
+  t.mockInput.typeText("openai")
   t.mockInput.pressEnter()
   await t.waitForFrame((frame: string) => frame.includes("API key"))
 
@@ -465,6 +466,28 @@ test("full setup path saves model and key to the global config", async () => {
   const saved = readFileSync(join(home, ".config", "butterfly", "butterfly.jsonc"), "utf8")
   expect(saved).toContain('"model": "openai/gpt-5-mini"')
   expect(saved).toContain('"apiKey": "sk-test-123"')
+  t.renderer.destroy()
+}, 30_000)
+
+test("setup offers Sarvam first and saves a sarvam/ model ref with its key", async () => {
+  const home = tempDir("bfly-home-")
+  const t = await testRender(() => <App cwd={tempDir("bfly-tui-")} config={{}} home={home} />, {
+    width: 100,
+    height: 30,
+  })
+  await t.renderOnce()
+  t.mockInput.typeText("1")
+  t.mockInput.pressEnter()
+  await t.waitForFrame((frame: string) => frame.includes("API key"))
+  t.mockInput.typeText("sk-sarvam-abc")
+  t.mockInput.pressEnter()
+  await t.waitForFrame((frame: string) => frame.includes("Model id"))
+  t.mockInput.typeText("sarvam-105b")
+  t.mockInput.pressEnter()
+  await t.waitForFrame((frame: string) => frame.includes("Ready on sarvam/sarvam-105b"))
+  const saved = readFileSync(join(home, ".config", "butterfly", "butterfly.jsonc"), "utf8")
+  expect(saved).toContain('"model": "sarvam/sarvam-105b"')
+  expect(saved).toContain('"apiKey": "sk-sarvam-abc"')
   t.renderer.destroy()
 }, 30_000)
 
@@ -1107,6 +1130,27 @@ test("/res surfaces /resume first, and Enter opens the session picker", async ()
   expect(t.captureCharFrame()).toContain("refactor the parser")
   t.mockInput.pressEnter()
   await waitForFrameSlow(t, (f: string) => f.includes("resumed session pickme00"))
+  t.renderer.destroy()
+})
+
+test("/graph reports the code graph and the project map lands in .butterfly", async () => {
+  const cwd = tempDir("bfly-tui-")
+  writeFileSync(join(cwd, "widget.ts"), "export function buildWidgetTree() {\n  return 1\n}\n")
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 110, height: 40 },
+  )
+  await t.renderOnce()
+  // The first sync runs in the background — wait for the map it writes.
+  const mapPath = join(cwd, ".butterfly", "project-map.md")
+  for (let i = 0; i < 100 && !existsSync(mapPath); i++) await new Promise((r) => setTimeout(r, 50))
+  expect(readFileSync(mapPath, "utf8")).toContain("buildWidgetTree")
+  t.mockInput.typeText("/graph")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("project-map.md"))
+  const frame = t.captureCharFrame()
+  expect(frame).toMatch(/files\s+1/)
+  expect(frame).toContain("explore op=map")
   t.renderer.destroy()
 })
 

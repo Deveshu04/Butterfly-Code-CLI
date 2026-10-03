@@ -21,6 +21,10 @@ export interface CommandActions {
   listSessionsText(): string
   /** Arrow-key picker over past sessions (same rows as listSessionsText). */
   pickSession(): void
+  /** Code graph stats + module overview + map path. */
+  graphText(): string
+  /** Force an incremental re-sync and rewrite .butterfly/project-map.md. */
+  rebuildGraph(): Promise<void>
   resumeSession(indexOrId: string): void
   exportTranscript(): void
   undo(): Promise<void>
@@ -283,6 +287,28 @@ export const COMMANDS: SlashCommand[] = [
     description: "analyze the repo and seed durable project memory",
     keywords: ["bootstrap", "analyze", "analyse", "onboard-repo", "seed"],
     run: (_arg, a) => a.initProject(),
+  },
+  {
+    name: "graph",
+    args: "[rebuild]",
+    description: "code graph: files, symbols, modules, project map — rebuild re-indexes",
+    keywords: [
+      "map",
+      "index",
+      "codebase",
+      "repo-map",
+      "reindex",
+      "symbols",
+      "project-map",
+      "dependencies",
+    ],
+    run: (arg, a) => {
+      const trimmed = arg.trim()
+      if (trimmed === "") a.info(a.graphText(), true)
+      else if (trimmed === "rebuild" || trimmed === "sync" || trimmed === "reindex")
+        return a.rebuildGraph()
+      else a.error("usage: /graph | /graph rebuild")
+    },
   },
   {
     name: "mcp",

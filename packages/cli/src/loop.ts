@@ -6,6 +6,7 @@ import {
   AiSdkProvider,
   bashTool,
   buildSystem,
+  CodeGraph,
   createExploreTool,
   createMemoryTool,
   createModelResolver,
@@ -15,7 +16,6 @@ import {
   EpisodicIndex,
   editTool,
   type Gate,
-  GraphDb,
   globTool,
   grepTool,
   type LoopEvent,
@@ -29,7 +29,6 @@ import {
   runUserTurn,
   SessionJournal,
   skillsIndex,
-  syncRepo,
   ToolRegistry,
   todoTool,
   WorkQueue,
@@ -172,8 +171,9 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
         join(cwd, ".butterfly", "skills"),
         join(home, ".config", "butterfly", "skills"),
       ]
-      const graph = GraphDb.open(join(cwd, ".butterfly", "graph.db"))
-      await syncRepo(cwd, graph)
+      const codeGraph = CodeGraph.open(cwd)
+      await codeGraph.sync().catch(() => {})
+      const graph = codeGraph.db
       const episodic = EpisodicIndex.open(join(cwd, ".butterfly", "index.db"))
       const provider = new AiSdkProvider(createModelResolver(config))
       const system = buildSystem(modelRef, {
@@ -192,7 +192,9 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
         registry.register(globTool)
         registry.register(grepTool)
         registry.register(todoTool)
-        registry.register(createExploreTool({ db: () => graph, cwd }))
+        registry.register(
+          createExploreTool({ db: () => graph, cwd, refresh: () => codeGraph.fresh() }),
+        )
         registry.register(
           createMemoryTool({ paths: memoryPaths(cwd, home), episodic: () => episodic }),
         )

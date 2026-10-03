@@ -10,6 +10,7 @@ import {
   bashTool,
   buildSkeleton,
   buildSystem,
+  CodeGraph,
   clearProgressOsc,
   compactSession,
   createExploreTool,
@@ -30,11 +31,12 @@ import {
   expandMentions,
   exportSessionMarkdown,
   fetchProviderModels,
+  focusedSkeleton,
   forkSession,
   formatUSD,
   frecencyStorePath,
   type Gate,
-  GraphDb,
+  type GraphDb,
   generateCommitMessage,
   globTool,
   grepTool,
@@ -52,6 +54,7 @@ import {
   ModelsCatalog,
   mediaTypeForPath,
   memoryPaths,
+  moduleOverview,
   mutatingSubagentRegistry,
   now,
   type PermissionRules,
@@ -86,7 +89,6 @@ import {
   setPermissionRule,
   skillsIndex,
   stageAllTracked,
-  syncRepo,
   type TaskToolOptions,
   ToolRegistry,
   todoTool,
@@ -798,13 +800,19 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     })
     .catch(() => {})
 
+  let codeGraph: CodeGraph | undefined
+  try {
+    codeGraph = CodeGraph.open(props.cwd)
+  } catch {
+  }
+  const graphDb = (): GraphDb | undefined => (codeGraph?.ready ? codeGraph.db : undefined)
+  const graphRefresh = () => codeGraph?.fresh() ?? Promise.resolve()
   let graph: GraphDb | undefined
-  registry.register(createExploreTool({ db: () => graph, cwd: props.cwd }))
+  registry.register(createExploreTool({ db: graphDb, cwd: props.cwd, refresh: graphRefresh }))
   void (async () => {
     try {
-      const db = GraphDb.open(join(props.cwd, ".butterfly", "graph.db"))
-      await syncRepo(props.cwd, db)
-      graph = db
+      await codeGraph?.sync()
+      graph = graphDb()
     } catch {
       // explore stays unavailable; grep/read still work
     }
@@ -822,7 +830,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   registry.register(createWebTool({ config: () => config().web }))
   /** Caller-owned tools every subagent gets, read-only or mutating alike. */
   const subagentExtras = (sub: ToolRegistry) => {
-    sub.register(createExploreTool({ db: () => graph, cwd: props.cwd }))
+    sub.register(createExploreTool({ db: graphDb, cwd: props.cwd, refresh: graphRefresh }))
     sub.register(createWebTool({ config: () => config().web }))
   }
   const taskToolOpts: TaskToolOptions = {
@@ -850,7 +858,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     sub.register(globTool)
     sub.register(grepTool)
     sub.register(todoTool)
-    sub.register(createExploreTool({ db: () => graph, cwd: props.cwd }))
+    sub.register(createExploreTool({ db: graphDb, cwd: props.cwd, refresh: graphRefresh }))
     sub.register(createMemoryTool({ paths, episodic: () => episodic }))
     sub.register(createSkillTool({ dirs: skillDirs }))
     sub.register(createWebTool({ config: () => config().web }))
@@ -1398,6 +1406,45 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           `  ${i + 1}  ${new Date(s.modified).toISOString().slice(0, 16).replace("T", " ")}  ${s.title}${s.path === session.journal.path ? "  (current)" : ""}`,
       )
       return `sessions (newest first):\n${lines.join("\n")}\nresume with /sessions <number>, or /resume for a picker`
+    },
+    graphText: () => {
+      if (!codeGraph) return "code graph unavailable (could not open .butterfly/graph.db)"
+      if (!codeGraph.ready) {
+        return codeGraph.lastError
+          ? `code graph sync failed: ${codeGraph.lastError}`
+          : "code graph: first sync still running…"
+      }
+      const stats = codeGraph.db.stats()
+      const age = stats.lastSync ? Math.round((Date.now() - stats.lastSync) / 1000) : undefined
+      const overview = moduleOverview(codeGraph.db, 300)
+      return [
+        `files      ${stats.files}`,
+        `symbols    ${stats.symbols}`,
+        `refs       ${stats.refs}`,
+        `synced     ${age === undefined ? "never" : age < 2 ? "just now" : `${age}s ago`}`,
+        `index      ${join(".butterfly", "graph.db")}`,
+        `map        ${join(".butterfly", "project-map.md")}  (modules, Mermaid dependency graph, hubs)`,
+        ...(overview ? ["", overview] : []),
+        "",
+        "the agent queries this via explore op=map|outline|symbol|deps · /graph rebuild re-indexes",
+      ].join("\n")
+    },
+    rebuildGraph: async () => {
+      if (!codeGraph) {
+        push({ kind: "error", text: "code graph unavailable" })
+        return
+      }
+      const started = Date.now()
+      try {
+        const result = await codeGraph.sync({ forceMap: true })
+        graph = graphDb()
+        push({
+          kind: "info",
+          text: `graph synced in ${Date.now() - started}ms — ${result.scanned} re-indexed, ${result.skipped} unchanged, ${result.removed} removed; map written to .butterfly/project-map.md`,
+        })
+      } catch (error) {
+        push({ kind: "error", text: `graph sync failed: ${String(error)}` })
+      }
     },
     pickSession: () => {
       lastListing = listSessions(join(props.cwd, ".butterfly", "sessions")).filter(
@@ -2360,10 +2407,16 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           mentionedIdents: mentionedWords,
           chatFiles: mentions.map((m) => m.path),
         })
-        if (skeleton !== "") {
-          taskText = `[repository map — ranked symbols; use explore/read for bodies]\n${skeleton}\n\n${taskText}`
+        const overview = moduleOverview(graph)
+        const block = [overview, skeleton].filter((part) => part !== "").join("\n\n")
+        if (block !== "") {
+          taskText = `[repository map — modules + ranked symbols; explore op=map|outline|symbol|deps for more]\n${block}\n\n${taskText}`
         }
       }
+    } else if (graph) {
+      const focused = focusedSkeleton(graph, task)
+      if (focused !== "")
+        taskText = `${taskText}\n\n[code graph — where the names above live]\n${focused}`
     }
     firstTurn = false
     setBusy(true)
@@ -2419,6 +2472,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           } catch {
             // non-fatal
           }
+          // Keep graph.db + project-map.md in step with what this turn edited.
+          await codeGraph?.sync().catch(() => {})
+          graph = graphDb()
           const small = config().small_model
           if (small) {
             await reviewTurn({
