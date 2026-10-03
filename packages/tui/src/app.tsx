@@ -140,6 +140,7 @@ import {
   expandTemplate,
   findCommand,
   loadCustomCommands,
+  nextEffort,
   type SlashCommand,
 } from "./commands"
 import {
@@ -2768,6 +2769,20 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       key.preventDefault()
       if (pagerOpen()) closePager()
       else if (!picker()) openPager()
+      return
+    }
+    if (
+      key.shift &&
+      key.name === "tab" &&
+      !setup() &&
+      !providerKeyStep() &&
+      !pagerOpen() &&
+      !picker() &&
+      !pendingAsk() &&
+      cmdList().length === 0
+    ) {
+      key.preventDefault()
+      setReasoning((current) => nextEffort(current))
       return
     }
     if (key.ctrl && key.name === "r" && !setup() && !providerKeyStep() && !pagerOpen()) {

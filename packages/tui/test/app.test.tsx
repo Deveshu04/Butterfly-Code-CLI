@@ -4438,3 +4438,25 @@ test("butterfly.jsonc `retries: 0` reaches the runner from the TUI — the failu
     server.stop()
   }
 }, 30_000)
+
+test("Shift+Tab cycles thinking effort and the header badge follows", async () => {
+  const t = await testRender(
+    () => (
+      <App
+        cwd={tempDir("bfly-tui-")}
+        config={{ model: "mock/model" }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width: 100, height: 30 },
+  )
+  await t.renderOnce()
+  expect(t.captureCharFrame()).not.toContain("think:")
+  t.mockInput.pressTab({ shift: true })
+  await t.waitForFrame((frame: string) => frame.includes("think:low"))
+  t.mockInput.pressTab({ shift: true })
+  await t.waitForFrame((frame: string) => frame.includes("think:medium"))
+  // The composer never received a tab character.
+  expect(t.captureCharFrame()).not.toContain("\t")
+  t.renderer.destroy()
+}, 30_000)

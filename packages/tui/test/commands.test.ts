@@ -467,3 +467,13 @@ test("/paste-img is registered and invokes CommandActions.pasteImage", () => {
   if (match && "command" in match) void match.command.run(match.arg, actions)
   expect(called).toBe(1)
 })
+
+test("nextEffort walks the Shift+Tab cycle and wraps to the provider default", async () => {
+  const { nextEffort } = await import("../src/commands")
+  expect(nextEffort(undefined)).toBe("low")
+  expect(nextEffort("low")).toBe("medium")
+  expect(nextEffort("xhigh")).toBe("none")
+  expect(nextEffort("none")).toBeUndefined()
+  // Levels outside the cycle re-enter at "low".
+  expect(nextEffort("minimal")).toBe("low")
+})

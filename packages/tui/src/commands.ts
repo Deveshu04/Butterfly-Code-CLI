@@ -80,6 +80,21 @@ export interface SlashCommand {
   run(arg: string, actions: CommandActions): void | Promise<void>
 }
 
+export const EFFORT_CYCLE: (ReasoningEffort | undefined)[] = [
+  undefined,
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "none",
+]
+
+export function nextEffort(current: ReasoningEffort | undefined): ReasoningEffort | undefined {
+  const at = EFFORT_CYCLE.indexOf(current)
+  if (at === -1) return "low"
+  return EFFORT_CYCLE[(at + 1) % EFFORT_CYCLE.length]
+}
+
 export const REASONING_LEVELS: ReasoningEffort[] = [
   "none",
   "minimal",
@@ -576,6 +591,7 @@ export function renderHelp(): string {
     "Ctrl+C interrupts, twice quits",
     "Esc cancels setup",
     "Ctrl+O opens the transcript pager",
+    "Shift+Tab cycles thinking effort (default > low > medium > high > xhigh > none)",
     "Ctrl+R expands/collapses the last thinking block (this session's view only — reasoning is never journaled, so it does not survive /resume)",
   ]
   const keyLines = keys.map((key) => `  ${wrapHanging(key, 4, HELP_DESC_WIDTH)}`)
