@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { basename, isAbsolute, join } from "node:path"
 import {
@@ -1049,7 +1049,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const writePagerExport = (): string => {
     const id = session.journal.header.sessionId.slice(0, 8)
-    const file = join(tmpdir(), `butterfly-pager-${id}-${Date.now()}.md`)
+    const dir = join(tmpdir(), "butterfly", "pager")
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, `${id}.md`)
     writeFileSync(file, pagerDoc().source)
     return file
   }
@@ -1470,7 +1472,17 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       lastListing = listSessions(join(props.cwd, ".butterfly", "sessions")).filter(
         (s) => s.title !== "(empty session)" || s.path === session.journal.path,
       )
-      if (lastListing.length === 0) return "no sessions yet"
+      // Journals are written lazily (first event), so a fresh current
+      // session has no file yet — it still gets its "(current)" row.
+      if (!lastListing.some((s) => s.path === session.journal.path)) {
+        lastListing.unshift({
+          id: session.journal.header.sessionId,
+          path: session.journal.path,
+          modified: Date.now(),
+          title: "(empty session)",
+          turns: 0,
+        })
+      }
       const lines = lastListing.map(
         (s, i) =>
           `  ${i + 1}  ${new Date(s.modified).toISOString().slice(0, 16).replace("T", " ")}  ${s.title}${s.path === session.journal.path ? "  (current)" : ""}`,
@@ -1485,7 +1497,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           : "code graph: first sync still running…"
       }
       const stats = codeGraph.db.stats()
-      const age = stats.lastSync ? Math.round((Date.now() - stats.lastSync) / 1000) : undefined
+      const last = codeGraph.lastSyncTime ?? stats.lastSync
+      const age = last ? Math.round((Date.now() - last) / 1000) : undefined
       const overview = moduleOverview(codeGraph.db, 300)
       return [
         `files      ${stats.files}`,

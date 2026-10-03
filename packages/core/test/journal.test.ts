@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { now, type SessionEvent } from "../src/session/events"
@@ -95,4 +95,21 @@ test("projector redacts pruned tool outputs in place", () => {
 
   const result = state.timeline.find((e) => e.type === "tool.result")
   expect(result && "output" in result ? result.output : "").toBe(PRUNED_PLACEHOLDER)
+})
+
+test("journals are lazy: nothing touches the disk until the first event", () => {
+  const dir = join(mkdtempSync(join(tmpdir(), "bfly-lazy-")), "sessions")
+  const journal = SessionJournal.create(dir)
+  expect(existsSync(dir)).toBe(false)
+  expect(journal.persisted).toBe(false)
+  // Readers see an empty session, not an error.
+  expect(SessionJournal.replay(journal.path).events).toEqual([])
+  expect(SessionJournal.open(journal.path).header.sessionId).toBe(journal.header.sessionId)
+
+  journal.append({ type: "message.user", id: "u1", text: "hi", time: now() })
+  expect(journal.persisted).toBe(true)
+  const lines = readFileSync(journal.path, "utf8").trim().split("\n")
+  expect(lines.length).toBe(2)
+  expect(JSON.parse(lines[0] ?? "{}").sessionId).toBe(journal.header.sessionId)
+  expect(SessionJournal.replay(journal.path).events.map((e) => e.type)).toEqual(["message.user"])
 })

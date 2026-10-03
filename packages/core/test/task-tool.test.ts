@@ -16,6 +16,7 @@ import {
 } from "../src/tool/tools/task"
 import { worktreesRoot } from "../src/tool/worktree"
 import { MockProvider } from "./helpers/mock-provider"
+import { nonRepoDir } from "./helpers/temp"
 
 const usage = { input: 500, output: 50, cacheRead: 0, cacheWrite: 0 }
 
@@ -34,15 +35,6 @@ async function gitFixture(): Promise<string> {
   writeFileSync(join(dir, "app.ts"), "export const v = 1\n")
   await runCommand("git add -A && git commit -qm init", { cwd: dir })
   return dir
-}
-
-function nonRepoDir(): string {
-  const base = process.platform === "win32" ? `${process.cwd().slice(0, 2)}\\` : "/"
-  try {
-    return mkdtempSync(join(base, "bfly-task-wt-nogit-"))
-  } catch {
-    return mkdtempSync(join(tmpdir(), "bfly-task-wt-nogit-"))
-  }
 }
 
 test("task subagent runs isolated and returns only a summary", async () => {
@@ -266,7 +258,7 @@ test("worktree isolation: a clean worktree (no changes made) is removed and prun
 }, 30_000)
 
 test("worktree isolation is refused outside a git repo, with no subagent turn spent", async () => {
-  const dir = nonRepoDir()
+  const dir = nonRepoDir("bfly-task-wt-nogit-")
   const provider = new MockProvider([])
   const tool = createTaskTool({
     provider: () => provider,

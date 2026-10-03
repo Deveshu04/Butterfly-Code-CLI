@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtempSync, readFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { extractSessionMetrics } from "../src/bench/metrics"
@@ -8,7 +8,7 @@ import { now } from "../src/session/events"
 import { SessionJournal } from "../src/session/journal"
 import { ToolRegistry } from "../src/tool/registry"
 import { editTool } from "../src/tool/tools/edit"
-import { MockProvider } from "./helpers/mock-provider"
+import { MockProvider, zeroUsage } from "./helpers/mock-provider"
 
 const usage = { input: 2_000, output: 150, cacheRead: 500, cacheWrite: 0 }
 
@@ -77,6 +77,7 @@ test("bench suite runs tasks in fixtures, checks them, and aggregates", async ()
       makeRegistry,
       model: "mock",
       buildSystem: () => "bench system",
+      keepFixtures: true,
     },
   )
 
@@ -89,3 +90,23 @@ test("bench suite runs tasks in fixtures, checks them, and aggregates", async ()
   const written = readFileSync(join(summary.results[0]?.fixtureDir ?? "", "OUT.txt"), "utf8")
   expect(written).toBe("expected-content\n")
 }, 60_000)
+
+test("bench deletes each fixture after scoring unless keepFixtures is set", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "text-delta", text: "ok" },
+      { type: "finish", reason: "stop", usage: zeroUsage },
+    ],
+  ])
+  const summary = await runBenchSuite([{ id: "t/1", task: "nothing", check: "true" }], {
+    provider,
+    makeRegistry: () => new ToolRegistry(),
+    model: "mock",
+    buildSystem: () => "s",
+  })
+  const result = summary.results[0]
+  expect(result?.kept).toBe(false)
+  expect(existsSync(result?.fixtureDir ?? "")).toBe(false)
+  // Fixtures never sit loose in temp: they live under <temp>/butterfly/bench.
+  expect(result?.fixtureDir.replaceAll("\\", "/")).toContain("/butterfly/bench/t_1-")
+})

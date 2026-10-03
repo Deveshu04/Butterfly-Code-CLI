@@ -1,0 +1,3 @@
+[test]
+# One temp folder per test run, removed at exit (see scripts/test-sandbox.ts).
+preload = ["./scripts/test-sandbox.ts"]

@@ -32,6 +32,7 @@ export async function runBenchCommand(argv: string[]): Promise<number> {
       suite: { type: "string" },
       "max-steps": { type: "string" },
       "budget-per-task": { type: "string" },
+      keep: { type: "boolean" },
     },
   })
   const cwd = process.cwd()
@@ -67,6 +68,7 @@ export async function runBenchCommand(argv: string[]): Promise<number> {
     provider,
     makeRegistry,
     model: modelRef,
+    keepFixtures: values.keep === true,
     buildSystem: (fixtureCwd) =>
       buildSystem(modelRef, {
         cwd: fixtureCwd,

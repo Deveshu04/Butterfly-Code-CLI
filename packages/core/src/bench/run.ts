@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import type { PermissionRules } from "../permission/tree"
@@ -25,6 +25,8 @@ export interface BenchTaskResult {
   metrics: SessionMetrics
   checkOutput: string
   fixtureDir: string
+  /** False when the fixture was deleted after scoring (the default). */
+  kept: boolean
 }
 
 export interface BenchDeps {
@@ -36,10 +38,14 @@ export interface BenchDeps {
   maxSteps?: number
   budgetTokens?: number
   onEvent?: (message: string) => void
+  keepFixtures?: boolean
 }
 
 export async function runBenchTask(task: BenchTask, deps: BenchDeps): Promise<BenchTaskResult> {
-  const fixtureDir = mkdtempSync(join(tmpdir(), `bfly-bench-${task.id}-`))
+  // One parent for everything butterfly puts in temp, never loose bfly-* dirs.
+  const parent = join(tmpdir(), "butterfly", "bench")
+  mkdirSync(parent, { recursive: true })
+  const fixtureDir = mkdtempSync(join(parent, `${task.id.replace(/[^A-Za-z0-9_-]/g, "_")}-`))
   for (const [path, content] of Object.entries(task.files ?? {})) {
     const absolute = join(fixtureDir, path)
     mkdirSync(dirname(absolute), { recursive: true })
@@ -69,12 +75,14 @@ export async function runBenchTask(task: BenchTask, deps: BenchDeps): Promise<Be
 
   const check = await runCommand(task.check, { cwd: fixtureDir, timeoutMs: 120_000 })
   const metrics = extractSessionMetrics(journal.path)
+  if (!deps.keepFixtures) rmSync(fixtureDir, { recursive: true, force: true, maxRetries: 2 })
   return {
     id: task.id,
     solved: !agentError && check.exitCode === 0,
     metrics,
     checkOutput: agentError ?? `${check.stdout}${check.stderr}`.trim(),
     fixtureDir,
+    kept: deps.keepFixtures === true,
   }
 }
 

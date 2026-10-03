@@ -18,6 +18,7 @@ function fakeResult(overrides: Partial<BenchTaskResult>): BenchTaskResult {
     },
     checkOutput: "",
     fixtureDir: "/tmp/fixture",
+    kept: false,
     ...overrides,
   }
 }

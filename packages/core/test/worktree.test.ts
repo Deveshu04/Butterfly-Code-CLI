@@ -11,6 +11,7 @@ import {
   worktreeStatus,
   worktreesRoot,
 } from "../src/tool/worktree"
+import { nonRepoDir } from "./helpers/temp"
 
 async function gitFixture(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "bfly-wt-"))
@@ -22,17 +23,8 @@ async function gitFixture(): Promise<string> {
   return dir
 }
 
-function nonRepoDir(): string {
-  const base = process.platform === "win32" ? `${process.cwd().slice(0, 2)}\\` : "/"
-  try {
-    return mkdtempSync(join(base, "bfly-wt-nogit-"))
-  } catch {
-    return mkdtempSync(join(tmpdir(), "bfly-wt-nogit-"))
-  }
-}
-
 test("createWorktree refuses outside a git repo", async () => {
-  const dir = nonRepoDir()
+  const dir = nonRepoDir("bfly-wt-nogit-")
   const result = await createWorktree(dir, "task1")
   expect(result.ok).toBe(false)
   if (!result.ok) expect(result.error).toContain("git repository")
@@ -129,7 +121,7 @@ test("removeWorktree removes a clean worktree and frees a concurrency slot", asy
 }, 30_000)
 
 test("worktreeStatus fails SAFE: a failing git status reports dirty + undetermined, never clean", async () => {
-  const dir = nonRepoDir() // `git status` here exits 128: "not a git repository"
+  const dir = nonRepoDir("bfly-wt-nogit-") // `git status` here exits 128: "not a git repository"
   const status = await worktreeStatus(dir, "0".repeat(40))
   expect(status.dirty).toBe(true)
   expect(status.undetermined).toBeTruthy()

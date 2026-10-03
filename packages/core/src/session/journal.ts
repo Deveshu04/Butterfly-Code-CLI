@@ -1,5 +1,5 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { JOURNAL_VERSION, JournalHeader, now, SessionEvent } from "./events"
 
 export interface ReplayedJournal {
@@ -13,8 +13,9 @@ export class SessionJournal {
     readonly header: JournalHeader,
   ) {}
 
+  private static pending = new Map<string, JournalHeader>()
+
   static create(dir: string, sessionId: string = crypto.randomUUID()): SessionJournal {
-    mkdirSync(dir, { recursive: true })
     const header: JournalHeader = {
       v: JOURNAL_VERSION,
       kind: "butterfly-session",
@@ -22,8 +23,13 @@ export class SessionJournal {
       createdAt: now(),
     }
     const path = join(dir, `${sessionId}.jsonl`)
-    writeFileSync(path, `${JSON.stringify(header)}\n`)
+    SessionJournal.pending.set(path, header)
     return new SessionJournal(path, header)
+  }
+
+  /** True once the journal exists on disk (i.e. it has at least one event). */
+  get persisted(): boolean {
+    return !SessionJournal.pending.has(this.path)
   }
 
   static open(path: string): SessionJournal {
@@ -33,10 +39,19 @@ export class SessionJournal {
 
   append(event: SessionEvent): void {
     const validated = SessionEvent.parse(event)
+    const header = SessionJournal.pending.get(this.path)
+    if (header) {
+      mkdirSync(dirname(this.path), { recursive: true })
+      writeFileSync(this.path, `${JSON.stringify(header)}\n${JSON.stringify(validated)}\n`)
+      SessionJournal.pending.delete(this.path)
+      return
+    }
     appendFileSync(this.path, `${JSON.stringify(validated)}\n`)
   }
 
   static replay(path: string): ReplayedJournal {
+    const pendingHeader = SessionJournal.pending.get(path)
+    if (pendingHeader && !existsSync(path)) return { header: pendingHeader, events: [] }
     const lines = readFileSync(path, "utf8")
       .split("\n")
       .filter((line) => line.trim() !== "")
@@ -59,6 +74,8 @@ export class SessionJournal {
   }
 
   private static readHeader(path: string): JournalHeader {
+    const pendingHeader = SessionJournal.pending.get(path)
+    if (pendingHeader && !existsSync(path)) return pendingHeader
     const firstLine = readFileSync(path, "utf8").split("\n", 1)[0] ?? ""
     return SessionJournal.parseHeader(firstLine)
   }

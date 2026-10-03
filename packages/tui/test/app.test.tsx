@@ -522,7 +522,7 @@ test("/help lists commands in a configured session", async () => {
         home={tempDir("bfly-home-")}
       />
     ),
-    { width: 100, height: 64 },
+    { width: 100, height: 80 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/help")
@@ -788,7 +788,10 @@ test("/review with a bad revision range reports the git failure, not 'nothing to
   t.mockInput.pressEnter()
   const frame = await waitForFrameSlow(t, (f) => f.includes("git failed"))
   expect(frame).not.toContain("nothing to review")
-  const journals = readdirSync(join(cwd, ".butterfly", "sessions"))
+  // A failed review is a UI-only notice: nothing model-visible gets journaled
+  // (journals are lazy, so the sessions dir may not even exist — stronger still).
+  const sessionsDir = join(cwd, ".butterfly", "sessions")
+  const journals = existsSync(sessionsDir) ? readdirSync(sessionsDir) : []
   const events = journals.flatMap(
     (file) => SessionJournal.replay(join(cwd, ".butterfly", "sessions", file)).events,
   )
@@ -1100,7 +1103,7 @@ test("Enter on a bare / runs the selected command, not the raw slash", async () 
         home={tempDir("bfly-home-")}
       />
     ),
-    { width: 100, height: 64 },
+    { width: 100, height: 80 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/")

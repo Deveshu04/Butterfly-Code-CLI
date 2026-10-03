@@ -111,6 +111,6 @@ export async function syncRepo(cwd: string, db: GraphDb): Promise<SyncResult> {
     }
   }
 
-  db.setMeta("lastSync", String(Date.now()))
+  if (scanned > 0 || removed > 0) db.setMeta("lastSync", String(Date.now()))
   return { scanned, skipped, removed }
 }

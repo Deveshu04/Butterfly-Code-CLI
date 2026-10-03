@@ -1,4 +1,5 @@
 preload = ["@opentui/solid/preload"]
 
 [test]
-preload = ["@opentui/solid/preload"]
+# test-sandbox: one temp folder per run, removed at exit (scripts/test-sandbox.ts).
+preload = ["@opentui/solid/preload", "../../scripts/test-sandbox.ts"]

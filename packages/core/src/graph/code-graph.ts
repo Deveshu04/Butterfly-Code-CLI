@@ -23,6 +23,11 @@ export class CodeGraph {
     return new CodeGraph(cwd, db, opts?.now ?? Date.now)
   }
 
+  /** When the last sync finished (in memory — no-op syncs write nothing to disk). */
+  get lastSyncTime(): number | undefined {
+    return this.lastSyncAt > 0 ? this.lastSyncAt : undefined
+  }
+
   get mapPath(): string {
     return join(this.cwd, ".butterfly", PROJECT_MAP_FILE)
   }
