@@ -11,6 +11,7 @@ import type {
 } from "../provider/port"
 import { computeCostUSD, type ModelCost } from "../provider/pricing"
 import type { AskDecision, AskRequest, ToolRegistry, ToolRunResult } from "../tool/registry"
+import { TODO_STATE_KEY, type TodoItem } from "../tool/tools/todo"
 import { assemble } from "./assembly"
 import { compactSession, type ModelLimits, needsCompaction } from "./compaction"
 import { now, type SessionEvent, type Usage } from "./events"
@@ -64,6 +65,7 @@ export interface RunnerDeps {
   cost?: ModelCost
   maxSpendUSD?: number
   retries?: number
+  autoContinue?: number
   /** Lifecycle hooks — pre.tool hooks can BLOCK a tool call. */
   hooks?: HookConfig[]
   /** UI stream hook — deltas, tool calls, tool results. */
@@ -90,6 +92,8 @@ export interface TurnOutcome {
 
 export const DEFAULT_MAX_STEPS = 50
 export const DEFAULT_RETRIES = 3
+/** Auto-continue nudges per turn (RunnerDeps.autoContinue). */
+export const DEFAULT_AUTO_CONTINUE = 2
 const RETRY_BASE_MS = 2_000
 
 export function computeRetryBackoffMs(attempt: number, retryAfterSec?: number): number {
@@ -209,6 +213,10 @@ export async function runUserTurn(
   let interrupted = false
   let warned75 = false
   let warned90 = false
+  let continuations = 0
+  let lengthNudged = false
+  let lastNudgeTodos: string | undefined
+  let todoTouched = false
   const callFingerprints = new Map<string, number>()
   const REPEAT_LIMIT = 3
 
@@ -241,6 +249,34 @@ export async function runUserTurn(
     await runHooks(deps.hooks, "turn.start", { cwd: deps.cwd }, { onRun: journalHookRun }).catch(
       () => {},
     )
+  }
+
+  const planContinuation = (
+    reason: FinishReason | undefined,
+  ): { text: string; notice: string } | null => {
+    const limit = deps.autoContinue ?? DEFAULT_AUTO_CONTINUE
+    if (limit <= 0 || continuations >= limit) return null
+    if (reason === "length" && !lengthNudged) {
+      lengthNudged = true
+      return {
+        text: "[harness] Your last reply was cut off by the output-token limit. Continue exactly where it stopped — do not repeat what you already wrote.",
+        notice: `reply hit the output limit — continuing (${continuations + 1}/${limit})`,
+      }
+    }
+    if (reason !== "stop" || !todoTouched) return null
+    const todos = (state[TODO_STATE_KEY] as TodoItem[] | undefined) ?? []
+    const open = todos.filter((item) => item.status !== "completed")
+    if (open.length === 0) return null
+    const fingerprint = JSON.stringify(todos)
+    if (fingerprint === lastNudgeTodos) return null
+    lastNudgeTodos = fingerprint
+    const list = open
+      .map((item) => `${item.status === "in_progress" ? "[~]" : "[ ]"} ${item.text}`)
+      .join("\n")
+    return {
+      text: `[harness] You stopped, but your todo list still has ${open.length} unfinished item(s):\n${list}\nKeep going until they are done. If an item is actually finished, blocked, or no longer needed, update the todo list to say so (and why) — then end with a short summary.`,
+      notice: `${open.length} todo(s) still open — continuing (${continuations + 1}/${limit})`,
+    }
   }
 
   while (steps < maxSteps) {
@@ -414,6 +450,7 @@ export async function runUserTurn(
     }
 
     if (finish?.reason === "tool-calls" && toolCalls.length > 0) {
+      if (toolCalls.some((call) => call.name === "todo")) todoTouched = true
       for (const call of toolCalls) {
         if (interrupted || deps.signal?.aborted) {
           interrupted = true
@@ -552,6 +589,22 @@ export async function runUserTurn(
     }
     if (deps.signal?.aborted) interrupted = true
     abandonPendingCalls(toolCalls, "the turn ended before this call ran")
+
+    if (!interrupted && toolCalls.length === 0 && steps < maxSteps) {
+      const nudge = planContinuation(finish?.reason)
+      if (nudge) {
+        continuations += 1
+        journal.append({
+          type: "message.user",
+          id: crypto.randomUUID(),
+          text: nudge.text,
+          synthetic: true,
+          time: now(),
+        })
+        deps.onEvent?.({ type: "notice", text: nudge.notice })
+        continue
+      }
+    }
     break
   }
 

@@ -79,7 +79,9 @@ export interface TurnFacts {
 
 /** Facts about the latest turn, straight from the journal (zero tokens). */
 export function latestTurnFacts(events: SessionEvent[]): TurnFacts {
-  const lastUser = events.map((e) => e.type).lastIndexOf("message.user")
+  // Turn boundary = the last message a PERSON sent; auto-continue nudges
+  // (synthetic) are part of the same turn.
+  const lastUser = events.findLastIndex((e) => e.type === "message.user" && e.synthetic !== true)
   const slice = lastUser >= 0 ? events.slice(lastUser) : events
   const facts: TurnFacts = {
     userText: "",
@@ -90,7 +92,7 @@ export function latestTurnFacts(events: SessionEvent[]): TurnFacts {
     skillsLoaded: [],
   }
   for (const event of slice) {
-    if (event.type === "message.user") facts.userText = event.text
+    if (event.type === "message.user" && event.synthetic !== true) facts.userText = event.text
     else if (event.type === "tool.call") {
       facts.toolCalls += 1
       const input = event.input as { name?: unknown } | null

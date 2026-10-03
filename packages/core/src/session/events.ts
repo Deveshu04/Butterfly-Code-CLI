@@ -34,6 +34,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
     type: z.literal("message.user"),
     id: z.string(),
     text: z.string(),
+    synthetic: z.boolean().optional(),
     images: z
       .array(z.object({ path: z.string(), mediaType: z.string(), sha256: z.string() }))
       .optional(),

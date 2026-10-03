@@ -27,6 +27,11 @@ export const ButterflyConfig = z.object({
   /** Hard dollar ceiling per turn (priced from models.dev). */
   maxSpendUSD: z.number().positive().optional(),
   retries: z.number().int().min(0).optional(),
+  /**
+   * Auto-continue nudges per turn when the model stops with todos it was
+   * working still open, or its reply hit the output cap. Default 2; 0 off.
+   */
+  autoContinue: z.number().int().min(0).max(10).optional(),
   memory: z
     .object({
       /** Post-turn memory review. Default true. */

@@ -224,7 +224,12 @@ function reviewMessage(event: ReviewEvent): Message {
 export function timelineToMessages(timeline: import("@butterfly/core").SessionEvent[]): Message[] {
   const restored: Message[] = []
   for (const event of timeline) {
-    if (event.type === "message.user") restored.push({ kind: "user", text: event.text })
+    if (event.type === "message.user")
+      restored.push(
+        event.synthetic === true
+          ? { kind: "info", text: "auto-continue: the harness nudged the model to keep going" }
+          : { kind: "user", text: event.text },
+      )
     else if (event.type === "message.assistant") {
       const split = splitThink(event.text)
       if (split.rest.trim() !== "" || split.thinking !== "") {
@@ -2512,6 +2517,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(reasoning() !== undefined ? { reasoning: reasoning() } : {}),
         ...(limit ? { limits: { context: limit } } : {}),
         ...(config().retries !== undefined ? { retries: config().retries } : {}),
+        ...(config().autoContinue !== undefined ? { autoContinue: config().autoContinue } : {}),
         ...(config().small_model ? { smallModel: config().small_model } : {}),
         imageInputSupported: imageInputSupported(),
         ask: (request) => askPermission(request, turnRules),

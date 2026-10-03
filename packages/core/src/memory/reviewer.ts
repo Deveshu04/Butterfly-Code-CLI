@@ -27,11 +27,14 @@ const TURN_RENDER_CAP = 8_000
 
 export function renderLatestTurn(journalPath: string): string {
   const { events } = SessionJournal.replay(journalPath)
-  const lastUser = events.map((e) => e.type).lastIndexOf("message.user")
+  // Turn boundary = the last message a PERSON sent; auto-continue nudges
+  // (synthetic) are part of the same turn.
+  const lastUser = events.findLastIndex((e) => e.type === "message.user" && e.synthetic !== true)
   const slice = lastUser >= 0 ? events.slice(lastUser) : events
   const lines: string[] = []
   for (const event of slice) {
-    if (event.type === "message.user") lines.push(`user: ${event.text}`)
+    if (event.type === "message.user")
+      lines.push(`${event.synthetic === true ? "harness" : "user"}: ${event.text}`)
     else if (event.type === "message.assistant" && event.text !== "")
       lines.push(`assistant: ${event.text}`)
     else if (event.type === "tool.call")
