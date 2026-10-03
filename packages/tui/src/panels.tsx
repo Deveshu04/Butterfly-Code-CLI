@@ -5,6 +5,10 @@ import {
   agentRows,
   agentStripLine,
   planWindow,
+  type ShellView,
+  shellCounts,
+  shellRow,
+  shellStripLine,
   type TodoItemView,
   todoProgress,
   todoRows,
@@ -104,6 +108,8 @@ export function Sidebar(props: {
   selectedAgentKey?: string
   usage: UsageView
   files: string[]
+  shells: ShellView[]
+  now: number
 }) {
   const inner = () => props.width - 4
   const progress = () => todoProgress(props.todos)
@@ -146,6 +152,9 @@ export function Sidebar(props: {
           />
           <text fg={themeTokens().muted}>Alt+Left/Right view · Esc back</text>
         </Section>
+      </Show>
+      <Show when={props.shells.length > 0}>
+        <ShellsSection shells={props.shells} now={props.now} width={inner()} />
       </Show>
       <Show when={props.files.length > 0}>
         <Section title={`Files changed ${props.files.length}`}>
@@ -195,6 +204,27 @@ export function AgentsPane(props: { width: number; agents: AgentEntry[]; selecte
   )
 }
 
+function ShellsSection(props: { shells: ShellView[]; now: number; width: number }) {
+  const counts = () => shellCounts(props.shells)
+  return (
+    <Section
+      title={
+        counts().running > 0
+          ? `Shells ${counts().running} running`
+          : `Shells ${props.shells.length}`
+      }
+    >
+      <For each={props.shells}>
+        {(shell) => (
+          <text fg={shell.status === "running" ? themeTokens().accent : themeTokens().muted}>
+            {shellRow(shell, props.now, props.width)}
+          </text>
+        )}
+      </For>
+    </Section>
+  )
+}
+
 /**
  * Narrow layout: plan and agents pinned above the composer, one line each;
  * Ctrl+T expands the plan to its items (up to 8 rows).
@@ -204,11 +234,14 @@ export function PinnedStrip(props: {
   agents: AgentEntry[]
   width: number
   expanded: boolean
+  shells: ShellView[]
+  now: number
 }) {
   const plan = () => todoStripLine(props.todos, props.width - 4)
   const agents = () => agentStripLine(props.agents)
+  const shells = () => shellStripLine(props.shells, props.now)
   return (
-    <Show when={plan() !== "" || agents() !== ""}>
+    <Show when={plan() !== "" || agents() !== "" || shells() !== ""}>
       <box flexShrink={0} flexDirection="column" paddingLeft={2} paddingRight={2}>
         <Show when={plan() !== ""}>
           <Show
@@ -223,6 +256,9 @@ export function PinnedStrip(props: {
         </Show>
         <Show when={agents() !== ""}>
           <text fg={themeTokens().muted}>{agents()}</text>
+        </Show>
+        <Show when={shells() !== ""}>
+          <text fg={themeTokens().accent}>{shells()}</text>
         </Show>
       </box>
     </Show>

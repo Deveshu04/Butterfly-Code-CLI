@@ -174,8 +174,12 @@ import {
   compactToolResult,
   type LayoutPlan,
   planLayout,
+  type ShellView,
   type SidebarPref,
+  shortElapsed,
   type TodoItemView,
+  type ToolTone,
+  toolTone,
 } from "./layout"
 import {
   applyLoopEvent,
@@ -233,6 +237,11 @@ interface Message {
   summary?: string
   /** Tool-call rows: still executing (live sessions only). */
   pending?: boolean
+  action?: boolean
+  /** Tool-call rows: when the call started (live) — drives "running 12s". */
+  startedAt?: number
+  /** Command cells: how long the command ran. */
+  durationMs?: number
   live?: { text: Accessor<string>; set: Setter<string> }
   /** Unified diff for edit results — rendered with the diff element. */
   diff?: string
@@ -274,6 +283,7 @@ function liveText(message: Message): string {
 
 export function timelineToMessages(timeline: import("@butterfly/core").SessionEvent[]): Message[] {
   const restored: Message[] = []
+  const callTimes = new Map<string, number>()
   for (const event of timeline) {
     if (event.type === "message.user")
       restored.push(
@@ -286,15 +296,20 @@ export function timelineToMessages(timeline: import("@butterfly/core").SessionEv
       if (split.rest.trim() !== "" || split.thinking !== "") {
         restored.push({ kind: "assistant", text: event.text })
       }
-    } else if (event.type === "tool.call")
+    } else if (event.type === "tool.call") {
+      callTimes.set(event.callId, Date.parse(event.time))
       restored.push(toolCallMessage(event.name, event.input, event.callId))
-    else if (event.type === "tool.result") {
+    } else if (event.type === "tool.result") {
+      // Journal timestamps give replayed command cells their duration too.
+      const started = callTimes.get(event.callId)
+      const took = started !== undefined ? Date.parse(event.time) - started : undefined
       const folded = applyToolResult(
         restored,
         event.callId,
         event.output,
         event.isError,
         event.meta,
+        took !== undefined && !Number.isNaN(took) ? took : undefined,
       )
       restored.length = 0
       restored.push(...folded)
@@ -434,6 +449,7 @@ function toolCallMessage(name: string, input: unknown, callId?: string): Message
     kind: "tool",
     text: `${name} ${toolCallArgs(name, input)}`,
     isCall: true,
+    action: true,
     toolName: name,
     ...(callId !== undefined ? { callId } : {}),
   }
@@ -443,6 +459,7 @@ function toolResultMessage(output: string, isError: boolean, meta: unknown): Mes
   const bash = metaBash(meta)
   return {
     kind: isError ? "error" : "tool",
+    action: true,
     text: `  ${formatToolResult(output, isError)}`,
     ...(metaDiff(meta) ?? {}),
     ...(metaTodos(meta) ?? {}),
@@ -462,9 +479,25 @@ function applyToolResult(
   output: string,
   isError: boolean,
   meta: unknown,
+  durationMs?: number,
 ): Message[] {
   const at = list.findIndex((m) => m.isCall && m.callId === callId)
   const row = at >= 0 ? list[at] : undefined
+  const took = durationMs ?? (row?.startedAt !== undefined ? Date.now() - row.startedAt : undefined)
+  const bash = metaBash(meta)
+  if (row && bash) {
+    const next = [...list]
+    next[at] = {
+      ...row,
+      kind: isError ? "error" : "tool",
+      pending: false,
+      command: bash.command,
+      exitCode: bash.exitCode,
+      commandBody: formatCommandBody(output, isError),
+      ...(took !== undefined ? { durationMs: took } : {}),
+    }
+    return next
+  }
   const todos = metaTodos(meta)?.todos
   const summary =
     !isError && row?.toolName && metaDiff(meta) === undefined && metaBash(meta) === undefined
@@ -573,26 +606,57 @@ function Tint(props: { fg: string; children: string }) {
   return <span {...({ fg: props.fg } as unknown as Record<string, never>)}>{props.children}</span>
 }
 
-function ToolCallRow(props: { text: string; summary?: string; pending?: boolean }) {
+/** Verb colour per tool family (layout.toolTone). */
+function toneColor(tone: ToolTone): string {
+  const t = themeTokens()
+  switch (tone) {
+    case "read":
+      return t.link
+    case "edit":
+      return t.warn
+    case "shell":
+      return t.accent
+    case "agent":
+      return t.type
+    case "plan":
+      return t.muted
+    default:
+      return t.fg
+  }
+}
+
+function ToolCallRow(props: {
+  text: string
+  summary?: string
+  pending?: boolean
+  /** Live elapsed for a running call ("running 12s"), from the 1s ticker. */
+  runningFor?: string
+}) {
   const spaceIndex = () => props.text.indexOf(" ")
   const name = () => (spaceIndex() === -1 ? props.text : props.text.slice(0, spaceIndex()))
   const args = () => (spaceIndex() === -1 ? "" : props.text.slice(spaceIndex() + 1))
   return (
     <text>
-      {name()}
-      <Tint fg={themeTokens().muted}>{args() !== "" ? ` ${args()}` : ""}</Tint>
+      <Tint fg={toneColor(toolTone(name()))}>{name() === "bash" ? "$" : name()}</Tint>
+      <Tint fg={name() === "bash" ? themeTokens().fg : themeTokens().muted}>
+        {args() !== "" ? ` ${args()}` : ""}
+      </Tint>
       <Tint fg={themeTokens().success}>
         {props.summary !== undefined ? ` · ${props.summary}` : ""}
       </Tint>
       <Tint fg={themeTokens().muted}>
-        {props.pending && props.summary === undefined ? " ..." : ""}
+        {props.pending && props.summary === undefined
+          ? props.runningFor
+            ? `  running ${props.runningFor}`
+            : " ..."
+          : ""}
       </Tint>
     </text>
   )
 }
 
 function messageMarginTop(message: Message, previous?: Message): number {
-  if (message.isCall && previous?.isCall) return 0
+  if (message.action && previous?.action) return 0
   return message.kind === "user" || message.kind === "info" || message.isCall ? 1 : 0
 }
 
@@ -967,6 +1031,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     if (busy()) setElapsedTick((t) => t + 1)
   }, 1000)
   onCleanup(() => clearInterval(elapsedTimer))
+  /** "12s" for a call started at `startedAt`, re-rendered by the 1s ticker. */
+  const runningFor = (startedAt: number): string => {
+    elapsedTick()
+    return shortElapsed(Date.now() - startedAt)
+  }
   const elapsedText = (): string => {
     elapsedTick() // subscribe: re-render once a second while busy
     const start = turnStartedAt()
@@ -1487,7 +1556,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         if (live.some((m) => m.progressId === event.callId)) {
           setMessages(live.filter((m) => m.progressId !== event.callId))
         }
-        push({ ...toolCallMessage(event.name, event.input, event.callId), pending: true })
+        push({
+          ...toolCallMessage(event.name, event.input, event.callId),
+          pending: true,
+          startedAt: Date.now(),
+        })
         break
       }
       case "tool-progress": {
@@ -3392,6 +3465,44 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }),
   )
   const viewedAgent = () => agents().find((a) => a.key === agentView())
+  const [bgShells, setBgShells] = createSignal<ShellView[]>([])
+  let bgShellsKey = ""
+  const bgPoll = setInterval(() => {
+    const list: ShellView[] = bgTasks.list().map((task) => ({
+      kind: "bg" as const,
+      id: task.id,
+      command: task.command,
+      status: task.status,
+      startedAt: Date.parse(task.startedAt),
+      ...(task.exitCode !== undefined ? { exitCode: task.exitCode } : {}),
+    }))
+    const key = list.map((t) => `${t.id}:${t.status}`).join(",")
+    if (key !== bgShellsKey) {
+      bgShellsKey = key
+      setBgShells(list)
+    }
+    // Keep running background shells' elapsed times moving while idle too.
+    if (!busy() && list.some((t) => t.status === "running")) setElapsedTick((t) => t + 1)
+  }, 1000)
+  onCleanup(() => clearInterval(bgPoll))
+  const shells = (): ShellView[] => [
+    ...messages()
+      .filter((m) => m.pending && m.toolName === "bash" && m.startedAt !== undefined)
+      .map((m) => ({
+        kind: "fg" as const,
+        id: m.callId ?? "fg",
+        command: m.text.replace(/^bash /, ""),
+        status: "running" as const,
+        startedAt: m.startedAt as number,
+      })),
+    ...bgShells().slice(-8),
+  ]
+  /** Wall clock for elapsed shell times — ticks once a second while busy. */
+  const clock = (): number => {
+    elapsedTick()
+    return Date.now()
+  }
+
   const agentPoll = setInterval(() => {
     const agent = viewedAgent()
     if (agent && (agent.phase === "running" || agent.phase === "queued")) loadAgentMessages(agent)
@@ -3645,6 +3756,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                         displayed()[index() - 1],
                                       )}
                                       flexDirection="column"
+                                      {...(message.action
+                                        ? {
+                                            border: ["left" as const],
+                                            borderStyle: "single" as const,
+                                            borderColor: themeTokens().border,
+                                            paddingLeft: 1,
+                                          }
+                                        : {})}
                                     >
                                       <Show
                                         when={message.errorInfo}
@@ -3683,6 +3802,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                                       text={message.text}
                                                       summary={message.summary}
                                                       pending={message.pending}
+                                                      runningFor={
+                                                        message.pending &&
+                                                        message.startedAt !== undefined
+                                                          ? runningFor(message.startedAt)
+                                                          : undefined
+                                                      }
                                                     />
                                                   </Show>
                                                 }
@@ -3699,9 +3824,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                                           : themeTokens().error
                                                       }
                                                     >
-                                                      {message.exitCode === 0
-                                                        ? "ok"
-                                                        : `exit ${message.exitCode}`}
+                                                      {`${message.exitCode === 0 ? "ok" : `exit ${message.exitCode}`}${message.durationMs !== undefined ? ` · ${shortElapsed(message.durationMs)}` : ""}`}
                                                     </text>
                                                   </box>
                                                   <Show
@@ -3846,6 +3969,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               costUSD: formatUSD(sessionCost()),
             }}
             files={changedFiles()}
+            shells={shells()}
+            now={clock()}
           />
         </Show>
       </box>
@@ -3857,6 +3982,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           agents={agents()}
           width={dimensions().width}
           expanded={planExpanded()}
+          shells={shells()}
+          now={clock()}
         />
       </Show>
 

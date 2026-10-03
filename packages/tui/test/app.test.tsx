@@ -4678,3 +4678,45 @@ test("narrow terminal: plan and agents stay pinned above the composer", async ()
     server.stop()
   }
 }, 40_000)
+
+test("actions sit behind a rail apart from prose; a running shell shows live and in the Shells panel", async () => {
+  const cwd = tempDir("bfly-tui-rail-")
+  await gitFixture(cwd)
+  writeFileSync(join(cwd, "a.ts"), "x\n".repeat(30))
+  const server = startFakeSequenceServer([
+    toolCallStreamBody("read", { file_path: "a.ts" }, "r1"),
+    toolCallStreamBody("bash", { command: "sleep 2 && echo built" }, "b1"),
+    textStreamBody("The build passes."),
+  ])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/m",
+            providers: { fake: { baseURL: server.baseURL } },
+            permissions: { "*": "allow" },
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 140, height: 26 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("build it")
+    t.mockInput.pressEnter()
+    const running = await waitForFrameSlow(t, (f) => f.includes("Shells 1 running"))
+    expect(running).toContain("│ read a.ts · 30 lines")
+    expect(running).toMatch(/│ \$ sleep 2 && echo built\s+running \d+s/)
+    expect(running).toContain("> fg  sleep 2 && echo built")
+    const done = await waitForFrameSlow(t, (f) => f.includes("The build passes."), 20_000)
+    expect(done).toMatch(/│ \$ sleep 2 && echo built\s+ok · \ds/)
+    // Prose has no rail.
+    expect(done).not.toContain("│ The build passes.")
+    expect(done).not.toContain("Shells 1 running")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 40_000)

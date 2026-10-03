@@ -246,3 +246,84 @@ export function compactToolResult(name: string, output: string): string | undefi
       return undefined
   }
 }
+
+// --- actions vs. words --------------------------------------------------------
+
+export type ToolTone = "read" | "edit" | "shell" | "agent" | "plan" | "other"
+
+export function toolTone(name: string): ToolTone {
+  switch (name) {
+    case "read":
+    case "glob":
+    case "grep":
+    case "explore":
+    case "web":
+    case "memory":
+    case "skill":
+    case "mcp":
+      return "read"
+    case "edit":
+      return "edit"
+    case "bash":
+      return "shell"
+    case "task":
+      return "agent"
+    case "todo":
+      return "plan"
+    default:
+      return "other"
+  }
+}
+
+// --- shells -------------------------------------------------------------------
+
+/** A shell the user should know about: a foreground bash call or a background task. */
+export interface ShellView {
+  kind: "fg" | "bg"
+  /** Background task id ("bg1"), or the call id for foreground commands. */
+  id: string
+  command: string
+  status: "running" | "exited" | "killed"
+  startedAt: number
+  exitCode?: number
+}
+
+/** "12s", "3m 04s", "1h 02m" — compact, for panel rows. */
+export function shortElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, "0")}s`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`
+}
+
+export function shellCounts(shells: ShellView[]): { running: number; background: number } {
+  return {
+    running: shells.filter((s) => s.status === "running").length,
+    background: shells.filter((s) => s.kind === "bg" && s.status === "running").length,
+  }
+}
+
+export function shellRow(shell: ShellView, now: number, width: number): string {
+  const tag = shell.kind === "fg" ? "fg " : shell.id.padEnd(3)
+  const state =
+    shell.status === "running"
+      ? shortElapsed(now - shell.startedAt)
+      : shell.status === "killed"
+        ? "killed"
+        : `exit ${shell.exitCode ?? "?"}`
+  const mark = shell.status === "running" ? ">" : " "
+  const room = Math.max(6, width - tag.length - state.length - 4)
+  const command = shell.command.replace(/\s+/g, " ")
+  const cut = command.length > room ? `${command.slice(0, room - 1)}~` : command.padEnd(room)
+  return `${mark} ${tag} ${cut} ${state}`
+}
+
+export function shellStripLine(shells: ShellView[], now: number): string {
+  const running = shells.filter((s) => s.status === "running")
+  if (running.length === 0) return ""
+  const first = running[0] as ShellView
+  const lead = `${first.command.replace(/\s+/g, " ").slice(0, 40)} ${shortElapsed(now - first.startedAt)}`
+  const bg = running.filter((s) => s.kind === "bg").length
+  return `shells ${running.length} running: ${lead}${running.length > 1 ? ` +${running.length - 1}` : ""}${bg > 0 ? ` (${bg} background)` : ""}`
+}
