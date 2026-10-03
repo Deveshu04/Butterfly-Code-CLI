@@ -17,7 +17,7 @@ import { compactSession, type ModelLimits, needsCompaction } from "./compaction"
 import { now, type SessionEvent, type Usage } from "./events"
 import { type HookConfig, type HookRunRecord, runHooks } from "./hooks"
 import { SessionJournal } from "./journal"
-import { foldTimeline, project } from "./projector"
+import { foldTimeline, PRUNED_PLACEHOLDER, project } from "./projector"
 import { planPrune } from "./prune"
 import { isTodoCall, todosFromTimeline } from "./todo-state"
 
@@ -307,6 +307,13 @@ export async function runUserTurn(
     }
 
     const projected = project(header, timelineEvents)
+    /** Results the model can see in THIS step's request (read dedup). */
+    const visibleResults = new Set<string>()
+    for (const event of projected.timeline) {
+      if (event.type === "tool.result" && !event.isError && event.output !== PRUNED_PLACEHOLDER) {
+        visibleResults.add(event.callId)
+      }
+    }
     const messages = assemble({
       system: deps.system,
       timeline: projected.timeline,
@@ -501,6 +508,8 @@ export async function runUserTurn(
                     }
                   : await registry.run(call.name, call.input, {
                       cwd: deps.cwd,
+                      callId: call.callId,
+                      isResultVisible: (id) => visibleResults.has(id),
                       rules: deps.rules,
                       ask: deps.ask,
                       state,

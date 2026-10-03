@@ -11,6 +11,14 @@ export const readInput = z.object({
 
 export const DEFAULT_READ_LIMIT = 500
 
+/** ctx.state key: identical-read cache (path + window → content hash + callId). */
+export const READ_CACHE_KEY = "readCache"
+
+interface ReadRecord {
+  hash: string
+  callId: string
+}
+
 export const readTool: ToolDefinition<z.infer<typeof readInput>> = {
   name: "read",
   description:
@@ -29,6 +37,17 @@ export const readTool: ToolDefinition<z.infer<typeof readInput>> = {
         isError: true,
       }
     }
+
+    const cache = (ctx.state[READ_CACHE_KEY] ??= new Map()) as Map<string, ReadRecord>
+    const key = `${path}\0${input.offset ?? 1}\0${input.limit ?? DEFAULT_READ_LIMIT}`
+    const hash = Bun.hash(content).toString(36)
+    const previous = cache.get(key)
+    if (previous && previous.hash === hash && ctx.isResultVisible?.(previous.callId) === true) {
+      return {
+        output: `[unchanged] ${input.file_path}: this exact range is identical to your earlier read in this conversation — use that result instead of reading it again.`,
+      }
+    }
+    if (ctx.callId !== undefined) cache.set(key, { hash, callId: ctx.callId })
 
     const lines = content.split("\n")
     if (lines.at(-1) === "") lines.pop()
