@@ -216,6 +216,8 @@ export async function runUserTurn(
   let warned90 = false
   let continuations = 0
   let lengthNudged = false
+  /** Context-overflow recovery runs at most once per turn. */
+  let overflowRecovered = false
   let lastNudgeTodos: string | undefined
   let todoTouched = false
   const callFingerprints = new Map<string, number>()
@@ -306,19 +308,23 @@ export async function runUserTurn(
       timelineEvents = [...events, fragmentEvent]
     }
 
-    const projected = project(header, timelineEvents)
     /** Results the model can see in THIS step's request (read dedup). */
     const visibleResults = new Set<string>()
-    for (const event of projected.timeline) {
-      if (event.type === "tool.result" && !event.isError && event.output !== PRUNED_PLACEHOLDER) {
-        visibleResults.add(event.callId)
+    const buildMessages = (source: SessionEvent[]) => {
+      const projected = project(header, source)
+      visibleResults.clear()
+      for (const event of projected.timeline) {
+        if (event.type === "tool.result" && !event.isError && event.output !== PRUNED_PLACEHOLDER) {
+          visibleResults.add(event.callId)
+        }
       }
+      return assemble({
+        system: deps.system,
+        timeline: projected.timeline,
+        imageInputSupported: deps.imageInputSupported === true,
+      })
     }
-    const messages = assemble({
-      system: deps.system,
-      timeline: projected.timeline,
-      imageInputSupported: deps.imageInputSupported === true,
-    })
+    let messages = buildMessages(timelineEvents)
 
     let stepText = ""
     const toolCalls: ToolCallPart[] = []
@@ -364,6 +370,34 @@ export async function runUserTurn(
       if (!failure) break
 
       const kind = failure.info?.kind
+
+      if (kind === "context_length" && !overflowRecovered && !deps.signal?.aborted) {
+        overflowRecovered = true
+        const { events: current } = SessionJournal.replay(journal.path)
+        const victims = planPrune(current, {
+          ...(deps.pruneWindowTokens !== undefined ? { windowTokens: deps.pruneWindowTokens } : {}),
+        })
+        if (victims.length > 0) {
+          journal.append({ type: "tool.pruned", callIds: victims, time: now() })
+        }
+        const compacted = await compactSession({
+          provider: deps.provider,
+          model: deps.smallModel ?? deps.model,
+          journal,
+          ...(deps.compactKeepTokens !== undefined ? { keepTokens: deps.compactKeepTokens } : {}),
+        }).catch(() => null)
+        if (victims.length > 0 || compacted) {
+          deps.onEvent?.({ type: "step-retracted", attempt })
+          deps.onEvent?.({
+            type: "notice",
+            text: "request exceeded the model's context window — compacted the transcript, retrying",
+          })
+          messages = buildMessages(SessionJournal.replay(journal.path).events)
+          attempt -= 1 // the recovery is not a transient-failure retry
+          continue
+        }
+      }
+
       const retryable = kind !== undefined && RETRYABLE_ERROR_KINDS.has(kind)
       if (!retryable || attempt > maxRetries) {
         deps.onEvent?.(failure)
