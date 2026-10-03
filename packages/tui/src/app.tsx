@@ -133,7 +133,16 @@ import {
   useSelectionHandler,
   useTerminalDimensions,
 } from "@opentui/solid"
-import { type Accessor, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import {
+  type Accessor,
+  createMemo,
+  createSignal,
+  For,
+  onCleanup,
+  onMount,
+  type Setter,
+  Show,
+} from "solid-js"
 import { capOsc52Text, saveClipboardImage } from "./clipboard"
 import {
   type CommandActions,
@@ -206,6 +215,7 @@ interface Message {
   text: string
   /** Live tool-progress line (callId) — replaced in place, removed on the result. */
   progressId?: string
+  live?: { text: Accessor<string>; set: Setter<string> }
   /** Unified diff for edit results — rendered with the diff element. */
   diff?: string
   path?: string
@@ -237,6 +247,11 @@ function reviewMessage(event: ReviewEvent): Message {
     kind: "tool",
     text: `review — ${event.scope ?? "the current diff"}${size}:\n${event.summary}`,
   }
+}
+
+/** A message's current text — the live streaming channel when it has one. */
+function liveText(message: Message): string {
+  return message.live ? message.live.text() : message.text
 }
 
 export function timelineToMessages(timeline: import("@butterfly/core").SessionEvent[]): Message[] {
@@ -1051,24 +1066,35 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
 
-  const appendAssistant = (text: string) => {
-    const all = [...messages()]
+  const appendAssistantNow = (text: string) => {
+    const all = messages()
     const last = all.at(-1)
-    const combined = last?.kind === "assistant" ? last.text + text : text
-    const startedAt = last?.kind === "assistant" ? (last.thinkStartedAt ?? Date.now()) : Date.now()
-    const alreadyClosedAt = last?.kind === "assistant" ? last.thinkClosedAt : undefined
-    const split = splitThink(combined)
-    const closedAt =
-      alreadyClosedAt ?? (split.thinking !== "" && !split.open ? Date.now() : undefined)
-    const updated: Message = {
-      kind: "assistant",
-      text: combined,
-      thinkStartedAt: startedAt,
-      ...(closedAt !== undefined ? { thinkClosedAt: closedAt } : {}),
+    if (last?.kind === "assistant" && last.live) {
+      // Same row, new text: update in place (see Message.live).
+      const combined = last.text + text
+      last.text = combined
+      last.live.set(combined)
+      if (last.thinkClosedAt === undefined) {
+        const split = splitThink(combined)
+        if (split.thinking !== "" && !split.open) {
+          // Inline </think> just landed: one object swap to stamp the close.
+          const copy = [...all]
+          copy[copy.length - 1] = { ...last, thinkClosedAt: Date.now() }
+          setMessages(copy)
+        }
+      }
+      return
     }
-    if (last?.kind === "assistant") all[all.length - 1] = updated
-    else all.push(updated)
-    setMessages(all)
+    const split = splitThink(text)
+    const [liveText, setLiveText] = createSignal(text)
+    const created: Message = {
+      kind: "assistant",
+      text,
+      live: { text: liveText, set: setLiveText },
+      thinkStartedAt: Date.now(),
+      ...(split.thinking !== "" && !split.open ? { thinkClosedAt: Date.now() } : {}),
+    }
+    setMessages([...all, created])
   }
 
   const openMentionPicker = () => {
@@ -1179,18 +1205,57 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   let stepAnchor = 0
 
-  const appendReasoning = (text: string) => {
-    const all = [...messages()]
+  const appendReasoningNow = (text: string) => {
+    const all = messages()
     const last = all.at(-1)
-    if (last?.kind === "thinking" && last.thinkClosedAt === undefined) {
-      all[all.length - 1] = { ...last, text: last.text + text }
-    } else {
-      all.push({ kind: "thinking", text, thinkStartedAt: Date.now() })
+    if (last?.kind === "thinking" && last.thinkClosedAt === undefined && last.live) {
+      last.text += text
+      last.live.set(last.text)
+      return
     }
-    setMessages(all)
+    const [liveText, setLiveText] = createSignal(text)
+    setMessages([
+      ...all,
+      {
+        kind: "thinking",
+        text,
+        live: { text: liveText, set: setLiveText },
+        thinkStartedAt: Date.now(),
+      },
+    ])
   }
 
+  let pendingDelta: { kind: "text" | "reasoning"; text: string } | undefined
+  let deltaTimer: ReturnType<typeof setTimeout> | undefined
+  const flushDeltas = () => {
+    if (deltaTimer !== undefined) {
+      clearTimeout(deltaTimer)
+      deltaTimer = undefined
+    }
+    const pending = pendingDelta
+    pendingDelta = undefined
+    if (!pending) return
+    if (pending.kind === "text") appendAssistantNow(pending.text)
+    else appendReasoningNow(pending.text)
+  }
+  const queueDelta = (kind: "text" | "reasoning", text: string) => {
+    if (pendingDelta && pendingDelta.kind !== kind) flushDeltas()
+    pendingDelta = pendingDelta ? { kind, text: pendingDelta.text + text } : { kind, text }
+    deltaTimer ??= setTimeout(flushDeltas, flushDelayMs())
+  }
+  const flushDelayMs = (): number => {
+    const last = messages().at(-1)
+    const length = last?.live ? last.text.length : 0
+    return Math.min(250, Math.max(16, Math.floor(length / 40)))
+  }
+  const appendAssistant = (text: string) => queueDelta("text", text)
+  const appendReasoning = (text: string) => queueDelta("reasoning", text)
+
+  /** A native thinking block may be open (reasoning streamed since the last close). */
+  let reasoningOpen = false
   const finalizeOpenThinking = () => {
+    flushDeltas()
+    reasoningOpen = false
     const all = [...messages()]
     let changed = false
     for (let i = all.length - 1; i >= 0; i--) {
@@ -1209,12 +1274,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   }
 
   const onEvent = (event: RunnerEvent) => {
+    if (event.type !== "text-delta" && event.type !== "reasoning-delta") flushDeltas()
     switch (event.type) {
       case "reasoning-delta":
+        reasoningOpen = true
         appendReasoning(event.text)
         break
       case "text-delta":
-        finalizeOpenThinking()
+        if (reasoningOpen) finalizeOpenThinking()
         appendAssistant(event.text)
         break
       case "tool-call":
@@ -2592,6 +2659,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
 
     push({ kind: "user", text: task })
+    setTimeout(() => {
+      if (scroll && !scroll.isDestroyed) scroll.scrollTo(scroll.scrollHeight)
+    }, 0)
     const ref = modelRef()
     if (!ref) {
       push({ kind: "info", text: "No model configured — run /setup first." })
@@ -3223,8 +3293,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 >
                   <For each={messages()}>
                     {(message, index) => {
-                      const inlineThink =
-                        message.kind === "assistant" ? splitThink(message.text) : undefined
+                      const inlineThinkMemo =
+                        message.kind === "assistant"
+                          ? createMemo(() => splitThink(liveText(message)))
+                          : undefined
+                      const inlineThink = () => inlineThinkMemo?.()
                       return (
                         <Show
                           when={message.kind === "assistant"}
@@ -3362,7 +3435,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                               }
                             >
                               <ThinkingBlock
-                                thinkingText={message.text}
+                                thinkingText={liveText(message)}
                                 open={message.thinkClosedAt === undefined}
                                 startedAt={message.thinkStartedAt}
                                 closedAt={message.thinkClosedAt}
@@ -3372,11 +3445,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                           }
                         >
                           <box flexDirection="column">
-                            <Show when={inlineThink && inlineThink.thinking !== ""}>
+                            <Show when={(inlineThink()?.thinking ?? "") !== ""}>
                               <ThinkingBlock
-                                thinkingText={inlineThink?.thinking ?? ""}
+                                thinkingText={inlineThink()?.thinking ?? ""}
                                 open={
-                                  (inlineThink?.open ?? false) &&
+                                  (inlineThink()?.open ?? false) &&
                                   message.thinkClosedAt === undefined
                                 }
                                 startedAt={message.thinkStartedAt}
@@ -3384,10 +3457,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                 expanded={thinkingExpanded()}
                               />
                             </Show>
-                            <Show when={inlineThink && inlineThink.rest.trim() !== ""}>
+                            <Show when={(inlineThink()?.rest.trim() ?? "") !== ""}>
                               <box marginTop={1} flexShrink={0}>
                                 <markdown
-                                  content={inlineThink?.rest.trim() ?? ""}
+                                  content={inlineThink()?.rest.trim() ?? ""}
                                   syntaxStyle={SYNTAX}
                                   streaming={busy() && index() === messages().length - 1}
                                   internalBlockMode="top-level"

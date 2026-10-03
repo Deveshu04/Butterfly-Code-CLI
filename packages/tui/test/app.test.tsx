@@ -4495,3 +4495,73 @@ test("a turn that edits without running a check ends with an 'unverified' line",
     server.stop()
   }
 }, 30_000)
+
+/** A long reply streamed in ~360 small chunks (1ms apart), like a real model. */
+function startChunkedStreamServer(points: number): { baseURL: string; stop: () => void } {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => {
+      const enc = new TextEncoder()
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (o: unknown) => controller.enqueue(enc.encode(sseChunk(o)))
+          send({ id: "1", choices: [{ index: 0, delta: { role: "assistant", content: "" } }] })
+          for (let i = 1; i <= points; i++) {
+            for (const part of [
+              `${i}. **Point ${i}**: `,
+              "a fairly long explanation line ",
+              `number ${i}.\n`,
+            ]) {
+              send({ id: "1", choices: [{ index: 0, delta: { content: part } }] })
+              await new Promise((r) => setTimeout(r, 1))
+            }
+          }
+          send({
+            id: "1",
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+          })
+          controller.enqueue(enc.encode("data: [DONE]\n\n"))
+          controller.close()
+        },
+      })
+      return new Response(stream, { headers: { "content-type": "text/event-stream" } })
+    },
+  })
+  return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
+}
+
+test("a long many-chunk reply streams in step with the model and the view follows its end", async () => {
+  const server = startChunkedStreamServer(120)
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={tempDir("bfly-tui-")}
+          config={{ model: "fake/m", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 100, height: 30 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("list 120 points")
+    t.mockInput.pressEnter()
+    const started = Date.now()
+    let sawMiddle = false
+    const done = await waitForFrameSlow(
+      t,
+      (frame) => {
+        if (frame.includes("Point 60")) sawMiddle = true
+        return frame.includes("Point 120") && frame.includes("1 steps")
+      },
+      20_000,
+    )
+    expect(Date.now() - started).toBeLessThan(12_000)
+    expect(sawMiddle).toBe(true) // it streamed — the middle was on screen at some point
+    expect(done).toContain("120. Point 120") // the view stuck to the end
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 40_000)
