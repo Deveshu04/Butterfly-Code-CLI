@@ -257,9 +257,20 @@ test("worktree isolation: a clean worktree (no changes made) is removed and prun
   expect(existsSync(meta.worktree.path)).toBe(false)
 }, 30_000)
 
-test("worktree isolation is refused outside a git repo, with no subagent turn spent", async () => {
+test("worktree isolation in a folder without git initializes one (snapshot commit, secrets excluded) and runs", async () => {
   const dir = nonRepoDir("bfly-task-wt-nogit-")
-  const provider = new MockProvider([])
+  writeFileSync(join(dir, "app.ts"), "export const a = 1\n")
+  writeFileSync(join(dir, ".env"), "SECRET=1\n")
+  const provider = new MockProvider([
+    [
+      { type: "text-delta", text: "looked around" },
+      {
+        type: "finish",
+        reason: "stop",
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      },
+    ],
+  ])
   const tool = createTaskTool({
     provider: () => provider,
     model: () => "mock",
@@ -269,15 +280,69 @@ test("worktree isolation is refused outside a git repo, with no subagent turn sp
     makeRegistry: () => new ToolRegistry(),
     makeMutatingRegistry: () => new ToolRegistry(),
   })
-
+  const progress: string[] = []
   const result = await tool.execute(
     { task: "x", isolation: "worktree" },
-    { cwd: dir, rules: { "*": "allow" }, state: {} },
+    { cwd: dir, rules: { "*": "allow" }, state: {}, progress: (line) => progress.push(line) },
   )
+  expect(result.isError).toBeFalsy()
+  expect(result.output).toContain("looked around")
+  expect(result.output).toContain("this folder was not a git repository, so one was initialized")
+  expect(progress.some((line) => line.includes("initialized"))).toBe(true)
+  const tracked = await runCommand("git ls-files", { cwd: dir })
+  expect(tracked.stdout).toContain("app.ts")
+  expect(tracked.stdout).not.toContain(".env")
+  expect(readFileSync(join(dir, ".git", "info", "exclude"), "utf8")).toContain(".butterfly/")
+}, 30_000)
 
+test("an ask-mode session is told about the git setup in the one isolation prompt", async () => {
+  const dir = nonRepoDir("bfly-task-wt-nogit-ask-")
+  const notes: string[] = []
+  const tool = createTaskTool({
+    provider: () => new MockProvider([]),
+    model: () => "mock",
+    system: () => "s",
+    cwd: dir,
+    sessionsDir: mkdtempSync(join(tmpdir(), "bfly-task-wt-sessions4-")),
+    makeRegistry: () => new ToolRegistry(),
+    makeMutatingRegistry: () => new ToolRegistry(),
+  })
+  const result = await tool.execute(
+    { task: "x", isolation: "worktree" },
+    {
+      cwd: dir,
+      rules: { "*": "ask" },
+      state: {},
+      ask: async (request) => {
+        notes.push(request.note ?? "")
+        return "deny"
+      },
+    },
+  )
   expect(result.isError).toBe(true)
-  expect(result.output.toLowerCase()).toContain("git repository")
-  expect(provider.requests.length).toBe(0)
+  expect(notes[0]).toContain("not a git repository, so one will be initialized here")
+  // Denied: nothing was created.
+  expect(existsSync(join(dir, ".git"))).toBe(false)
+}, 20_000)
+
+test("automatic git setup refuses a home folder, a filesystem root, or a huge tree", async () => {
+  const { autoGitRefusal, ensureGitForWorktrees } = await import("../src/tool/worktree")
+  const dir = nonRepoDir("bfly-task-wt-home-")
+  expect(autoGitRefusal(dir, dir)).toContain("home folder")
+  expect(autoGitRefusal("/", "/nowhere")).toContain("filesystem root")
+  const refused = await ensureGitForWorktrees(dir, { home: dir })
+  expect(refused.ok).toBe(false)
+  expect(existsSync(join(dir, ".git"))).toBe(false)
+})
+
+test("a repository with no commits gets a first snapshot commit", async () => {
+  const { ensureGitForWorktrees, worktreeGitState } = await import("../src/tool/worktree")
+  const dir = nonRepoDir("bfly-task-wt-empty-")
+  await runCommand("git init -q", { cwd: dir })
+  writeFileSync(join(dir, "a.txt"), "a\n")
+  expect(await worktreeGitState(dir)).toBe("no-commits")
+  expect(await ensureGitForWorktrees(dir)).toEqual({ ok: true, did: "first-commit" })
+  expect(await worktreeGitState(dir)).toBe("ready")
 }, 20_000)
 
 test("worktree isolation is denied harness-side when the caller's rules deny edit and bash (plan mode)", async () => {

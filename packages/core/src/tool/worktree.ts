@@ -1,5 +1,14 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { basename, join } from "node:path"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
+import { homedir } from "node:os"
+import { basename, dirname, join, resolve } from "node:path"
 import { GIT_TIMEOUT_MS, isGitRepo } from "../session/snapshot"
 import { runCommand } from "./shell"
 
@@ -28,6 +37,129 @@ export type CreateWorktreeResult =
       mainTreeDirty: boolean
     }
   | { ok: false; error: string }
+
+
+/** What worktree isolation needs before it can run here. */
+export type WorktreeGitState = "ready" | "no-repo" | "no-commits"
+
+export async function worktreeGitState(cwd: string): Promise<WorktreeGitState> {
+  if (!isGitRepo(cwd)) return "no-repo"
+  const head = await runCommand("git rev-parse --verify -q HEAD", {
+    cwd,
+    timeoutMs: GIT_TIMEOUT_MS,
+  })
+  return head.exitCode === 0 && !head.timedOut ? "ready" : "no-commits"
+}
+
+/**
+ * Never committed by the automatic snapshot: dependency/build output and
+ * secrets. Written to `.git/info/exclude` (the user's .gitignore is never
+ * touched), and an existing .gitignore still applies on top.
+ */
+export const AUTO_GIT_EXCLUDES = [
+  ".butterfly/",
+  "node_modules/",
+  "dist/",
+  "build/",
+  "out/",
+  "target/",
+  ".venv/",
+  "venv/",
+  "__pycache__/",
+  "*.log",
+  ".env",
+  ".env.*",
+]
+
+/** Refuse the automatic snapshot above this many files (a home dir, a dataset). */
+export const AUTO_GIT_MAX_FILES = 20_000
+
+const SKIP_DIRS = new Set([
+  ".git",
+  ...AUTO_GIT_EXCLUDES.filter((e) => e.endsWith("/")).map((e) => e.slice(0, -1)),
+])
+
+function countFiles(dir: string, limit: number): number {
+  let count = 0
+  const stack = [dir]
+  while (stack.length > 0 && count <= limit) {
+    const current = stack.pop() as string
+    let entries: import("node:fs").Dirent[]
+    try {
+      entries = readdirSync(current, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) stack.push(join(current, entry.name))
+      } else {
+        count += 1
+      }
+    }
+  }
+  return count
+}
+
+/** Why this folder must NOT be auto-initialized, or undefined when it is safe. */
+export function autoGitRefusal(cwd: string, home: string = homedir()): string | undefined {
+  const dir = resolve(cwd)
+  if (dirname(dir) === dir) return "the working directory is a filesystem root"
+  if (dir === resolve(home)) return "the working directory is your home folder"
+  const files = countFiles(dir, AUTO_GIT_MAX_FILES)
+  if (files > AUTO_GIT_MAX_FILES) {
+    return `the folder holds more than ${AUTO_GIT_MAX_FILES.toLocaleString()} files (outside ignored dependency/build folders)`
+  }
+  return undefined
+}
+
+export async function ensureGitForWorktrees(
+  cwd: string,
+  opts: { home?: string } = {},
+): Promise<{ ok: true; did: "nothing" | "init" | "first-commit" } | { ok: false; error: string }> {
+  const state = await worktreeGitState(cwd)
+  if (state === "ready") return { ok: true, did: "nothing" }
+  const refusal = autoGitRefusal(cwd, opts.home)
+  if (refusal) {
+    return {
+      ok: false,
+      error: `Worktree isolation needs a git repository with at least one commit, and Butterfly will not create one automatically here: ${refusal}. Run \`git init\` and commit yourself, or work without isolation.`,
+    }
+  }
+  const run = (command: string) => runCommand(command, { cwd, timeoutMs: 60_000 })
+  if (state === "no-repo") {
+    const init = await run("git init -q")
+    if (init.exitCode !== 0 || init.timedOut) {
+      return {
+        ok: false,
+        error: `git init failed: ${(init.stderr || init.stdout).trim().slice(0, 300)}`,
+      }
+    }
+    try {
+      mkdirSync(join(cwd, ".git", "info"), { recursive: true })
+      appendFileSync(
+        join(cwd, ".git", "info", "exclude"),
+        `\n# added by Butterfly (worktree isolation snapshot)\n${AUTO_GIT_EXCLUDES.join("\n")}\n`,
+      )
+    } catch {
+      // best-effort: .gitignore (if any) still applies
+    }
+  }
+  const add = await run("git add -A")
+  const commit =
+    add.exitCode === 0 && !add.timedOut
+      ? await run(
+          'git -c user.name=butterfly -c user.email=butterfly@localhost -c commit.gpgsign=false commit -q --no-verify --allow-empty -m "butterfly: snapshot for isolated subagents"',
+        )
+      : add
+  if (commit.exitCode !== 0 || commit.timedOut) {
+    return {
+      ok: false,
+      error: `could not create the initial commit: ${(commit.stderr || commit.stdout).trim().slice(0, 300)}`,
+    }
+  }
+  return { ok: true, did: state === "no-repo" ? "init" : "first-commit" }
+}
 
 export async function createWorktree(cwd: string, taskId: string): Promise<CreateWorktreeResult> {
   if (!isGitRepo(cwd)) {

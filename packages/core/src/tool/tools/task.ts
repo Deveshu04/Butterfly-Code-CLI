@@ -8,10 +8,12 @@ import { ToolRegistry } from "../registry"
 import {
   createWorktree,
   discardWorktree,
+  ensureGitForWorktrees,
   listWorktrees,
   MAX_CONCURRENT_WORKTREES,
   mergeWorktree,
   removeWorktree,
+  worktreeGitState,
   worktreeStatus,
   writeWorktreeMeta,
 } from "../worktree"
@@ -25,7 +27,7 @@ const isolationField = z
   .enum(["worktree"])
   .optional()
   .describe(
-    "Run the subagent in an isolated git worktree with a MUTATING toolset (edit/bash included) — it cannot corrupt the main working tree. Requires a git repo. Its changes come back as a worktree id; review, then op=merge or op=discard.",
+    "Only for subagents that EDIT code in parallel: runs it in an isolated git worktree with a MUTATING toolset (edit/bash included) — it cannot corrupt the main working tree. Read-only research never needs this. A folder without git is initialized automatically (with the user's approval). Its changes come back as a worktree id; review, then op=merge or op=discard.",
   )
 const modelField = z
   .enum(["small", "main"])
@@ -233,7 +235,34 @@ async function gateWorktree(
   input: unknown,
   ctx: ToolContext,
   count: number,
+): Promise<{ refused?: ToolOutcome; note?: string }> {
+  const refused = await gateWorktreeAccess(opts, input, ctx, count)
+  if (refused) return { refused }
+  // No repo (or no commits yet): set one up now that isolation is approved.
+  const git = await ensureGitForWorktrees(opts.cwd)
+  if (!git.ok) return { refused: { output: git.error, isError: true } }
+  if (git.did === "nothing") return {}
+  const note =
+    git.did === "init"
+      ? "this folder was not a git repository, so one was initialized with a snapshot commit of the current files (dependency/build folders and .env files excluded via .git/info/exclude)"
+      : "the git repository had no commits, so a snapshot commit of the current files was created"
+  ctx.progress?.(note)
+  return { note: `\n[worktree isolation: ${note}.]` }
+}
+
+async function gateWorktreeAccess(
+  opts: TaskToolOptions,
+  input: unknown,
+  ctx: ToolContext,
+  count: number,
 ): Promise<ToolOutcome | null> {
+  const gitState = await worktreeGitState(opts.cwd)
+  const setupNote =
+    gitState === "no-repo"
+      ? "; this folder is not a git repository, so one will be initialized here with a snapshot commit of the current files (dependency/build folders and .env files excluded)"
+      : gitState === "no-commits"
+        ? "; the git repository has no commits yet, so a snapshot commit of the current files will be created"
+        : ""
   const editDecision = resolvePermission(ctx.rules, "edit", undefined)
   const bashDecision = resolvePermission(ctx.rules, "bash", undefined)
   if (editDecision === "deny" || bashDecision === "deny") {
@@ -261,10 +290,11 @@ async function gateWorktree(
     const answer = await ctx.ask({
       tool: "task",
       target: "worktree",
-      note:
+      note: `${
         count > 1
           ? `${count} isolated subagents in parallel, each with edit+bash inside its own disposable git worktree; the main working tree is never modified until you merge`
-          : "isolated subagent with edit+bash inside a disposable git worktree; the main working tree is never modified",
+          : "isolated subagent with edit+bash inside a disposable git worktree; the main working tree is never modified"
+      }${setupNote}`,
       input,
     })
     if (answer !== "allow") {
@@ -442,9 +472,11 @@ async function runBatch(
 ): Promise<ToolOutcome> {
   const subs = input.tasks ?? []
   const isolated = subs.filter((sub) => sub.isolation === "worktree").length
+  let setupNote = ""
   if (isolated > 0) {
-    const refused = await gateWorktree(opts, input, ctx, isolated)
-    if (refused) return refused
+    const gate = await gateWorktree(opts, input, ctx, isolated)
+    if (gate.refused) return gate.refused
+    setupNote = gate.note ?? ""
   }
   const created: (Created | { error: string } | undefined)[] = []
   for (const sub of subs) {
@@ -481,7 +513,7 @@ async function runBatch(
   })
   const failed = outcomes.filter((o) => o.isError).length
   return {
-    output: `${subs.length} subagents ran in parallel${failed > 0 ? ` (${failed} failed)` : ""}.\n\n${sections.join("\n\n")}`,
+    output: `${subs.length} subagents ran in parallel${failed > 0 ? ` (${failed} failed)` : ""}.${setupNote}\n\n${sections.join("\n\n")}`,
     isError: failed === subs.length,
     meta: {
       subtasks: outcomes.map((o) => o.meta ?? null),
@@ -577,17 +609,18 @@ export function createTaskTool(opts: TaskToolOptions): ToolDefinition<TaskInput>
       if (!input.task)
         return { output: "task needs `task` (one subagent) or `tasks` (parallel).", isError: true }
       if (input.isolation === "worktree") {
-        const refused = await gateWorktree(opts, input, ctx, 1)
-        if (refused) return refused
+        const gate = await gateWorktree(opts, input, ctx, 1)
+        if (gate.refused) return gate.refused
         const created = await createFor(opts, input.task)
         if ("error" in created) return { output: created.error, isError: true }
-        return runOne(
+        const outcome = await runOne(
           opts,
           { task: input.task, isolation: "worktree", model: input.model },
           ctx,
           created,
           ctx.progress,
         )
+        return gate.note ? { ...outcome, output: `${outcome.output}${gate.note}` } : outcome
       }
       return runOne(opts, { task: input.task, model: input.model }, ctx, undefined, ctx.progress)
     },
