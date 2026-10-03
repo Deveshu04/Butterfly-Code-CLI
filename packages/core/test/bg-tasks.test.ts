@@ -30,10 +30,19 @@ function isAlive(pid: number): boolean {
   }
   try {
     process.kill(pid, 0)
-    return true
   } catch {
     return false
   }
+  if (process.platform === "linux") {
+    try {
+      const stat = require("node:fs").readFileSync(`/proc/${pid}/stat`, "utf8") as string
+      const state = stat.slice(stat.lastIndexOf(")") + 2, stat.lastIndexOf(")") + 3)
+      if (state === "Z" || state === "X") return false
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 function killPid(pid: number): void {

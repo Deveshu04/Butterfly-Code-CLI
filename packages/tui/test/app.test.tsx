@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import {
+  type ButterflyConfig,
   loadConfig,
   now,
   runCommand,
@@ -2987,6 +2988,17 @@ test("history recall after a chip-containing submit shows the fully expanded tex
  * real provider) — i.e. leaves the app in exactly the `busy()` state a
  * QUEUED message gets composed in.
  */
+function neverAnsweringProvider(): { config: ButterflyConfig; stop: () => void } {
+  const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) })
+  return {
+    config: {
+      model: "hang/model",
+      providers: { hang: { baseURL: `http://127.0.0.1:${server.port}/v1` } },
+    },
+    stop: () => server.stop(true),
+  }
+}
+
 async function startBusyTurn(t: {
   renderOnce: () => Promise<void>
   captureCharFrame: () => string
@@ -3002,8 +3014,9 @@ async function startBusyTurn(t: {
 
 test("a multi-line paste WHILE BUSY becomes a chip and the queued message keeps its newlines", async () => {
   const cwd = tempDir("bfly-tui-")
+  const hang = neverAnsweringProvider()
   const t = await testRender(
-    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    () => <App cwd={cwd} config={hang.config} home={tempDir("bfly-home-")} />,
     { width: 120, height: 34 },
   )
   await t.renderOnce()
@@ -3023,12 +3036,14 @@ test("a multi-line paste WHILE BUSY becomes a chip and the queued message keeps 
   expect(frame).toContain("charlieCC")
   expect(frame).not.toContain("alphaAAAAbravoBBBB")
   t.renderer.destroy()
+  hang.stop()
 }, 30_000)
 
 test("the high-rate paste fallback also chips WHILE BUSY (no bracketed-paste terminals)", async () => {
   const cwd = tempDir("bfly-tui-")
+  const hang = neverAnsweringProvider()
   const t = await testRender(
-    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    () => <App cwd={cwd} config={hang.config} home={tempDir("bfly-home-")} />,
     { width: 120, height: 34 },
   )
   await t.renderOnce()
@@ -3040,6 +3055,7 @@ test("the high-rate paste fallback also chips WHILE BUSY (no bracketed-paste ter
   await t.renderOnce()
   expect(composer.value).toBe("[Pasted #1 +1 lines]")
   t.renderer.destroy()
+  hang.stop()
 }, 30_000)
 
 test("Backspace away from the end edits normally — a trailing chip is not swallowed", async () => {

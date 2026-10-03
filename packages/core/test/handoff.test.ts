@@ -401,4 +401,6 @@ test("formatHandoffAge renders coarse, human ages", () => {
   expect(formatHandoffAge(12 * 60 * 1000)).toBe("12m ago")
   expect(formatHandoffAge(3 * 60 * 60 * 1000)).toBe("3h ago")
   expect(formatHandoffAge(2 * 24 * 60 * 60 * 1000)).toBe("2d ago")
+  expect(formatHandoffAge(2 * 60 * 60 * 1000 - 50)).toBe("2h ago")
+  expect(formatHandoffAge(89 * 60 * 1000)).toBe("1h ago")
 })
