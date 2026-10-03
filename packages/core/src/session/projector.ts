@@ -26,10 +26,18 @@ export function foldTimeline(events: SessionEvent[]): {
   entries: TimelineEntry[]
   pruned: Set<string>
 } {
+  return foldPrefix(events, events.length, new Map())
+}
+
+type Fold = { entries: TimelineEntry[]; pruned: Set<string> }
+
+function foldPrefix(events: SessionEvent[], length: number, cache: Map<number, Fold>): Fold {
+  const cached = cache.get(length)
+  if (cached) return cached
   const pruned = new Set<string>()
   let entries: TimelineEntry[] = []
 
-  events.forEach((event, index) => {
+  events.slice(0, length).forEach((event, index) => {
     switch (event.type) {
       case "session.compacted": {
         const survivingFragments = entries.filter(
@@ -50,7 +58,7 @@ export function foldTimeline(events: SessionEvent[]): {
         const survivingFragments = entries.filter(
           (entry) => entry.index >= cut && entry.event.type === "context.fragment",
         )
-        entries = [...foldTimeline(events.slice(0, cut)).entries, ...survivingFragments]
+        entries = [...foldPrefix(events, cut, cache).entries, ...survivingFragments]
         break
       }
       case "turn.snapshot":
@@ -67,7 +75,9 @@ export function foldTimeline(events: SessionEvent[]): {
     }
   })
 
-  return { entries, pruned }
+  const result = { entries, pruned }
+  cache.set(length, result)
+  return result
 }
 
 export function safeRewindIndex(events: SessionEvent[], checkpointIndex: number): number {
