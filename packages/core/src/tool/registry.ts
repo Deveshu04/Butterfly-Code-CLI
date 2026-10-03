@@ -29,6 +29,9 @@ export interface ToolContext {
   settle?: SettleOptions
   signal?: AbortSignal
   beforeExecute?: (toolName: string) => Promise<void>
+  /** Provider call id of the call being executed (runner-supplied). */
+  callId?: string
+  isResultVisible?: (callId: string) => boolean
 }
 
 export interface ToolOutcome {
@@ -118,34 +121,35 @@ export class ToolRegistry {
         ? result
         : { ...result, output: `${result.output}\n[harness note: ${notes.join("; ")}]` }
 
+    // One method on purpose: splitting the rest into an awaited helper adds
+    // microtask hops between the approval answer and the caller, which
+    // breaks the interrupt-during-approval ordering the TUI pins (a denied
+    // call's tool.result must land before the interrupt frame).
     const parsed = tool.inputSchema.safeParse(rawInput)
-    return withNotes(await this.runParsed(name, tool, parsed, ctx))
-  }
-
-  private async runParsed(
-    name: string,
-    tool: RegisteredTool,
-    parsed: ReturnType<z.ZodType["safeParse"]>,
-    ctx: ToolContext,
-  ): Promise<ToolRunResult> {
     if (!parsed.success) {
       const details = parsed.error.issues
         .map((issue) => `${issue.path.join(".") || "(input)"}: ${issue.message}`)
         .join("; ")
-      return errorResult(`Invalid input for ${name} — ${details}. Fix the arguments and retry.`)
+      return withNotes(
+        errorResult(`Invalid input for ${name} — ${details}. Fix the arguments and retry.`),
+      )
     }
 
     const target = tool.permissionTarget?.(parsed.data)
     const decision = resolvePermission(ctx.rules, name, target)
     if (decision === "deny") {
-      return errorResult(
-        `Permission denied for ${name}${target ? ` on "${target}"` : ""} by policy. Do not retry this exact call.`,
+      return withNotes(
+        errorResult(
+          `Permission denied for ${name}${target ? ` on "${target}"` : ""} by policy. Do not retry this exact call.`,
+        ),
       )
     }
     if (decision === "ask") {
       if (!ctx.ask) {
-        return errorResult(
-          `${name}${target ? ` on "${target}"` : ""} requires approval, but no approver is available in this mode. Adjust the permission rules or run interactively.`,
+        return withNotes(
+          errorResult(
+            `${name}${target ? ` on "${target}"` : ""} requires approval, but no approver is available in this mode. Adjust the permission rules or run interactively.`,
+          ),
         )
       }
       const note = tool.permissionNote?.(parsed.data)
@@ -156,7 +160,7 @@ export class ToolRegistry {
         input: parsed.data,
       })
       if (answer !== "allow") {
-        return errorResult(describeDenial(name, target, answer))
+        return withNotes(errorResult(describeDenial(name, target, answer)))
       }
     }
 
@@ -170,15 +174,15 @@ export class ToolRegistry {
     try {
       const outcome = await tool.execute(parsed.data, ctx)
       const settled = settle(outcome.output, ctx.settle)
-      return {
+      return withNotes({
         output: settled.text,
         isError: outcome.isError ?? false,
         truncated: settled.truncated,
         ...(outcome.meta !== undefined ? { meta: outcome.meta } : {}),
-      }
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      return errorResult(`Tool ${name} failed: ${message}`)
+      return withNotes(errorResult(`Tool ${name} failed: ${message}`))
     }
   }
 }
