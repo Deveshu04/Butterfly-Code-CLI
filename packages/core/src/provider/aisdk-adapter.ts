@@ -179,6 +179,8 @@ export class AiSdkProvider implements ProviderPort {
 
     let usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
     let finishReason: FinishReason = "stop"
+    let sawFinish = false
+    let truncated = false
 
     try {
       for await (const part of result.stream) {
@@ -197,10 +199,20 @@ export class AiSdkProvider implements ProviderPort {
               input: part.input,
             }
             break
-          case "finish-step":
+          case "finish-step": {
             usage = mapUsage(part.usage as AiUsage)
+            const step = part as { finishReason?: string; rawFinishReason?: string }
+            // The SDK synthesizes a finish when the SSE stream simply ends:
+            // "other", no raw provider reason, no usage. A real completion
+            // always carries the provider's own finish_reason.
+            truncated =
+              (step.finishReason === "other" || step.finishReason === "unknown") &&
+              step.rawFinishReason === undefined &&
+              (part.usage as AiUsage | undefined)?.inputTokens === undefined
             break
+          }
           case "finish":
+            sawFinish = true
             finishReason = mapFinishReason(part.finishReason)
             break
           case "error":
@@ -215,6 +227,15 @@ export class AiSdkProvider implements ProviderPort {
       return
     }
 
+    if ((!sawFinish || truncated) && request.signal?.aborted !== true) {
+      const info: ProviderErrorInfo = {
+        kind: "network",
+        message: "the response stream ended before the provider finished (connection dropped)",
+        provider: providerId,
+      }
+      yield { type: "error", message: describeProviderError(info), info }
+      return
+    }
     yield { type: "finish", reason: finishReason, usage }
   }
 }
