@@ -278,3 +278,28 @@ test("grep cuts minified lines to a preview", async () => {
   expect(result.output.length).toBeLessThan(600)
   expect(result.output).toContain("needle")
 }, 20_000)
+
+test("command capture is bounded: head and tail kept, the middle elided", async () => {
+  const { collectBounded } = await import("../src/tool/shell")
+  const stream = (parts: string[]) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const part of parts) controller.enqueue(new TextEncoder().encode(part))
+        controller.close()
+      },
+    })
+  expect(await collectBounded(stream(["héllo ", "wörld"]), 1_000)).toBe("héllo wörld")
+  const big = await collectBounded(stream(["HEAD", "x".repeat(10_000), "TAIL"]), 100)
+  expect(big.startsWith("HEAD")).toBe(true)
+  expect(big.endsWith("TAIL")).toBe(true)
+  expect(big).toContain("bytes of output not captured")
+  expect(big.length).toBeLessThan(200)
+})
+
+test("a runaway command cannot grow the capture without bound", async () => {
+  const result = await runCommand("head -c 12000000 /dev/zero | tr '\\0' 'a'", {
+    cwd: fixtureDir(),
+  })
+  expect(result.stdout.length).toBeLessThan(4_300_000)
+  expect(result.stdout).toContain("bytes of output not captured")
+}, 30_000)

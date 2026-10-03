@@ -65,6 +65,53 @@ export interface RunCommandResult {
   timedOut: boolean
 }
 
+export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024
+
+export async function collectBounded(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number = MAX_CAPTURE_BYTES,
+): Promise<string> {
+  const headLimit = Math.floor(maxBytes * 0.6)
+  const tailLimit = maxBytes - headLimit
+  const head: Uint8Array[] = []
+  let headBytes = 0
+  let tail: Uint8Array[] = []
+  let tailBytes = 0
+  let dropped = 0
+  for await (const chunk of stream) {
+    let rest = chunk
+    if (headBytes < headLimit) {
+      const take = rest.subarray(0, headLimit - headBytes)
+      head.push(take)
+      headBytes += take.length
+      rest = rest.subarray(take.length)
+    }
+    if (rest.length === 0) continue
+    tail.push(rest)
+    tailBytes += rest.length
+    while (tailBytes > tailLimit && tail.length > 0) {
+      const first = tail[0] as Uint8Array
+      const excess = tailBytes - tailLimit
+      if (first.length <= excess) {
+        tail.shift()
+        tailBytes -= first.length
+        dropped += first.length
+      } else {
+        tail = [first.subarray(excess), ...tail.slice(1)]
+        tailBytes -= excess
+        dropped += excess
+      }
+    }
+  }
+  const decoder = new TextDecoder()
+  // Nothing dropped: decode as one buffer so a multi-byte character that
+  // straddles the head/tail split stays intact.
+  if (dropped === 0) return decoder.decode(Buffer.concat([...head, ...tail]))
+  const headText = decoder.decode(Buffer.concat(head))
+  const tailText = decoder.decode(Buffer.concat(tail))
+  return `${headText}\n[... ${dropped} bytes of output not captured ...]\n${tailText}`
+}
+
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000
 export const MAX_COMMAND_TIMEOUT_MS = 600_000
 
@@ -99,8 +146,8 @@ export async function runCommand(
   }, timeoutMs)
 
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    collectBounded(proc.stdout),
+    collectBounded(proc.stderr),
     proc.exited,
   ])
   clearTimeout(timer)
