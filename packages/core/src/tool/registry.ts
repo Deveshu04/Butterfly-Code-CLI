@@ -34,6 +34,8 @@ export interface ToolContext {
   isResultVisible?: (callId: string) => boolean
   /** Honor tools' autoAllow for blanket asks (default true). */
   autoApproveReadOnly?: boolean
+  /** UI-only live status for this call (runner → RunnerEvent "tool-progress"). */
+  progress?: (text: string) => void
 }
 
 export interface ToolOutcome {

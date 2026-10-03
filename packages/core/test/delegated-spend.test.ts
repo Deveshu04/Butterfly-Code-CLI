@@ -122,3 +122,28 @@ test("compaction summarizer tokens are delegated spend", async () => {
   )
   expect(outcome.delegatedUsage).toEqual(usage(3_000, 200))
 })
+
+test("a tool's live progress reaches onEvent as tool-progress for its callId, before the result", async () => {
+  const registry = new ToolRegistry()
+  registry.register({
+    name: "task",
+    description: "t",
+    inputSchema: z.object({ task: z.string() }),
+    execute: async (_input, ctx) => {
+      ctx.progress?.("[1/1] step 1 - grep")
+      return { output: "summary" }
+    },
+  })
+  const seen: string[] = []
+  await runUserTurn(
+    {
+      ...deps(new MockProvider([callTask("t9"), say("ok")]), registry),
+      onEvent: (event) => {
+        if (event.type === "tool-progress") seen.push(`${event.callId}:${event.text}`)
+        if (event.type === "tool-result") seen.push(`result:${event.callId}`)
+      },
+    },
+    "go",
+  )
+  expect(seen).toEqual(["t9:[1/1] step 1 - grep", "result:t9"])
+})

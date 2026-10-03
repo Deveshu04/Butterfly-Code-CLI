@@ -32,6 +32,7 @@ export type RunnerEvent =
       meta?: unknown
     }
   | { type: "notice"; text: string }
+  | { type: "tool-progress"; callId: string; text: string }
   | { type: "step-retracted"; attempt: number }
 
 export interface RunnerDeps {
@@ -570,6 +571,8 @@ export async function runUserTurn(
                       cwd: deps.cwd,
                       callId: call.callId,
                       isResultVisible: (id) => visibleResults.has(id),
+                      progress: (text) =>
+                        deps.onEvent?.({ type: "tool-progress", callId: call.callId, text }),
                       ...(deps.autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
                       rules: deps.rules,
                       ask: deps.ask,

@@ -201,6 +201,8 @@ interface TodoMeta {
 interface Message {
   kind: "user" | "assistant" | "tool" | "info" | "error" | "thinking"
   text: string
+  /** Live tool-progress line (callId) — replaced in place, removed on the result. */
+  progressId?: string
   /** Unified diff for edit results — rendered with the diff element. */
   diff?: string
   path?: string
@@ -1216,10 +1218,31 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         finalizeOpenThinking()
         push(toolCallMessage(event.name, event.input))
         break
-      case "tool-result":
+      case "tool-progress": {
+        const all = [...messages()]
+        const line: Message = {
+          kind: "info",
+          text: event.text
+            .split("\n")
+            .map((row) => `  ${row}`)
+            .join("\n"),
+          progressId: event.callId,
+        }
+        const at = all.findIndex((m) => m.progressId === event.callId)
+        if (at >= 0) all[at] = line
+        else all.push(line)
+        setMessages(all)
+        break
+      }
+      case "tool-result": {
+        const live = messages()
+        if (live.some((m) => m.progressId === event.callId)) {
+          setMessages(live.filter((m) => m.progressId !== event.callId))
+        }
         push(toolResultMessage(event.output, event.isError, event.meta))
         stepAnchor = messages().length
         break
+      }
       case "step-retracted": {
         const settled = messages().slice(0, stepAnchor)
         if (settled.length !== messages().length) setMessages(settled)

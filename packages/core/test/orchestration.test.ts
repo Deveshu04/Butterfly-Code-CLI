@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { z } from "zod"
 import type { ProviderPort, TurnEvent, TurnRequest } from "../src/provider/port"
 import type { ToolContext } from "../src/tool/registry"
 import { ToolRegistry } from "../src/tool/registry"
@@ -237,4 +238,38 @@ test("a batch where one subagent throws still returns the others", async () => {
   expect(result.isError).toBeFalsy()
   expect(result.output).toContain("(1 failed)")
   expect(result.output).toContain("fine")
+})
+
+test("a fan-out streams live per-subtask progress and reports its spend", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bfly-orch-progress-"))
+  const probeRegistry = () => {
+    const registry = new ToolRegistry()
+    registry.register({
+      name: "probe",
+      description: "p",
+      inputSchema: z.object({ q: z.string() }),
+      execute: async () => ({ output: "probed" }),
+    })
+    return registry
+  }
+  const provider = new RoutingProvider((brief, step) =>
+    step === 0
+      ? [
+          { type: "tool-call", callId: `c-${brief.slice(0, 5)}`, name: "probe", input: { q: "x" } },
+          { type: "finish", reason: "tool-calls", usage },
+        ]
+      : say(`done: ${brief.split("\n")[0]}`),
+  )
+  const tool = createTaskTool(options(dir, provider, { makeRegistry: probeRegistry }))
+  const updates: string[] = []
+  const result = await tool.execute(
+    { tasks: [{ task: "alpha brief" }, { task: "beta brief" }] },
+    ctx(dir, { progress: (text) => updates.push(text) }),
+  )
+  expect(updates.some((u) => u.includes("[1/2] step 1 - probe"))).toBe(true)
+  expect(updates.some((u) => u.includes("[2/2] step 1 - probe"))).toBe(true)
+  expect(updates.at(-1)).toBe("[1/2] done\n[2/2] done")
+  // Two subagents x two provider steps x (10 in + 5 out).
+  const spend = (result.meta as { spend?: { usage: typeof usage } }).spend
+  expect(spend?.usage).toEqual({ input: 40, output: 20, cacheRead: 0, cacheWrite: 0 })
 })

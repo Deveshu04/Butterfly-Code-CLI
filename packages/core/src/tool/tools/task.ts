@@ -170,6 +170,7 @@ export async function runSubagentTurn(
   opts: SubagentTurnOptions,
   promptText: string,
   signal?: AbortSignal,
+  onStep?: (status: string) => void,
 ): Promise<SubagentTurnResult> {
   // Lazy import breaks the runner↔tool dependency cycle.
   const { runUserTurn } = await import("../../session/runner")
@@ -190,6 +191,7 @@ export async function runSubagentTurn(
       cwd: opts.cwd,
       maxSteps: opts.maxSteps ?? TASK_MAX_STEPS,
       signal,
+      ...(onStep ? { onEvent: stepReporter(onStep) } : {}),
     },
     promptText,
   )
@@ -202,6 +204,27 @@ export async function runSubagentTurn(
     steps: outcome.steps,
     usage: outcome.usage,
     ...(cost ? { costUSD: outcome.costUSD } : {}),
+  }
+}
+
+function stepReporter(onStep: (status: string) => void): (event: { type: string }) => void {
+  let steps = 0
+  let writing = false
+  return (event) => {
+    const e = event as { type: string; name?: string; input?: unknown; text?: string }
+    if (e.type === "tool-call") {
+      steps += 1
+      writing = false
+      const detail = JSON.stringify(e.input ?? {})
+        .replace(/\s+/g, " ")
+        .slice(0, 60)
+      onStep(`step ${steps} - ${e.name ?? "tool"} ${detail}`)
+    } else if (e.type === "text-delta" && !writing && (e.text ?? "").trim() !== "") {
+      writing = true
+      onStep(`step ${steps} - writing summary`)
+    } else if (e.type === "notice" && typeof e.text === "string" && e.text.startsWith("retrying")) {
+      onStep(`step ${steps} - ${e.text.slice(0, 60)}`)
+    }
   }
 }
 
@@ -271,6 +294,7 @@ async function runInWorktree(
   created: Created,
   task: string,
   ctx: ToolContext,
+  onStep?: (status: string) => void,
 ): Promise<ToolOutcome> {
   const subagentHeadNote = created.mainTreeDirty
     ? " NOTE: the main working tree currently has UNCOMMITTED changes that are NOT present here — this is a checkout of the last commit (HEAD) only, so some files may look older than what the user sees."
@@ -289,7 +313,7 @@ async function runInWorktree(
 
   let result: SubagentTurnResult
   try {
-    result = await runSubagentTurn(isolatedOpts, prompt, ctx.signal)
+    result = await runSubagentTurn(isolatedOpts, prompt, ctx.signal, onStep)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return {
@@ -382,13 +406,14 @@ async function runOne(
   sub: { task: string; isolation?: "worktree"; model?: Tier },
   ctx: ToolContext,
   created?: Created,
+  onStep?: (status: string) => void,
 ): Promise<ToolOutcome> {
   const tiered = withTier(opts, sub.model).opts
   if (sub.isolation === "worktree") {
     if (!created) return { output: "no worktree available for this subtask", isError: true }
-    return runInWorktree(tiered, created, sub.task, ctx)
+    return runInWorktree(tiered, created, sub.task, ctx, onStep)
   }
-  const result = await runSubagentTurn(tiered, `${sub.task}${READ_ONLY_SUFFIX}`, ctx.signal)
+  const result = await runSubagentTurn(tiered, `${sub.task}${READ_ONLY_SUFFIX}`, ctx.signal, onStep)
   return { output: result.summary, meta: { journal: result.journalPath, spend: spendOf(result) } }
 }
 
@@ -425,12 +450,23 @@ async function runBatch(
   for (const sub of subs) {
     created.push(sub.isolation === "worktree" ? await createFor(opts, sub.task) : undefined)
   }
+  const status = subs.map(() => "queued")
+  const report = () =>
+    ctx.progress?.(status.map((line, i) => `[${i + 1}/${subs.length}] ${line}`).join("\n"))
   const outcomes = await mapLimit(subs, MAX_PARALLEL_TASKS, async (sub, i) => {
     const slot = created[i]
     if (slot && "error" in slot) return { output: slot.error, isError: true } as ToolOutcome
+    const onStep = (line: string) => {
+      status[i] = line
+      report()
+    }
     try {
-      return await runOne(opts, sub, ctx, slot)
+      onStep("starting")
+      const outcome = await runOne(opts, sub, ctx, slot, onStep)
+      onStep(outcome.isError ? "failed" : "done")
+      return outcome
     } catch (error) {
+      onStep("failed")
       return {
         output: `subagent failed: ${error instanceof Error ? error.message : String(error)}`,
         isError: true,
@@ -550,9 +586,10 @@ export function createTaskTool(opts: TaskToolOptions): ToolDefinition<TaskInput>
           { task: input.task, isolation: "worktree", model: input.model },
           ctx,
           created,
+          ctx.progress,
         )
       }
-      return runOne(opts, { task: input.task, model: input.model }, ctx)
+      return runOne(opts, { task: input.task, model: input.model }, ctx, undefined, ctx.progress)
     },
   }
 }
