@@ -28,6 +28,7 @@ import {
   describeGitFailure,
   describeProviderError,
   describeReviewScope,
+  discardWorktree,
   doctor,
   EpisodicIndex,
   editTool,
@@ -52,14 +53,17 @@ import {
   listSessions,
   listSkills,
   listUntracked,
+  listWorktrees,
   loadConfig,
   loadFrecency,
   loadMemory,
   locateHooksSource,
+  MAX_CONCURRENT_WORKTREES,
   McpHub,
   ModelsCatalog,
   mediaTypeForPath,
   memoryPaths,
+  mergeWorktree,
   moduleOverview,
   mutatingSubagentRegistry,
   now,
@@ -106,6 +110,7 @@ import {
   type Usage,
   WorkQueue,
   withFrecencyTouch,
+  worktreeStatus,
   writeCommitMessageFile,
 } from "@butterfly/core"
 import { decodePasteBytes, type InputRenderable, type ScrollBoxRenderable } from "@opentui/core"
@@ -851,6 +856,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const taskToolOpts: TaskToolOptions = {
     provider: () => freshProvider(),
     model: () => modelRef() ?? "",
+    subagentModel: () => config().subagent_model ?? config().small_model,
     system: (m) => frozenSystem(m),
     cwd: props.cwd,
     sessionsDir: join(props.cwd, ".butterfly", "sessions"),
@@ -1509,6 +1515,46 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       } catch (error) {
         push({ kind: "error", text: `graph sync failed: ${String(error)}` })
       }
+    },
+    worktreesText: async () => {
+      const all = listWorktrees(props.cwd)
+      if (all.length === 0) {
+        return 'no agent worktrees pending — the model creates them with task isolation:"worktree" (one per parallel worker)'
+      }
+      const rows = await Promise.all(
+        all.map(async (w) => {
+          const status = w.meta?.baseSha ? await worktreeStatus(w.path, w.meta.baseSha) : undefined
+          const changes = status
+            ? status.undetermined
+              ? "status unknown"
+              : `${status.changedFiles} changed, ${status.commitsAhead} commits`
+            : "base unknown"
+          return `  ${w.id.slice(0, 8)}  ${changes.padEnd(24)}  ${w.meta?.task?.slice(0, 60) ?? ""}`
+        }),
+      )
+      return [
+        `agent worktrees (${all.length}/${MAX_CONCURRENT_WORKTREES} slots):`,
+        ...rows,
+        "",
+        "/worktrees merge <id> applies one to your working tree (unstaged) · /worktrees discard <id>",
+      ].join("\n")
+    },
+    mergeWorktree: async (id) => {
+      const merged = await mergeWorktree(props.cwd, id)
+      if (!merged.ok) push({ kind: "error", text: merged.error })
+      else
+        push({
+          kind: "info",
+          text:
+            merged.files.length === 0
+              ? "worktree had no changes — removed"
+              : `merged ${merged.files.length} file(s) into the working tree (unstaged): ${merged.files.join(", ")}`,
+        })
+    },
+    discardWorktree: async (id) => {
+      const removed = await discardWorktree(props.cwd, id)
+      if (removed.ok) push({ kind: "info", text: `discarded worktree ${id}` })
+      else push({ kind: "error", text: removed.error })
     },
     pickSession: () => {
       lastListing = listSessions(join(props.cwd, ".butterfly", "sessions")).filter(

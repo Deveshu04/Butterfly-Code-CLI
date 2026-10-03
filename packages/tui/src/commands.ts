@@ -28,6 +28,10 @@ export interface CommandActions {
   listSessionsText(): string
   /** Arrow-key picker over past sessions (same rows as listSessionsText). */
   pickSession(): void
+  /** Agent worktrees awaiting review: list / merge / discard. */
+  worktreesText(): Promise<string>
+  mergeWorktree(id: string): Promise<void>
+  discardWorktree(id: string): Promise<void>
   /** Code graph stats + module overview + map path. */
   graphText(): string
   /** Force an incremental re-sync and rewrite .butterfly/project-map.md. */
@@ -409,6 +413,21 @@ export const COMMANDS: SlashCommand[] = [
         return
       }
       a.error("usage: /tasks | /tasks kill <id> | /tasks show <id>")
+    },
+  },
+  {
+    name: "worktrees",
+    args: "[merge|discard <id>]",
+    description: "parallel agents' isolated worktrees — list, merge into the main tree, or discard",
+    aliases: ["worktree"],
+    keywords: ["wt", "parallel", "agents", "subagents", "spawns", "workers", "integrate"],
+    run: async (arg, a) => {
+      const [verb = "", id = ""] = arg.trim().split(/\s+/)
+      if (verb === "") a.info(await a.worktreesText(), true)
+      else if (verb === "merge" && id) await a.mergeWorktree(id)
+      else if ((verb === "discard" || verb === "rm" || verb === "drop") && id)
+        await a.discardWorktree(id)
+      else a.error("usage: /worktrees | /worktrees merge <id> | /worktrees discard <id>")
     },
   },
   {

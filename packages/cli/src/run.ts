@@ -75,6 +75,8 @@ export function taskToolOptions(deps: {
   sessionsDir: string
   provider: () => ProviderPort
   model: () => string
+  /** Cheaper default model for subagents (subagent_model ?? small_model). */
+  subagentModel?: () => string | undefined
   extras: (registry: ToolRegistry) => void
 }): TaskToolOptions {
   const system = (model: string) =>
@@ -86,6 +88,7 @@ export function taskToolOptions(deps: {
   return {
     provider: deps.provider,
     model: deps.model,
+    ...(deps.subagentModel ? { subagentModel: deps.subagentModel } : {}),
     system,
     cwd: deps.cwd,
     sessionsDir: deps.sessionsDir,
@@ -210,6 +213,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
         sessionsDir: join(cwd, ".butterfly", "sessions"),
         provider: () => provider,
         model: () => modelRef,
+        subagentModel: () => config.subagent_model ?? config.small_model,
         extras: (sub) => {
           sub.register(createExploreTool({ db: () => graph, cwd, refresh: graphRefresh }))
           sub.register(createWebTool({ config: () => config.web }))

@@ -10,6 +10,12 @@ export const ButterflyConfig = z.object({
   /** "provider/model", e.g. "openrouter/deepseek/deepseek-chat-v3". */
   model: z.string().optional(),
   small_model: z.string().optional(),
+  /**
+   * Default model for task subagents (parallel fan-out, worktree workers).
+   * Falls back to small_model, then the main model. The main model stays
+   * the orchestrator and can opt a subtask into itself with model:"main".
+   */
+  subagent_model: z.string().optional(),
   providers: z
     .record(
       z.string(),
