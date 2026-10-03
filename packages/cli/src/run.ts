@@ -23,6 +23,7 @@ import {
   editTool,
   evolveAfterTurn,
   expandMentions,
+  focusedSkeleton,
   formatUSD,
   frecencyStorePath,
   globTool,
@@ -322,6 +323,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
             }
           : {}),
         ...(smallModelCost ? { smallModelCost } : {}),
+        codeMap: (files) => (graph ? focusedSkeleton(graph, files.join(" "), 400) : ""),
         ...((opts.maxSpendUSD ?? config.maxSpendUSD) !== undefined
           ? { maxSpendUSD: opts.maxSpendUSD ?? config.maxSpendUSD }
           : {}),

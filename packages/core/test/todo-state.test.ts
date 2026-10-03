@@ -155,3 +155,37 @@ test("compaction stores the plan + edited files and appends them to the summary"
   const header = SessionJournal.replay(journal.path).header
   expect(todosFromTimeline(project(header, events).timeline)).toEqual(items("completed", "pending"))
 })
+
+test("the compaction record carries a code-graph map of the edited files when one is supplied", async () => {
+  const journal = SessionJournal.create(mkdtempSync(join(tmpdir(), "bfly-todo-")))
+  journal.append({ type: "message.user", id: "u1", text: `first ${"z".repeat(4_000)}`, time: t })
+  journal.append({ type: "message.assistant", id: "a1", text: "", time: t })
+  journal.append({
+    type: "tool.call",
+    callId: "e1",
+    name: "edit",
+    input: { file_path: "src/cart.ts" },
+    time: t,
+  })
+  journal.append({ type: "tool.result", callId: "e1", output: "Edited", isError: false, time: t })
+  journal.append({ type: "message.user", id: "u2", text: "second", time: t })
+  journal.append({ type: "message.assistant", id: "a2", text: "ok", time: t })
+  const seen: string[][] = []
+  await compactSession({
+    provider: new MockProvider([say("## Objective\n- cart")]),
+    model: "m",
+    journal,
+    keepTokens: 40, // cut everything up to the last reply
+    codeMap: (files) => {
+      seen.push(files)
+      return "src/cart.ts — total:12, addItem:30"
+    },
+  })
+  expect(seen).toEqual([["src/cart.ts"]])
+  const compacted = SessionJournal.replay(journal.path).events.find(
+    (e) => e.type === "session.compacted",
+  )
+  expect(compacted?.type === "session.compacted" && compacted.summary).toContain(
+    "## Code map of edited files (harness record)\nsrc/cart.ts — total:12, addItem:30",
+  )
+})

@@ -59,13 +59,18 @@ function editedFiles(entries: TimelineEntry[]): string[] {
   return [...files]
 }
 
-export function harnessRecord(plan: Pick<CompactionPlan, "todos" | "files">): string {
+export function harnessRecord(
+  plan: Pick<CompactionPlan, "todos" | "files">,
+  codeMap?: (files: string[]) => string,
+): string {
   const sections: string[] = []
   if (plan.todos && plan.todos.length > 0) {
     sections.push(`## Todo list (harness record — current)\n${renderTodos(plan.todos)}`)
   }
   if (plan.files.length > 0) {
     sections.push(`## Files edited so far (harness record)\n${plan.files.join("\n")}`)
+    const map = codeMap?.(plan.files).trim() ?? ""
+    if (map !== "") sections.push(`## Code map of edited files (harness record)\n${map}`)
   }
   return sections.join("\n")
 }
@@ -154,6 +159,8 @@ export interface CompactionDeps {
   model: string
   journal: SessionJournal
   keepTokens?: number
+  /** Budgeted symbol map for a set of files (the code graph), appended to the record. */
+  codeMap?: (files: string[]) => string
 }
 
 /** Run the summarizer and journal the session.compacted event. */
@@ -181,7 +188,7 @@ export async function compactSession(
 
   if (summary.trim() === "") return null
 
-  const record = harnessRecord(plan)
+  const record = harnessRecord(plan, deps.codeMap)
   if (record !== "") summary = `${summary.trimEnd()}\n${record}`
   deps.journal.append({
     type: "session.compacted",

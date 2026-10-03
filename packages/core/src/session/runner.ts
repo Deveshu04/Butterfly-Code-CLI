@@ -57,6 +57,8 @@ export interface RunnerDeps {
   smallModel?: string
   /** Verbatim tail budget for compaction. */
   compactKeepTokens?: number
+  /** Code-graph map of files, appended to compaction summaries (see harnessRecord). */
+  codeMap?: (files: string[]) => string
   /** Thinking-effort dial, forwarded to the provider. */
   reasoning?: ReasoningEffort
   /** Pre-turn / pre-tool-call worktree snapshot (git tree hash or null). */
@@ -404,6 +406,7 @@ export async function runUserTurn(
           model: deps.smallModel ?? deps.model,
           journal,
           ...(deps.compactKeepTokens !== undefined ? { keepTokens: deps.compactKeepTokens } : {}),
+          ...(deps.codeMap ? { codeMap: deps.codeMap } : {}),
         }).catch(() => null)
         if (compacted) addDelegated(compacted.usage, undefined, compactionPricing())
         if (victims.length > 0 || compacted) {
@@ -663,6 +666,7 @@ export async function runUserTurn(
           model: deps.smallModel ?? deps.model,
           journal,
           ...(deps.compactKeepTokens !== undefined ? { keepTokens: deps.compactKeepTokens } : {}),
+          ...(deps.codeMap ? { codeMap: deps.codeMap } : {}),
         })
         if (compacted) addDelegated(compacted.usage, undefined, compactionPricing())
       }

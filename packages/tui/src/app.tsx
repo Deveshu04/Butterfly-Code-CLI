@@ -2626,6 +2626,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(config().autoContinue !== undefined ? { autoContinue: config().autoContinue } : {}),
         ...(config().autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
         ...(config().small_model ? { smallModel: config().small_model } : {}),
+        codeMap: (files) => {
+          const db = graphDb()
+          return db ? focusedSkeleton(db, files.join(" "), 400) : ""
+        },
         ...(costForRef(config().small_model)
           ? { smallModelCost: costForRef(config().small_model) }
           : {}),
