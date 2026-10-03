@@ -103,6 +103,7 @@ import {
   SELF_NAMED_PROVIDERS,
   SessionJournal,
   type SessionSummary,
+  type SubagentUpdate,
   safeRewindIndex,
   saveGlobalConfig,
   saveHandoff,
@@ -114,6 +115,7 @@ import {
   stageAllTracked,
   type TaskToolOptions,
   ToolRegistry,
+  todosFromTimeline,
   todoTool,
   touchFrecency,
   type Usage,
@@ -168,6 +170,14 @@ import {
   turnMarker,
 } from "./format"
 import {
+  type AgentEntry,
+  compactToolResult,
+  type LayoutPlan,
+  planLayout,
+  type SidebarPref,
+  type TodoItemView,
+} from "./layout"
+import {
   applyLoopEvent,
   askBearingRules,
   askRulesWarning,
@@ -183,6 +193,7 @@ import {
 } from "./loop-card"
 import { buildPagerDoc, type PagerDoc, searchPagerLines, stepLine } from "./pager"
 import { PagerView } from "./pager-view"
+import { AgentsPane, AgentViewHeader, PinnedStrip, Sidebar } from "./panels"
 import {
   addPasteChip,
   expandComposerText,
@@ -215,6 +226,13 @@ interface Message {
   text: string
   /** Live tool-progress line (callId) — replaced in place, removed on the result. */
   progressId?: string
+  /** Tool-call rows: the call's id and tool, so its result can fold into the row. */
+  callId?: string
+  toolName?: string
+  /** Tool-call rows: one-line outcome folded in from the result (layout.compactToolResult). */
+  summary?: string
+  /** Tool-call rows: still executing (live sessions only). */
+  pending?: boolean
   live?: { text: Accessor<string>; set: Setter<string> }
   /** Unified diff for edit results — rendered with the diff element. */
   diff?: string
@@ -268,10 +286,19 @@ export function timelineToMessages(timeline: import("@butterfly/core").SessionEv
       if (split.rest.trim() !== "" || split.thinking !== "") {
         restored.push({ kind: "assistant", text: event.text })
       }
-    } else if (event.type === "tool.call") restored.push(toolCallMessage(event.name, event.input))
-    else if (event.type === "tool.result")
-      restored.push(toolResultMessage(event.output, event.isError, event.meta))
-    else if (event.type === "session.compacted")
+    } else if (event.type === "tool.call")
+      restored.push(toolCallMessage(event.name, event.input, event.callId))
+    else if (event.type === "tool.result") {
+      const folded = applyToolResult(
+        restored,
+        event.callId,
+        event.output,
+        event.isError,
+        event.meta,
+      )
+      restored.length = 0
+      restored.push(...folded)
+    } else if (event.type === "session.compacted")
       restored.push({ kind: "info", text: "(older context was compacted)" })
     else if (event.type === "session.review") restored.push(reviewMessage(event))
   }
@@ -368,11 +395,48 @@ function toolCallArgs(name: string, input: unknown): string {
       return glob ? `${pattern} ${glob}` : pattern
     }
   }
+  if (name === "bash") {
+    const command = str(args.command)
+    if (command !== undefined) return capAtTokenBoundary(command.replace(/\s+/g, " "), 100)
+  }
+  if (name === "todo" && Array.isArray(args.items)) return `${args.items.length} items`
+  if (name === "task") {
+    if (Array.isArray(args.tasks)) {
+      const first = (args.tasks[0] as { task?: unknown } | undefined)?.task
+      const brief = typeof first === "string" ? `: ${first.replace(/\s+/g, " ")}` : ""
+      return capAtTokenBoundary(`${args.tasks.length} subagents${brief}`, 90)
+    }
+    const op = str(args.op)
+    if (op && op !== "run") return [op, str(args.worktree)].filter(Boolean).join(" ")
+    const brief = str(args.task)
+    if (brief !== undefined) return capAtTokenBoundary(brief.replace(/\s+/g, " "), 90)
+  }
+  if (
+    name === "explore" ||
+    name === "web" ||
+    name === "memory" ||
+    name === "skill" ||
+    name === "mcp"
+  ) {
+    const op = str(args.op)
+    const target = [args.path, args.symbol, args.query, args.url, args.name, args.server, args.tool]
+      .map(str)
+      .find((v) => v !== undefined)
+    if (op !== undefined || target !== undefined) {
+      return capAtTokenBoundary([op, target].filter(Boolean).join(" "), 100)
+    }
+  }
   return capAtTokenBoundary(JSON.stringify(input), 100)
 }
 
-function toolCallMessage(name: string, input: unknown): Message {
-  return { kind: "tool", text: `${name} ${toolCallArgs(name, input)}`, isCall: true }
+function toolCallMessage(name: string, input: unknown, callId?: string): Message {
+  return {
+    kind: "tool",
+    text: `${name} ${toolCallArgs(name, input)}`,
+    isCall: true,
+    toolName: name,
+    ...(callId !== undefined ? { callId } : {}),
+  }
 }
 
 function toolResultMessage(output: string, isError: boolean, meta: unknown): Message {
@@ -390,6 +454,32 @@ function toolResultMessage(output: string, isError: boolean, meta: unknown): Mes
         }
       : {}),
   }
+}
+
+function applyToolResult(
+  list: Message[],
+  callId: string,
+  output: string,
+  isError: boolean,
+  meta: unknown,
+): Message[] {
+  const at = list.findIndex((m) => m.isCall && m.callId === callId)
+  const row = at >= 0 ? list[at] : undefined
+  const todos = metaTodos(meta)?.todos
+  const summary =
+    !isError && row?.toolName && metaDiff(meta) === undefined && metaBash(meta) === undefined
+      ? todos
+        ? `plan ${todos.filter((t) => t.status === "completed").length}/${todos.length}`
+        : compactToolResult(row.toolName, output)
+      : undefined
+  const next = [...list]
+  if (row && summary !== undefined) {
+    next[at] = { ...row, summary, pending: false }
+    return next
+  }
+  if (row?.pending) next[at] = { ...row, pending: false }
+  next.push(toolResultMessage(output, isError, meta))
+  return next
 }
 
 function errorCardHeadline(info: ProviderErrorInfo): string {
@@ -479,21 +569,30 @@ function MessageLines(props: { text: string; tone: string | undefined; structure
   )
 }
 
-function ToolCallRow(props: { text: string }) {
+function Tint(props: { fg: string; children: string }) {
+  return <span {...({ fg: props.fg } as unknown as Record<string, never>)}>{props.children}</span>
+}
+
+function ToolCallRow(props: { text: string; summary?: string; pending?: boolean }) {
   const spaceIndex = () => props.text.indexOf(" ")
   const name = () => (spaceIndex() === -1 ? props.text : props.text.slice(0, spaceIndex()))
   const args = () => (spaceIndex() === -1 ? "" : props.text.slice(spaceIndex() + 1))
   return (
-    <box flexDirection="row">
-      <text>{name()}</text>
-      <Show when={args() !== ""}>
-        <text fg={themeTokens().muted}>{` ${args()}`}</text>
-      </Show>
-    </box>
+    <text>
+      {name()}
+      <Tint fg={themeTokens().muted}>{args() !== "" ? ` ${args()}` : ""}</Tint>
+      <Tint fg={themeTokens().success}>
+        {props.summary !== undefined ? ` · ${props.summary}` : ""}
+      </Tint>
+      <Tint fg={themeTokens().muted}>
+        {props.pending && props.summary === undefined ? " ..." : ""}
+      </Tint>
+    </text>
   )
 }
 
-function messageMarginTop(message: Message): number {
+function messageMarginTop(message: Message, previous?: Message): number {
+  if (message.isCall && previous?.isCall) return 0
   return message.kind === "user" || message.kind === "info" || message.isCall ? 1 : 0
 }
 
@@ -662,6 +761,99 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   })
 
   const [messages, setMessages] = createSignal<Message[]>([])
+
+  /** The plan, kept outside the transcript so it stays visible while it scrolls. */
+  const [planTodos, setPlanTodos] = createSignal<TodoItemView[]>([])
+  /** Every subagent this session spawned, latest status each. */
+  const [agents, setAgents] = createSignal<AgentEntry[]>([])
+  /** Key of the subagent whose conversation fills the center, or undefined (main). */
+  const [agentView, setAgentView] = createSignal<string | undefined>(undefined)
+  const [agentMessages, setAgentMessages] = createSignal<Message[]>([])
+  const [changedFiles, setChangedFiles] = createSignal<string[]>([])
+  const [sessionUsage, setSessionUsage] = createSignal<Usage>({
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  })
+  const [sidebarPref, setSidebarPref] = createSignal<SidebarPref>("auto")
+  /** Ctrl+T: the narrow strip shows the whole plan instead of one line. */
+  const [planExpanded, setPlanExpanded] = createSignal(false)
+  /** Ctrl+X leader chord: the next key is a panel command until this time. */
+  let leaderUntil = 0
+  /** What the center pane shows: the main conversation or the opened subagent's. */
+  const displayed = () => {
+    if (agentView() !== undefined) return agentMessages()
+    return layout().sidebar ? messages().filter((m) => m.progressId === undefined) : messages()
+  }
+
+  const loadAgentMessages = (agent: AgentEntry | undefined) => {
+    if (!agent?.journalPath) {
+      setAgentMessages([{ kind: "info", text: "waiting for this agent to start..." }])
+      return
+    }
+    try {
+      const { header, events } = SessionJournal.replay(agent.journalPath)
+      const restored = timelineToMessages(project(header, events).timeline)
+      setAgentMessages(restored.length > 0 ? restored : [{ kind: "info", text: "starting..." }])
+    } catch {
+      setAgentMessages([{ kind: "info", text: "waiting for this agent to start..." }])
+    }
+  }
+  const upsertAgent = (callId: string, update: SubagentUpdate) => {
+    const key = `${callId}:${update.id}`
+    const entry: AgentEntry = { ...update, key, callId, updatedAt: Date.now() }
+    const current = agents()
+    const at = current.findIndex((a) => a.key === key)
+    const next =
+      at >= 0 ? current.map((a, i) => (i === at ? entry : a)) : [...current, entry].slice(-30)
+    setAgents(next)
+    if (agentView() === key) loadAgentMessages(entry)
+  }
+  /** Alt+Right / Alt+Left: main -> agent 1 -> ... -> agent n -> main. */
+  const cycleAgentView = (step: 1 | -1) => {
+    const keys = [undefined, ...agents().map((a) => a.key)]
+    if (keys.length === 1) return
+    const at = keys.indexOf(agentView())
+    const nextKey = keys[(at + step + keys.length) % keys.length]
+    setAgentView(nextKey)
+    if (nextKey !== undefined) loadAgentMessages(agents().find((a) => a.key === nextKey))
+  }
+  const notePanelResult = (meta: unknown) => {
+    const todos = metaTodos(meta)?.todos
+    if (todos) setPlanTodos(todos)
+    const path = metaDiff(meta)?.path
+    if (path && !changedFiles().includes(path)) setChangedFiles([...changedFiles(), path])
+  }
+  /** Rebuild the panels from the journal (resume, rewind, undo, new). */
+  const syncPanels = () => {
+    setAgents([])
+    setAgentView(undefined)
+    try {
+      const { header, events } = SessionJournal.replay(session.journal.path)
+      const timeline = project(header, events).timeline
+      setPlanTodos(todosFromTimeline(timeline) ?? [])
+      const files: string[] = []
+      const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+      for (const event of timeline) {
+        if (event.type === "tool.result" && !event.isError) {
+          const path = metaDiff(event.meta)?.path
+          if (path && !files.includes(path)) files.push(path)
+        }
+      }
+      for (const event of events) {
+        if (event.type !== "turn.completed") continue
+        usage.input += event.usage.input
+        usage.output += event.usage.output
+        usage.cacheRead += event.usage.cacheRead
+      }
+      setChangedFiles(files)
+      setSessionUsage(usage)
+    } catch {
+      setPlanTodos([])
+      setChangedFiles([])
+    }
+  }
   const [thinkingExpanded, setThinkingExpanded] = createSignal(false)
   const latestTodoIndex = createMemo(() => {
     const list = messages()
@@ -679,6 +871,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const resetTurnStatus = () => {
     setStatus("")
     setLastTurnMarker("")
+    syncPanels()
   }
 
   let osc52UnsupportedNotified = false
@@ -1294,7 +1487,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         if (live.some((m) => m.progressId === event.callId)) {
           setMessages(live.filter((m) => m.progressId !== event.callId))
         }
-        push(toolCallMessage(event.name, event.input))
+        push({ ...toolCallMessage(event.name, event.input, event.callId), pending: true })
         break
       }
       case "tool-progress": {
@@ -1314,20 +1507,28 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         break
       }
       case "tool-result": {
-        const live = messages()
-        if (live.some((m) => m.progressId === event.callId)) {
-          setMessages(live.filter((m) => m.progressId !== event.callId))
-        }
-        push(toolResultMessage(event.output, event.isError, event.meta))
+        const live = messages().filter((m) => m.progressId !== event.callId)
+        setMessages(applyToolResult(live, event.callId, event.output, event.isError, event.meta))
         stepAnchor = messages().length
+        notePanelResult(event.meta)
         break
       }
+      case "subagent":
+        upsertAgent(event.callId, event.update)
+        break
       case "step-retracted": {
         const settled = messages().slice(0, stepAnchor)
         if (settled.length !== messages().length) setMessages(settled)
         break
       }
       case "finish":
+        // Usage panel: count each step as it lands, not only at turn end.
+        setSessionUsage((u) => ({
+          input: u.input + event.usage.input,
+          output: u.output + event.usage.output,
+          cacheRead: u.cacheRead + event.usage.cacheRead,
+          cacheWrite: u.cacheWrite + event.usage.cacheWrite,
+        }))
         finalizeOpenThinking()
         // Live context gauge: the last step's input+output IS the window size.
         setCtxUsed(event.usage.input + event.usage.output)
@@ -1802,6 +2003,38 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           setReasoning(value === "provider default" ? undefined : (value as ReasoningEffort))
           push({ kind: "info", text: `thinking effort: ${value} (this session)` })
         },
+      })
+    },
+    toggleSidebar: () => {
+      setSidebarPref(layout().sidebar ? "off" : "on")
+    },
+    agents: (arg) => {
+      const list = agents()
+      if (arg === "main") {
+        setAgentView(undefined)
+        return
+      }
+      if (/^\d+$/.test(arg)) {
+        const target = list[Number(arg) - 1]
+        if (!target) {
+          push({ kind: "error", text: `no agent ${arg} — /agents lists them` })
+          return
+        }
+        setAgentView(target.key)
+        loadAgentMessages(target)
+        return
+      }
+      push({
+        kind: "info",
+        text:
+          list.length === 0
+            ? "no parallel agents yet this session"
+            : `agents (Alt+Left/Right or /agents N to open, Esc back):\n${list
+                .map(
+                  (a, i) =>
+                    `  ${i + 1}  ${a.phase.padEnd(7)} ${a.steps} steps  ${a.task.replace(/\s+/g, " ").slice(0, 70)}`,
+                )
+                .join("\n")}`,
       })
     },
     togglePlan: () => {
@@ -2667,6 +2900,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
     }
 
+    // Sending always returns the center pane to the main conversation.
+    setAgentView(undefined)
     push({ kind: "user", text: task })
     setTimeout(() => {
       if (scroll && !scroll.isDestroyed) scroll.scrollTo(scroll.scrollHeight)
@@ -2770,6 +3005,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     )
       .then((outcome) => {
         setSessionCost((c) => c + outcome.costUSD)
+        // Main-model steps were counted live (onEvent "finish"); add the
+        // subagent and compaction spend that only the outcome knows.
+        setSessionUsage((u) => ({
+          input: u.input + outcome.delegatedUsage.input,
+          output: u.output + outcome.delegatedUsage.output,
+          cacheRead: u.cacheRead + outcome.delegatedUsage.cacheRead,
+          cacheWrite: u.cacheWrite + outcome.delegatedUsage.cacheWrite,
+        }))
         void probeServedContext()
         const start = turnStartedAt()
         const marker = turnMarker(outcome.usage, outcome.steps, Date.now() - (start ?? Date.now()))
@@ -2891,6 +3134,55 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       key.preventDefault()
       if (pagerOpen()) closePager()
       else if (!picker()) openPager()
+      return
+    }
+    const panelKeysLive =
+      !setup() && !providerKeyStep() && !pagerOpen() && !picker() && !pendingAsk()
+    if (panelKeysLive && leaderUntil > Date.now()) {
+      leaderUntil = 0
+      const name = (key.name ?? "").toLowerCase()
+      if (name === "b") {
+        key.preventDefault()
+        setSidebarPref(layout().sidebar ? "off" : "on")
+        return
+      }
+      if (name === "a" || name === "down") {
+        key.preventDefault()
+        cycleAgentView(1)
+        return
+      }
+      if (/^[0-9]$/.test(name)) {
+        key.preventDefault()
+        const n = Number(name)
+        const target = n === 0 ? undefined : agents()[n - 1]
+        setAgentView(target?.key)
+        if (target) loadAgentMessages(target)
+        return
+      }
+    }
+    if (panelKeysLive && key.ctrl && key.name === "x") {
+      key.preventDefault()
+      leaderUntil = Date.now() + 1500
+      return
+    }
+    if (panelKeysLive && key.meta && (key.name === "left" || key.name === "right")) {
+      key.preventDefault()
+      cycleAgentView(key.name === "right" ? 1 : -1)
+      return
+    }
+    if (panelKeysLive && key.ctrl && key.name === "t") {
+      key.preventDefault()
+      setPlanExpanded((expanded) => !expanded)
+      return
+    }
+    if (
+      panelKeysLive &&
+      key.name === "escape" &&
+      agentView() !== undefined &&
+      cmdList().length === 0
+    ) {
+      key.preventDefault()
+      setAgentView(undefined)
       return
     }
     if (
@@ -3090,6 +3382,22 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   })
 
+  const layout = createMemo(
+    (previous: LayoutPlan | undefined): LayoutPlan =>
+      planLayout(dimensions().width, {
+        pref: sidebarPref(),
+        hasAgents: agents().length > 0,
+        sessionStarted: messages().length > 0,
+        ...(previous ? { previous } : {}),
+      }),
+  )
+  const viewedAgent = () => agents().find((a) => a.key === agentView())
+  const agentPoll = setInterval(() => {
+    const agent = viewedAgent()
+    if (agent && (agent.phase === "running" || agent.phase === "queued")) loadAgentMessages(agent)
+  }, 1000)
+  onCleanup(() => clearInterval(agentPoll))
+
   const mark = renderWordmark()
   const markMode = () => wordmarkMode(dimensions().width)
   const anyOverlayOpen = () =>
@@ -3143,350 +3451,414 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         </Show>
       </box>
 
-      <box flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2}>
-        <Show
-          when={!pagerOpen()}
-          fallback={
-            <PagerView
-              doc={pagerDoc()}
-              query={pagerQuery()}
-              searchActive={pagerSearchActive()}
-              matches={pagerMatches()}
-              currentLine={pagerLine()}
-              notice={pagerNotice()}
-              scrollRef={(r: ScrollBoxRenderable) => {
-                pagerScroll = r
-              }}
-            />
-          }
-        >
-          <Show
-            when={!setup()}
-            fallback={
-              <box flexGrow={1} flexDirection="column" paddingTop={1}>
-                <text>
-                  <b>setup</b>
-                </text>
-                <box marginTop={1} flexDirection="column">
-                  <Show when={setup()?.stage === "provider"}>
-                    <text fg={themeTokens().muted}>
-                      Pick a provider (type its number or name, then Enter):
-                    </text>
-                    <For each={PROVIDERS}>
-                      {(choice, index) => (
-                        <text>
-                          {`  ${index() + 1}  ${choice.id}${choice.needsKey ? "" : "  (no key needed)"}`}
-                        </text>
-                      )}
-                    </For>
-                  </Show>
-                  <Show when={setup()?.stage === "key"}>
-                    <text fg={themeTokens().muted}>
-                      Paste your API key and press Enter. It is stored in
-                      ~/.config/butterfly/butterfly.jsonc (visible while typing).
-                    </text>
-                  </Show>
-                  <Show when={setup()?.stage === "model"}>
-                    <text fg={themeTokens().muted}>{`Model id for this provider — e.g. ${
-                      PROVIDERS.find((p) => p.id === (setup() as { provider?: string }).provider)
-                        ?.example ?? "model-id"
-                    }`}</text>
-                    <Show when={setupModels() !== ""}>
-                      <box marginTop={1}>
-                        <text fg={themeTokens().muted}>{setupModels()}</text>
-                      </box>
-                    </Show>
-                  </Show>
-                </box>
-                <box marginTop={1} flexDirection="column">
-                  <For each={messages().slice(-3)}>
-                    {(message) => (
-                      <text
-                        fg={message.kind === "error" ? themeTokens().error : themeTokens().muted}
-                      >
-                        {message.text}
-                      </text>
-                    )}
-                  </For>
-                </box>
-              </box>
-            }
-          >
+      <box flexDirection="row" flexGrow={1} minHeight={0}>
+        <Show when={layout().agentsPane && !pagerOpen()}>
+          <AgentsPane width={layout().agentsWidth} agents={agents()} selectedKey={agentView()} />
+        </Show>
+        <box flexGrow={1} minHeight={0} flexDirection="column">
+          <Show when={viewedAgent()}>
+            {(agent: Accessor<AgentEntry>) => (
+              <AgentViewHeader
+                agent={agent()}
+                ordinal={agents().findIndex((a) => a.key === agent().key) + 1}
+                total={agents().length}
+              />
+            )}
+          </Show>
+          <box flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2}>
             <Show
-              when={!showBigMark()}
+              when={!pagerOpen()}
               fallback={
-                <box
-                  flexGrow={1}
-                  justifyContent="center"
-                  alignItems="center"
-                  flexDirection="column"
-                >
-                  <Show
-                    when={markMode() === "single"}
-                    fallback={
-                      <box flexDirection="column" alignItems="center">
-                        <For each={markRows()}>
-                          {(row) => <text fg={themeTokens().muted}>{mark.left[row]}</text>}
-                        </For>
-                        <box marginTop={1} flexDirection="column" alignItems="center">
-                          <For each={markRows()}>
-                            {(row) => (
-                              <text>
-                                <b>{mark.right[row]}</b>
-                              </text>
-                            )}
-                          </For>
-                        </box>
-                      </box>
-                    }
-                  >
-                    <box flexDirection="column">
-                      <For each={markRows()}>
-                        {(row) => (
-                          <box flexDirection="row">
-                            <text fg={themeTokens().muted}>{mark.left[row]}</text>
-                            <text>{"  "}</text>
-                            <text>
-                              <b>{mark.right[row]}</b>
-                            </text>
-                          </box>
-                        )}
-                      </For>
-                    </box>
-                  </Show>
-                  <box marginTop={1}>
-                    <text fg={themeTokens().muted}>
-                      the harness-first coding agent — /help for commands
-                    </text>
-                  </box>
-                </box>
+                <PagerView
+                  doc={pagerDoc()}
+                  query={pagerQuery()}
+                  searchActive={pagerSearchActive()}
+                  matches={pagerMatches()}
+                  currentLine={pagerLine()}
+                  notice={pagerNotice()}
+                  scrollRef={(r: ScrollBoxRenderable) => {
+                    pagerScroll = r
+                  }}
+                />
               }
             >
               <Show
-                when={!showPlainWelcome()}
+                when={!setup()}
                 fallback={
-                  <box
-                    flexGrow={1}
-                    justifyContent="center"
-                    alignItems="center"
-                    flexDirection="column"
-                  >
-                    <box flexDirection="row">
-                      <text fg={themeTokens().muted}>butterfly </text>
-                      <text>
-                        <b>code</b>
-                      </text>
+                  <box flexGrow={1} flexDirection="column" paddingTop={1}>
+                    <text>
+                      <b>setup</b>
+                    </text>
+                    <box marginTop={1} flexDirection="column">
+                      <Show when={setup()?.stage === "provider"}>
+                        <text fg={themeTokens().muted}>
+                          Pick a provider (type its number or name, then Enter):
+                        </text>
+                        <For each={PROVIDERS}>
+                          {(choice, index) => (
+                            <text>
+                              {`  ${index() + 1}  ${choice.id}${choice.needsKey ? "" : "  (no key needed)"}`}
+                            </text>
+                          )}
+                        </For>
+                      </Show>
+                      <Show when={setup()?.stage === "key"}>
+                        <text fg={themeTokens().muted}>
+                          Paste your API key and press Enter. It is stored in
+                          ~/.config/butterfly/butterfly.jsonc (visible while typing).
+                        </text>
+                      </Show>
+                      <Show when={setup()?.stage === "model"}>
+                        <text fg={themeTokens().muted}>{`Model id for this provider — e.g. ${
+                          PROVIDERS.find(
+                            (p) => p.id === (setup() as { provider?: string }).provider,
+                          )?.example ?? "model-id"
+                        }`}</text>
+                        <Show when={setupModels() !== ""}>
+                          <box marginTop={1}>
+                            <text fg={themeTokens().muted}>{setupModels()}</text>
+                          </box>
+                        </Show>
+                      </Show>
                     </box>
-                    <box marginTop={1}>
-                      <text fg={themeTokens().muted}>
-                        the harness-first coding agent — /help for commands
-                      </text>
+                    <box marginTop={1} flexDirection="column">
+                      <For each={messages().slice(-3)}>
+                        {(message) => (
+                          <text
+                            fg={
+                              message.kind === "error" ? themeTokens().error : themeTokens().muted
+                            }
+                          >
+                            {message.text}
+                          </text>
+                        )}
+                      </For>
                     </box>
                   </box>
                 }
               >
-                <scrollbox
-                  ref={(r: ScrollBoxRenderable) => {
-                    scroll = r
-                  }}
-                  stickyScroll
-                  stickyStart="bottom"
-                  flexGrow={1}
-                  viewportOptions={{ paddingRight: 2 }}
-                  verticalScrollbarOptions={{
-                    trackOptions: {
-                      backgroundColor: themeTokens().bg,
-                      foregroundColor: themeTokens().border,
-                    },
-                  }}
+                <Show
+                  when={!showBigMark()}
+                  fallback={
+                    <box
+                      flexGrow={1}
+                      justifyContent="center"
+                      alignItems="center"
+                      flexDirection="column"
+                    >
+                      <Show
+                        when={markMode() === "single"}
+                        fallback={
+                          <box flexDirection="column" alignItems="center">
+                            <For each={markRows()}>
+                              {(row) => <text fg={themeTokens().muted}>{mark.left[row]}</text>}
+                            </For>
+                            <box marginTop={1} flexDirection="column" alignItems="center">
+                              <For each={markRows()}>
+                                {(row) => (
+                                  <text>
+                                    <b>{mark.right[row]}</b>
+                                  </text>
+                                )}
+                              </For>
+                            </box>
+                          </box>
+                        }
+                      >
+                        <box flexDirection="column">
+                          <For each={markRows()}>
+                            {(row) => (
+                              <box flexDirection="row">
+                                <text fg={themeTokens().muted}>{mark.left[row]}</text>
+                                <text>{"  "}</text>
+                                <text>
+                                  <b>{mark.right[row]}</b>
+                                </text>
+                              </box>
+                            )}
+                          </For>
+                        </box>
+                      </Show>
+                      <box marginTop={1}>
+                        <text fg={themeTokens().muted}>
+                          the harness-first coding agent — /help for commands
+                        </text>
+                      </box>
+                    </box>
+                  }
                 >
-                  <For each={messages()}>
-                    {(message, index) => {
-                      const inlineThinkMemo =
-                        message.kind === "assistant"
-                          ? createMemo(() => splitThink(liveText(message)))
-                          : undefined
-                      const inlineThink = () => inlineThinkMemo?.()
-                      return (
-                        <Show
-                          when={message.kind === "assistant"}
-                          fallback={
+                  <Show
+                    when={!showPlainWelcome()}
+                    fallback={
+                      <box
+                        flexGrow={1}
+                        justifyContent="center"
+                        alignItems="center"
+                        flexDirection="column"
+                      >
+                        <box flexDirection="row">
+                          <text fg={themeTokens().muted}>butterfly </text>
+                          <text>
+                            <b>code</b>
+                          </text>
+                        </box>
+                        <box marginTop={1}>
+                          <text fg={themeTokens().muted}>
+                            the harness-first coding agent — /help for commands
+                          </text>
+                        </box>
+                      </box>
+                    }
+                  >
+                    <scrollbox
+                      ref={(r: ScrollBoxRenderable) => {
+                        scroll = r
+                      }}
+                      stickyScroll
+                      stickyStart="bottom"
+                      flexGrow={1}
+                      viewportOptions={{ paddingRight: 2 }}
+                      verticalScrollbarOptions={{
+                        trackOptions: {
+                          backgroundColor: themeTokens().bg,
+                          foregroundColor: themeTokens().border,
+                        },
+                      }}
+                    >
+                      <For each={displayed()}>
+                        {(message, index) => {
+                          const inlineThinkMemo =
+                            message.kind === "assistant"
+                              ? createMemo(() => splitThink(liveText(message)))
+                              : undefined
+                          const inlineThink = () => inlineThinkMemo?.()
+                          return (
                             <Show
-                              when={message.kind === "thinking"}
+                              when={message.kind === "assistant"}
                               fallback={
-                                <box marginTop={messageMarginTop(message)} flexDirection="column">
-                                  <Show
-                                    when={message.errorInfo}
-                                    fallback={
+                                <Show
+                                  when={message.kind === "thinking"}
+                                  fallback={
+                                    <box
+                                      marginTop={messageMarginTop(
+                                        message,
+                                        displayed()[index() - 1],
+                                      )}
+                                      flexDirection="column"
+                                    >
                                       <Show
-                                        when={
-                                          message.todos !== undefined &&
-                                          index() === latestTodoIndex()
-                                        }
+                                        when={message.errorInfo}
                                         fallback={
                                           <Show
-                                            when={message.command !== undefined}
+                                            when={
+                                              message.todos !== undefined &&
+                                              index() === latestTodoIndex()
+                                            }
                                             fallback={
                                               <Show
-                                                when={message.isCall}
+                                                when={message.command !== undefined}
                                                 fallback={
-                                                  <MessageLines
-                                                    text={
-                                                      message.kind === "user"
-                                                        ? `❯ ${message.text}`
-                                                        : message.text
+                                                  <Show
+                                                    when={message.isCall}
+                                                    fallback={
+                                                      <MessageLines
+                                                        text={
+                                                          message.kind === "user"
+                                                            ? `❯ ${message.text}`
+                                                            : message.text
+                                                        }
+                                                        tone={
+                                                          message.kind === "tool" ||
+                                                          message.kind === "info"
+                                                            ? themeTokens().muted
+                                                            : message.kind === "error"
+                                                              ? themeTokens().error
+                                                              : undefined
+                                                        }
+                                                        structured={message.structured}
+                                                      />
                                                     }
-                                                    tone={
-                                                      message.kind === "tool" ||
-                                                      message.kind === "info"
-                                                        ? themeTokens().muted
-                                                        : message.kind === "error"
-                                                          ? themeTokens().error
-                                                          : undefined
-                                                    }
-                                                    structured={message.structured}
-                                                  />
+                                                  >
+                                                    <ToolCallRow
+                                                      text={message.text}
+                                                      summary={message.summary}
+                                                      pending={message.pending}
+                                                    />
+                                                  </Show>
                                                 }
                                               >
-                                                <ToolCallRow text={message.text} />
+                                                <box flexDirection="column">
+                                                  <box flexDirection="row">
+                                                    <text fg={themeTokens().accent}>{"$ "}</text>
+                                                    <text>{message.command}</text>
+                                                    <box flexGrow={1} />
+                                                    <text
+                                                      fg={
+                                                        message.exitCode === 0
+                                                          ? themeTokens().muted
+                                                          : themeTokens().error
+                                                      }
+                                                    >
+                                                      {message.exitCode === 0
+                                                        ? "ok"
+                                                        : `exit ${message.exitCode}`}
+                                                    </text>
+                                                  </box>
+                                                  <Show
+                                                    when={
+                                                      message.commandBody !== undefined &&
+                                                      message.commandBody !== ""
+                                                    }
+                                                  >
+                                                    <text fg={themeTokens().muted}>
+                                                      {message.commandBody}
+                                                    </text>
+                                                  </Show>
+                                                </box>
                                               </Show>
                                             }
                                           >
-                                            <box flexDirection="column">
-                                              <box flexDirection="row">
-                                                <text fg={themeTokens().accent}>{"$ "}</text>
-                                                <text>{message.command}</text>
-                                                <box flexGrow={1} />
-                                                <text
-                                                  fg={
-                                                    message.exitCode === 0
-                                                      ? themeTokens().muted
-                                                      : themeTokens().error
-                                                  }
-                                                >
-                                                  {message.exitCode === 0
-                                                    ? "ok"
-                                                    : `exit ${message.exitCode}`}
-                                                </text>
-                                              </box>
-                                              <Show
-                                                when={
-                                                  message.commandBody !== undefined &&
-                                                  message.commandBody !== ""
-                                                }
-                                              >
-                                                <text fg={themeTokens().muted}>
-                                                  {message.commandBody}
-                                                </text>
-                                              </Show>
+                                            <box
+                                              border
+                                              borderStyle="rounded"
+                                              borderColor={themeTokens().border}
+                                              flexDirection="column"
+                                              paddingLeft={1}
+                                              paddingRight={1}
+                                            >
+                                              <text fg={themeTokens().muted}>
+                                                {`todos ${(message.todos ?? []).filter((item) => item.status === "completed").length}/${(message.todos ?? []).length}`}
+                                              </text>
+                                              <For each={message.todos ?? []}>
+                                                {(item) => (
+                                                  <text
+                                                    fg={
+                                                      item.status === "in_progress"
+                                                        ? themeTokens().accent
+                                                        : themeTokens().muted
+                                                    }
+                                                  >
+                                                    {`${TODO_GLYPH[item.status]} ${item.text}`}
+                                                  </text>
+                                                )}
+                                              </For>
                                             </box>
                                           </Show>
                                         }
                                       >
-                                        <box
-                                          border
-                                          borderStyle="rounded"
-                                          borderColor={themeTokens().border}
-                                          flexDirection="column"
-                                          paddingLeft={1}
-                                          paddingRight={1}
-                                        >
-                                          <text fg={themeTokens().muted}>
-                                            {`todos ${(message.todos ?? []).filter((item) => item.status === "completed").length}/${(message.todos ?? []).length}`}
-                                          </text>
-                                          <For each={message.todos ?? []}>
-                                            {(item) => (
-                                              <text
-                                                fg={
-                                                  item.status === "in_progress"
-                                                    ? themeTokens().accent
-                                                    : themeTokens().muted
-                                                }
-                                              >
-                                                {`${TODO_GLYPH[item.status]} ${item.text}`}
-                                              </text>
-                                            )}
-                                          </For>
+                                        {(info: Accessor<ProviderErrorInfo>) => (
+                                          <box flexDirection="column">
+                                            <text fg={themeTokens().error}>{message.text}</text>
+                                            <Show when={errorCardDetail(info(), message.text)}>
+                                              {(detail: Accessor<string>) => (
+                                                <text fg={themeTokens().muted}>{detail()}</text>
+                                              )}
+                                            </Show>
+                                          </box>
+                                        )}
+                                      </Show>
+                                      <Show when={message.diff}>
+                                        <box paddingLeft={2} flexShrink={0}>
+                                          <diff
+                                            diff={message.diff ?? ""}
+                                            view="unified"
+                                            syntaxStyle={SYNTAX}
+                                            filetype={filetypeOf(message.path)}
+                                            wrapMode="none"
+                                            addedSignColor={themeTokens().diffAdd}
+                                            removedSignColor={themeTokens().diffDel}
+                                            addedBg={themeTokens().diffAddBg}
+                                            removedBg={themeTokens().diffDelBg}
+                                            contextBg={themeTokens().diffContextBg}
+                                            lineNumberFg={themeTokens().diffLineNumber}
+                                            lineNumberBg={themeTokens().diffLineNumberBg}
+                                          />
                                         </box>
                                       </Show>
-                                    }
-                                  >
-                                    {(info: Accessor<ProviderErrorInfo>) => (
-                                      <box flexDirection="column">
-                                        <text fg={themeTokens().error}>{message.text}</text>
-                                        <Show when={errorCardDetail(info(), message.text)}>
-                                          {(detail: Accessor<string>) => (
-                                            <text fg={themeTokens().muted}>{detail()}</text>
-                                          )}
-                                        </Show>
-                                      </box>
-                                    )}
-                                  </Show>
-                                  <Show when={message.diff}>
-                                    <box paddingLeft={2} flexShrink={0}>
-                                      <diff
-                                        diff={message.diff ?? ""}
-                                        view="unified"
-                                        syntaxStyle={SYNTAX}
-                                        filetype={filetypeOf(message.path)}
-                                        wrapMode="none"
-                                        addedSignColor={themeTokens().diffAdd}
-                                        removedSignColor={themeTokens().diffDel}
-                                        addedBg={themeTokens().diffAddBg}
-                                        removedBg={themeTokens().diffDelBg}
-                                        contextBg={themeTokens().diffContextBg}
-                                        lineNumberFg={themeTokens().diffLineNumber}
-                                        lineNumberBg={themeTokens().diffLineNumberBg}
-                                      />
                                     </box>
-                                  </Show>
-                                </box>
+                                  }
+                                >
+                                  <ThinkingBlock
+                                    thinkingText={liveText(message)}
+                                    open={message.thinkClosedAt === undefined}
+                                    startedAt={message.thinkStartedAt}
+                                    closedAt={message.thinkClosedAt}
+                                    expanded={thinkingExpanded()}
+                                  />
+                                </Show>
                               }
                             >
-                              <ThinkingBlock
-                                thinkingText={liveText(message)}
-                                open={message.thinkClosedAt === undefined}
-                                startedAt={message.thinkStartedAt}
-                                closedAt={message.thinkClosedAt}
-                                expanded={thinkingExpanded()}
-                              />
-                            </Show>
-                          }
-                        >
-                          <box flexDirection="column">
-                            <Show when={(inlineThink()?.thinking ?? "") !== ""}>
-                              <ThinkingBlock
-                                thinkingText={inlineThink()?.thinking ?? ""}
-                                open={
-                                  (inlineThink()?.open ?? false) &&
-                                  message.thinkClosedAt === undefined
-                                }
-                                startedAt={message.thinkStartedAt}
-                                closedAt={message.thinkClosedAt}
-                                expanded={thinkingExpanded()}
-                              />
-                            </Show>
-                            <Show when={(inlineThink()?.rest.trim() ?? "") !== ""}>
-                              <box marginTop={1} flexShrink={0}>
-                                <markdown
-                                  content={inlineThink()?.rest.trim() ?? ""}
-                                  syntaxStyle={SYNTAX}
-                                  streaming={busy() && index() === messages().length - 1}
-                                  internalBlockMode="top-level"
-                                />
+                              <box flexDirection="column">
+                                <Show when={(inlineThink()?.thinking ?? "") !== ""}>
+                                  <ThinkingBlock
+                                    thinkingText={inlineThink()?.thinking ?? ""}
+                                    open={
+                                      (inlineThink()?.open ?? false) &&
+                                      message.thinkClosedAt === undefined
+                                    }
+                                    startedAt={message.thinkStartedAt}
+                                    closedAt={message.thinkClosedAt}
+                                    expanded={thinkingExpanded()}
+                                  />
+                                </Show>
+                                <Show when={(inlineThink()?.rest.trim() ?? "") !== ""}>
+                                  <box marginTop={1} flexShrink={0}>
+                                    <markdown
+                                      content={inlineThink()?.rest.trim() ?? ""}
+                                      syntaxStyle={SYNTAX}
+                                      streaming={
+                                        agentView() === undefined &&
+                                        busy() &&
+                                        index() === displayed().length - 1
+                                      }
+                                      internalBlockMode="top-level"
+                                    />
+                                  </box>
+                                </Show>
                               </box>
                             </Show>
-                          </box>
-                        </Show>
-                      )
-                    }}
-                  </For>
-                </scrollbox>
+                          )
+                        }}
+                      </For>
+                    </scrollbox>
+                  </Show>
+                </Show>
               </Show>
             </Show>
-          </Show>
+          </box>
+        </box>
+        <Show when={layout().sidebar && !pagerOpen() && !setup()}>
+          <Sidebar
+            width={layout().sidebarWidth}
+            model={modelRef() ?? "not configured"}
+            effort={reasoning()}
+            planMode={planMode()}
+            todos={planTodos()}
+            agents={agents()}
+            showAgents={!layout().agentsPane}
+            selectedAgentKey={agentView()}
+            usage={{
+              ctxUsed: ctxUsed(),
+              ...(ctxLimit() !== undefined ? { ctxLimit: ctxLimit() } : {}),
+              input: sessionUsage().input,
+              output: sessionUsage().output,
+              cacheRead: sessionUsage().cacheRead,
+              costUSD: formatUSD(sessionCost()),
+            }}
+            files={changedFiles()}
+          />
         </Show>
       </box>
+
+      {/* Narrow layout: plan + agents pinned above the composer. */}
+      <Show when={layout().strip && !pagerOpen() && !setup()}>
+        <PinnedStrip
+          todos={planTodos()}
+          agents={agents()}
+          width={dimensions().width}
+          expanded={planExpanded()}
+        />
+      </Show>
 
       <Show when={loopCard()}>
         {(card: Accessor<LoopCardState>) => (

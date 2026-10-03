@@ -42,6 +42,9 @@ export interface CommandActions {
   rewind(): void
   pickEffort(): void
   togglePlan(): void
+  toggleSidebar(): void
+  /** "" lists the session's subagents; "N" opens agent N; "main" returns. */
+  agents(arg: string): void
   planMode(): boolean
   contextText(): string
   initProject(): void
@@ -346,6 +349,20 @@ export const COMMANDS: SlashCommand[] = [
     run: (_arg, a) => a.initProject(),
   },
   {
+    name: "agents",
+    args: "[N|main]",
+    description: "parallel subagents this session — N opens one's conversation, main goes back",
+    keywords: ["subagents", "parallel", "workers", "fanout", "fan-out", "children"],
+    run: (arg, a) => a.agents(arg.trim()),
+  },
+  {
+    name: "sidebar",
+    args: "",
+    description: "show or hide the side panel (plan, agents, usage, changed files)",
+    keywords: ["panel", "panels", "layout", "pane", "todo", "todos"],
+    run: (_arg, a) => a.toggleSidebar(),
+  },
+  {
     name: "graph",
     args: "[rebuild]",
     description: "code graph: files, symbols, modules, project map — rebuild re-indexes",
@@ -435,7 +452,7 @@ export const COMMANDS: SlashCommand[] = [
     args: "[merge|discard <id>]",
     description: "parallel agents' isolated worktrees — list, merge into the main tree, or discard",
     aliases: ["worktree"],
-    keywords: ["wt", "parallel", "agents", "subagents", "spawns", "workers", "integrate"],
+    keywords: ["wt", "parallel", "subagents", "spawns", "workers", "integrate"],
     run: async (arg, a) => {
       const [verb = "", id = ""] = arg.trim().split(/\s+/)
       if (verb === "") a.info(await a.worktreesText(), true)
@@ -592,6 +609,9 @@ export function renderHelp(): string {
     "Esc cancels setup",
     "Ctrl+O opens the transcript pager",
     "Shift+Tab cycles thinking effort (default > low > medium > high > xhigh > none)",
+    "Alt+Left/Right switch between the main conversation and each parallel agent's; Esc goes back",
+    "Ctrl+X then B toggles the sidebar · A opens the next agent · 0-9 jumps to main/agent N",
+    "Ctrl+T expands/collapses the pinned plan (narrow terminals)",
     "Ctrl+R expands/collapses the last thinking block (this session's view only — thinking blocks are not replayed on /resume)",
   ]
   const keyLines = keys.map((key) => `  ${wrapHanging(key, 4, HELP_DESC_WIDTH)}`)

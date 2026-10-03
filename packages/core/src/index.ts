@@ -322,6 +322,7 @@ export {
   type SessionSummary,
 } from "./session/sessions"
 export { createSnapshot, listUntracked, restoreSnapshot } from "./session/snapshot"
+export { todosFromTimeline } from "./session/todo-state"
 export { describeVerification, type TurnVerification, verifyLatestTurn } from "./session/verify"
 // Tools
 export {
@@ -342,6 +343,7 @@ export {
   type AskDenial,
   type AskRequest,
   describeDenial,
+  type SubagentUpdate,
   type ToolContext,
   type ToolDefinition,
   ToolRegistry,

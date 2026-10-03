@@ -581,7 +581,8 @@ test("the transcript scrollbar reserves a gutter — a near-full-width line is n
     await t.renderOnce()
     t.mockInput.typeText("/help")
     t.mockInput.pressEnter()
-    await waitForFrameSlow(t, (frame: string) => frame.includes("/quit"))
+    // The last line of /help (its keys list) — the view sticks to the bottom.
+    await waitForFrameSlow(t, (frame: string) => frame.includes("pinned plan"))
     t.mockInput.typeText("echo it")
     t.mockInput.pressEnter()
     const frame = await waitForFrameSlow(t, (f: string) => f.includes("done"), 25_000)
@@ -3561,7 +3562,9 @@ test("/loop run --allow-dirty is an explicit, loud opt-out that does start the l
     t.mockInput.typeText("/loop run --allow-dirty")
     t.mockInput.pressEnter()
     const warned = await waitForFrameSlow(t, (f) => f.includes("--allow-dirty: starting"))
-    expect(warned).toContain("WILL be included")
+    // The sidebar narrows the conversation, so the warning may wrap.
+    expect(warned).toContain("WILL be")
+    expect(warned).toContain("included in them")
     expect(warned).toContain("app.ts")
 
     const summary = await waitForFrameSlow(
@@ -3906,7 +3909,7 @@ test("an inline <think> block from a qwen-style model feeds the SAME thinking pr
   }
 }, 30_000)
 
-test("todo tool meta renders a card with glyphs + progress, and only the LATEST todo result keeps the card (recency)", async () => {
+test("the plan lives in the sidebar (glyphs, progress, live updates) and the transcript keeps a one-line row", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
   const server = startFakeSequenceServer(
@@ -3950,15 +3953,18 @@ test("todo tool meta renders a card with glyphs + progress, and only the LATEST 
     t.mockInput.typeText("plan the work")
     t.mockInput.pressEnter()
 
-    const firstCard = await waitForFrameSlow(t, (frame) => frame.includes("todos 0/2"))
-    expect(firstCard).toContain("[~] first task")
-    expect(firstCard).toContain("[ ] second task")
+    const firstPlan = await waitForFrameSlow(t, (frame) => frame.includes("Plan 0/2"))
+    expect(firstPlan).toContain("[~] first task")
+    expect(firstPlan).toContain("[ ] second task")
 
     const settled = await waitForFrameSlow(t, (frame) => frame.includes("all done"))
-    expect(settled).toContain("todos 1/2")
+    expect(settled).toContain("Plan 1/2")
     expect(settled).toContain("[x] first task")
     expect(settled).toContain("[~] second task")
-    expect(settled).not.toContain("todos 0/2")
+    expect(settled).not.toContain("Plan 0/2")
+    // The transcript keeps one row per plan update, outcome folded in.
+    expect(settled).toContain("· plan 0/2")
+    expect(settled).toContain("· plan 1/2")
 
     expect(spanFgFor(t, "[~] second task")).toEqual(hexToInts(DARK_TOKENS.accent))
 
@@ -4562,6 +4568,113 @@ test("a long many-chunk reply streams in step with the model and the view follow
     expect(done).toContain("120. Point 120") // the view stuck to the end
     t.renderer.destroy()
   } finally {
+    server.stop()
+  }
+}, 40_000)
+
+
+function multiPaneScenario(cwd: string) {
+  mkdirSync(join(cwd, "src"), { recursive: true })
+  writeFileSync(join(cwd, "src", "a.ts"), "export const a = 1\n".repeat(40))
+  return startFakeSequenceServer(
+    [
+      toolCallStreamBody(
+        "todo",
+        {
+          items: [
+            { text: "Map the codebase", status: "completed" },
+            { text: "Fix the services layer", status: "in_progress" },
+            { text: "Run lint and build", status: "pending" },
+          ],
+        },
+        "t1",
+      ),
+      toolCallStreamBody(
+        "task",
+        { tasks: [{ task: "Audit src/services for bugs" }, { task: "Audit src/components" }] },
+        "k1",
+      ),
+      textStreamBody("Services: 3 issues found."),
+      textStreamBody("Components: 2 issues found."),
+      toolCallStreamBody("read", { file_path: "src/a.ts" }, "r1"),
+      textStreamBody("Summary written."),
+    ],
+    { delayMs: 60 },
+  )
+}
+
+async function runScenario(width: number) {
+  const cwd = tempDir("bfly-tui-panes-")
+  await gitFixture(cwd)
+  const server = multiPaneScenario(cwd)
+  const t = await testRender(
+    () => (
+      <App
+        cwd={cwd}
+        config={{
+          model: "fake/m",
+          providers: { fake: { baseURL: server.baseURL } },
+          permissions: { "*": "allow" },
+          autoContinue: 0,
+        }}
+        home={tempDir("bfly-home-")}
+      />
+    ),
+    { width, height: 36 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("find areas of improvement")
+  t.mockInput.pressEnter()
+  const frame = await waitForFrameSlow(
+    t,
+    (f) =>
+      f.includes("Summary written") && f.includes("1 steps") === false && !f.includes("thinking…"),
+    25_000,
+  )
+  return { t, server, frame }
+}
+
+test("wide terminal: the plan, agents and usage sit in a sidebar; routine tool results fold into their row", async () => {
+  const { t, server, frame } = await runScenario(150)
+  try {
+    expect(frame).toContain("Plan 1/3")
+    expect(frame).toContain("[~] Fix the services layer")
+    expect(frame).toContain("Agents 2")
+    expect(frame).toContain("Context")
+    expect(frame).toContain("read src/a.ts · 40 lines")
+  } finally {
+    t.renderer.destroy()
+    server.stop()
+  }
+}, 40_000)
+
+test("very wide terminal: an agents column, and Alt+Right opens a subagent's own conversation (Esc returns)", async () => {
+  const { t, server, frame } = await runScenario(200)
+  try {
+    expect(frame).toContain("Agents 2")
+    t.mockInput.pressKey("ARROW_RIGHT", { meta: true })
+    const opened = await waitForFrameSlow(
+      t,
+      (f) => f.includes("agent 1/2") && /(Services|Components): \d issues found/.test(f),
+    )
+    expect(opened).toContain("Audit src/services for bugs")
+    t.mockInput.pressEscape()
+    const back = await waitForFrameSlow(t, (f) => !f.includes("agent 1/2"))
+    expect(back).toContain("find areas of improvement")
+  } finally {
+    t.renderer.destroy()
+    server.stop()
+  }
+}, 40_000)
+
+test("narrow terminal: plan and agents stay pinned above the composer", async () => {
+  const { t, server, frame } = await runScenario(100)
+  try {
+    expect(frame).toContain("plan 1/3  [~] Fix the services layer")
+    expect(frame).toContain("agents 2 · 2 done")
+    expect(frame).not.toContain("Context")
+  } finally {
+    t.renderer.destroy()
     server.stop()
   }
 }, 40_000)
