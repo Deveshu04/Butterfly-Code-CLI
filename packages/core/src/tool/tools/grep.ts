@@ -7,6 +7,7 @@ import {
 } from "../../platform/embedded-assets"
 import { VERSION } from "../../version"
 import type { ToolDefinition } from "../registry"
+import { collectBounded } from "../shell"
 
 const require = createRequire(import.meta.url)
 
@@ -114,8 +115,8 @@ export const grepTool: ToolDefinition<z.infer<typeof grepInput>> = {
       windowsHide: true,
     })
     const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+      collectBounded(proc.stdout),
+      collectBounded(proc.stderr),
       proc.exited,
     ])
 
