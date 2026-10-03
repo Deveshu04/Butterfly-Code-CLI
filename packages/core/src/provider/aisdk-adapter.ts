@@ -108,6 +108,35 @@ export function toModelMessages(messages: ChatMessage[]): {
   return { system, model }
 }
 
+export function withAnthropicCacheBreakpoints(messages: ModelMessage[]): ModelMessage[] {
+  const marked = [...messages]
+  const mark = (index: number) => {
+    const message = marked[index]
+    if (!message) return
+    marked[index] = {
+      ...message,
+      providerOptions: {
+        ...message.providerOptions,
+        anthropic: {
+          ...message.providerOptions?.["anthropic"],
+          cacheControl: { type: "ephemeral" },
+        },
+      },
+    } as ModelMessage
+  }
+  const last = marked.length - 1
+  if (last < 0) return marked
+  mark(last)
+  for (let i = last - 1; i >= 0; i--) {
+    const role = marked[i]?.role
+    if (role === "user" || role === "tool") {
+      mark(i)
+      break
+    }
+  }
+  return marked
+}
+
 function toSdkTools(specs: ToolSpec[] | undefined) {
   if (!specs || specs.length === 0) return undefined
   return Object.fromEntries(
@@ -139,7 +168,10 @@ export class AiSdkProvider implements ProviderPort {
 
   async *streamTurn(request: TurnRequest): AsyncIterable<TurnEvent> {
     const { model, providerId } = this.resolveModel(request.model)
-    const { system, model: messages } = toModelMessages(request.messages)
+    const converted = toModelMessages(request.messages)
+    const system = converted.system
+    const messages =
+      providerId === "anthropic" ? withAnthropicCacheBreakpoints(converted.model) : converted.model
 
     const instructions =
       system === undefined
