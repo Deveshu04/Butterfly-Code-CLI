@@ -38,7 +38,10 @@ export function mapFinishReason(reason: string): FinishReason {
   return "error"
 }
 
-export function toModelMessages(messages: ChatMessage[]): {
+export function toModelMessages(
+  messages: ChatMessage[],
+  opts?: { sendReasoning?: boolean },
+): {
   system?: string
   model: ModelMessage[]
 } {
@@ -69,9 +72,17 @@ export function toModelMessages(messages: ChatMessage[]): {
           model.push({ role: "assistant", content: message.content })
           break
         }
+        // OpenAI-compatible providers serialize a reasoning part as the
+        // message's reasoning_content — what DeepSeek-style thinking models
+        // require back inside a tool loop.
+        const reasoning =
+          opts?.sendReasoning === true && message.reasoning
+            ? [{ type: "reasoning" as const, text: message.reasoning }]
+            : []
         model.push({
           role: "assistant",
           content: [
+            ...reasoning,
             ...(message.content !== "" ? [{ type: "text" as const, text: message.content }] : []),
             ...message.toolCalls.map((call) => ({
               type: "tool-call" as const,
@@ -168,7 +179,11 @@ export class AiSdkProvider implements ProviderPort {
 
   async *streamTurn(request: TurnRequest): AsyncIterable<TurnEvent> {
     const { model, providerId } = this.resolveModel(request.model)
-    const converted = toModelMessages(request.messages)
+    // Native Anthropic/Gemini reasoning needs provider signatures we don't
+    // keep; only OpenAI-compatible endpoints take plain reasoning_content.
+    const converted = toModelMessages(request.messages, {
+      sendReasoning: providerId !== "anthropic" && providerId !== "google",
+    })
     const system = converted.system
     const messages =
       providerId === "anthropic" ? withAnthropicCacheBreakpoints(converted.model) : converted.model

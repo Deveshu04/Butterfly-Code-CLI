@@ -9,7 +9,7 @@ export type ChatMessagePart =
 export type ChatMessage =
   | { role: "system"; content: string; cacheHint?: boolean }
   | { role: "user"; content: string | ChatMessagePart[] }
-  | { role: "assistant"; content: string; toolCalls?: ToolCallPart[] }
+  | { role: "assistant"; content: string; toolCalls?: ToolCallPart[]; reasoning?: string }
   | { role: "tool"; callId: string; name: string; output: string; isError?: boolean }
 
 export interface ToolCallPart {

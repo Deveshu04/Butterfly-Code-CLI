@@ -39,7 +39,13 @@ export const SessionEvent = z.discriminatedUnion("type", [
       .array(z.object({ path: z.string(), mediaType: z.string(), sha256: z.string() }))
       .optional(),
   }),
-  z.object({ ...base, type: z.literal("message.assistant"), id: z.string(), text: z.string() }),
+  z.object({
+    ...base,
+    type: z.literal("message.assistant"),
+    id: z.string(),
+    text: z.string(),
+    reasoning: z.string().optional(),
+  }),
   z.object({
     ...base,
     type: z.literal("tool.call"),

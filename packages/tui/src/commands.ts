@@ -592,7 +592,7 @@ export function renderHelp(): string {
     "Esc cancels setup",
     "Ctrl+O opens the transcript pager",
     "Shift+Tab cycles thinking effort (default > low > medium > high > xhigh > none)",
-    "Ctrl+R expands/collapses the last thinking block (this session's view only — reasoning is never journaled, so it does not survive /resume)",
+    "Ctrl+R expands/collapses the last thinking block (this session's view only — thinking blocks are not replayed on /resume)",
   ]
   const keyLines = keys.map((key) => `  ${wrapHanging(key, 4, HELP_DESC_WIDTH)}`)
   return `commands:\n${lines.join("\n")}\nkeys:\n${keyLines.join("\n")}`

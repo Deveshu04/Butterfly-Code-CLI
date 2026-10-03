@@ -32,7 +32,12 @@ export function assemble(opts: AssembleOptions): ChatMessage[] {
     }
   }
 
-  for (const event of opts.timeline) {
+  let currentTurnStart = 0
+  opts.timeline.forEach((event, index) => {
+    if (event.type === "message.user") currentTurnStart = index
+  })
+
+  for (const [index, event] of opts.timeline.entries()) {
     switch (event.type) {
       case "message.user":
         closeOrphanedCalls()
@@ -50,7 +55,13 @@ export function assemble(opts: AssembleOptions): ChatMessage[] {
         }
         break
       case "message.assistant":
-        messages.push({ role: "assistant", content: event.text })
+        messages.push({
+          role: "assistant",
+          content: event.text,
+          ...(event.reasoning !== undefined && index > currentTurnStart
+            ? { reasoning: event.reasoning }
+            : {}),
+        })
         break
       case "tool.call": {
         callNames.set(event.callId, event.name)

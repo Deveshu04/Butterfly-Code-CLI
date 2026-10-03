@@ -99,6 +99,8 @@ export interface TurnOutcome {
 }
 
 export const DEFAULT_MAX_STEPS = 50
+/** Cap on a tool-calling step's journaled reasoning (see message.assistant.reasoning). */
+export const MAX_JOURNALED_REASONING = 32_000
 export const DEFAULT_RETRIES = 3
 /** Auto-continue nudges per turn (RunnerDeps.autoContinue). */
 export const DEFAULT_AUTO_CONTINUE = 2
@@ -349,6 +351,7 @@ export async function runUserTurn(
     let messages = buildMessages(timelineEvents)
 
     let stepText = ""
+    let stepReasoning = ""
     const toolCalls: ToolCallPart[] = []
     let finish: { reason: FinishReason; usage: Usage } | undefined
 
@@ -358,6 +361,7 @@ export async function runUserTurn(
     for (;;) {
       attempt += 1
       stepText = ""
+      stepReasoning = ""
       toolCalls.length = 0
       finish = undefined
       let failure: Extract<TurnEvent, { type: "error" }> | undefined
@@ -377,6 +381,9 @@ export async function runUserTurn(
         switch (event.type) {
           case "text-delta":
             stepText += event.text
+            break
+          case "reasoning-delta":
+            stepReasoning += event.text
             break
           case "tool-call":
             toolCalls.push({ callId: event.callId, name: event.name, input: event.input })
@@ -455,6 +462,9 @@ export async function runUserTurn(
       type: "message.assistant",
       id: crypto.randomUUID(),
       text: stepText,
+      ...(toolCalls.length > 0 && stepReasoning.trim() !== ""
+        ? { reasoning: stepReasoning.slice(0, MAX_JOURNALED_REASONING) }
+        : {}),
       time: now(),
     })
     for (const call of toolCalls) {
