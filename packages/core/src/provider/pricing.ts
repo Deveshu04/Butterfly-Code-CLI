@@ -24,3 +24,8 @@ export function formatUSD(amount: number): string {
   if (amount < 0.01) return `$${amount.toFixed(4)}`
   return `$${amount.toFixed(2)}`
 }
+
+export function cacheHitRate(usage: Usage): number | undefined {
+  if (usage.input <= 0) return undefined
+  return Math.min(1, usage.cacheRead / usage.input)
+}

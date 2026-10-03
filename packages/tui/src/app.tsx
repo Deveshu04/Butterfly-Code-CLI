@@ -12,6 +12,7 @@ import {
   buildSkeleton,
   buildSystem,
   CodeGraph,
+  cacheHitRate,
   clearProgressOsc,
   compactSession,
   computeCostUSD,
@@ -1436,6 +1437,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
     },
     status: () => {
+      const cacheLine = (): string => {
+        const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+        for (const event of SessionJournal.replay(session.journal.path).events) {
+          if (event.type !== "turn.completed") continue
+          total.input += event.usage.input
+          total.cacheRead += event.usage.cacheRead
+        }
+        const rate = cacheHitRate(total)
+        return rate === undefined
+          ? "no turns yet"
+          : `${Math.round(rate * 100)}% of ${total.input.toLocaleString()} prompt tokens served from cache`
+      }
       const limit = ctxLimit()
       const used = ctxUsed()
       const pct = limit ? Math.round((used / limit) * 100) : undefined
@@ -1443,6 +1456,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         `model      ${modelRef() ?? "not configured"}`,
         `context    ${used.toLocaleString()} used${limit ? ` / ${limit.toLocaleString()} (${pct}%)` : " (limit unknown)"}`,
         `thinking   ${reasoning() ?? "provider default"}`,
+        `cache      ${cacheLine()}`,
         `spend      ${formatUSD(sessionCost())} this session${config().maxSpendUSD !== undefined ? ` (cap $${config().maxSpendUSD?.toFixed(2)}/turn)` : ""}`,
         `small      ${config().small_model ?? (summaryModel(modelRef() ?? "") ? `${summaryModel(modelRef() ?? "")} (auto — cheapest-tier same-provider model, for summaries)` : "not set")}`,
         `journal    ${displayPath(session.journal.path)}`,

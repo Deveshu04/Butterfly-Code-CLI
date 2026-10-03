@@ -217,7 +217,7 @@ export type {
   TurnEvent,
   TurnRequest,
 } from "./provider/port"
-export { computeCostUSD, formatUSD, type ModelCost } from "./provider/pricing"
+export { cacheHitRate, computeCostUSD, formatUSD, type ModelCost } from "./provider/pricing"
 export { assemble } from "./session/assembly"
 // Session
 export {

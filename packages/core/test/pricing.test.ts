@@ -21,3 +21,9 @@ test("inconsistent provider numbers never bill negative fresh input", () => {
     12,
   )
 })
+
+test("cache hit rate is the cached share of prompt tokens", async () => {
+  const { cacheHitRate } = await import("../src/provider/pricing")
+  expect(cacheHitRate({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })).toBeUndefined()
+  expect(cacheHitRate({ input: 1_000, output: 10, cacheRead: 900, cacheWrite: 0 })).toBe(0.9)
+})
