@@ -63,6 +63,8 @@ export interface RunCommandResult {
   stderr: string
   exitCode: number
   timedOut: boolean
+  /** Stopped by its signal or killCommand() — not by the timeout. */
+  killed?: boolean
 }
 
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024
@@ -70,6 +72,7 @@ export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024
 export async function collectBounded(
   stream: ReadableStream<Uint8Array>,
   maxBytes: number = MAX_CAPTURE_BYTES,
+  onChunk?: (chunk: Uint8Array) => void,
 ): Promise<string> {
   const headLimit = Math.floor(maxBytes * 0.6)
   const tailLimit = maxBytes - headLimit
@@ -79,6 +82,7 @@ export async function collectBounded(
   let tailBytes = 0
   let dropped = 0
   for await (const chunk of stream) {
+    onChunk?.(chunk)
     let rest = chunk
     if (headBytes < headLimit) {
       const take = rest.subarray(0, headLimit - headBytes)
@@ -112,12 +116,37 @@ export async function collectBounded(
   return `${headText}\n[... ${dropped} bytes of output not captured ...]\n${tailText}`
 }
 
+/**
+ * Foreground commands currently running, by id (the tool call id). Lets a
+ * UI stop ONE command without interrupting the whole turn — the command
+ * ends as killed and the model sees that in its result.
+ */
+const liveCommands = new Map<string, () => void>()
+
+/** Kill a running foreground command started with `runCommand({ id })`. */
+export function killCommand(id: string): boolean {
+  const kill = liveCommands.get(id)
+  if (!kill) return false
+  kill()
+  return true
+}
+
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000
 export const MAX_COMMAND_TIMEOUT_MS = 600_000
 
 export async function runCommand(
   command: string,
-  opts: { cwd: string; timeoutMs?: number; env?: Record<string, string> },
+  opts: {
+    cwd: string
+    timeoutMs?: number
+    env?: Record<string, string>
+    /** Kills the command (and its children) when fired. */
+    signal?: AbortSignal
+    /** Live output, stdout and stderr interleaved, as it arrives (UI only). */
+    onOutput?: (text: string) => void
+    /** Registers the command for killCommand(id) while it runs. */
+    id?: string
+  },
 ): Promise<RunCommandResult> {
   const { exe, args } = resolveShell()
   const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS)
@@ -128,6 +157,7 @@ export async function runCommand(
     stdout: "pipe",
     stderr: "pipe",
     windowsHide: true,
+    ...(process.platform !== "win32" ? { detached: true } : {}),
     env: {
       ...process.env,
       PAGER: "cat",
@@ -140,17 +170,42 @@ export async function runCommand(
   })
 
   let timedOut = false
+  let killed = false
   const timer = setTimeout(() => {
     timedOut = true
     killTree(proc)
   }, timeoutMs)
+  const kill = () => {
+    if (killed) return
+    killed = true
+    killTree(proc)
+  }
+  if (opts.signal?.aborted) kill()
+  opts.signal?.addEventListener("abort", kill, { once: true })
+  if (opts.id !== undefined) liveCommands.set(opts.id, kill)
 
-  const [stdout, stderr, exitCode] = await Promise.all([
-    collectBounded(proc.stdout),
-    collectBounded(proc.stderr),
-    proc.exited,
-  ])
-  clearTimeout(timer)
+  const onOutput = opts.onOutput
+  const decoders = [new TextDecoder(), new TextDecoder()]
+  const tee = onOutput
+    ? (n: 0 | 1) => (chunk: Uint8Array) => {
+        try {
+          onOutput((decoders[n] as TextDecoder).decode(chunk, { stream: true }))
+        } catch {
+          // a UI callback must never break the command
+        }
+      }
+    : undefined
 
-  return { stdout, stderr, exitCode, timedOut }
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      collectBounded(proc.stdout, MAX_CAPTURE_BYTES, tee?.(0)),
+      collectBounded(proc.stderr, MAX_CAPTURE_BYTES, tee?.(1)),
+      proc.exited,
+    ])
+    return { stdout, stderr, exitCode, timedOut, ...(killed ? { killed: true } : {}) }
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener("abort", kill)
+    if (opts.id !== undefined && liveCommands.get(opts.id) === kill) liveCommands.delete(opts.id)
+  }
 }

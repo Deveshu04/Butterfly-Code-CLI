@@ -350,6 +350,7 @@ export {
 } from "./tool/registry"
 export { DEFAULT_MODEL_OUTPUT_CHARS, settle } from "./tool/settle"
 export {
+  killCommand,
   killTree,
   resolveShell,
   runCommand,

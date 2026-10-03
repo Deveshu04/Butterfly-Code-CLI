@@ -51,6 +51,7 @@ import {
   grepTool,
   type ImageRef,
   journalReview,
+  killCommand,
   type LoopEvent,
   listMentionCandidates,
   listSessions,
@@ -137,6 +138,7 @@ import {
 } from "@opentui/solid"
 import {
   type Accessor,
+  createEffect,
   createMemo,
   createSignal,
   For,
@@ -173,9 +175,11 @@ import {
   type AgentEntry,
   compactToolResult,
   type LayoutPlan,
+  liveTail,
   planLayout,
   type ShellView,
   type SidebarPref,
+  shellRow,
   shortElapsed,
   type TodoItemView,
   type ToolTone,
@@ -197,7 +201,7 @@ import {
 } from "./loop-card"
 import { buildPagerDoc, type PagerDoc, searchPagerLines, stepLine } from "./pager"
 import { PagerView } from "./pager-view"
-import { AgentsPane, AgentViewHeader, PinnedStrip, Sidebar } from "./panels"
+import { AgentsPane, AgentViewHeader, PinnedStrip, ShellPane, Sidebar } from "./panels"
 import {
   addPasteChip,
   expandComposerText,
@@ -237,6 +241,12 @@ interface Message {
   summary?: string
   /** Tool-call rows: still executing (live sessions only). */
   pending?: boolean
+  /** Tool-call rows: the call failed (its error sits right under the row). */
+  failed?: boolean
+  /** Result blocks: the call id they belong to — they sit under that row. */
+  resultOf?: string
+  /** Running command rows: the live tail of the command's output. */
+  liveOutput?: string
   action?: boolean
   /** Tool-call rows: when the call started (live) — drives "running 12s". */
   startedAt?: number
@@ -499,8 +509,9 @@ function applyToolResult(
     return next
   }
   const todos = metaTodos(meta)?.todos
+  const diff = metaDiff(meta)
   const summary =
-    !isError && row?.toolName && metaDiff(meta) === undefined && metaBash(meta) === undefined
+    !isError && row?.toolName && diff === undefined && metaBash(meta) === undefined
       ? todos
         ? `plan ${todos.filter((t) => t.status === "completed").length}/${todos.length}`
         : compactToolResult(row.toolName, output)
@@ -510,9 +521,34 @@ function applyToolResult(
     next[at] = { ...row, summary, pending: false }
     return next
   }
-  if (row?.pending) next[at] = { ...row, pending: false }
-  next.push(toolResultMessage(output, isError, meta))
+  if (!row) {
+    next.push(toolResultMessage(output, isError, meta))
+    return next
+  }
+  next[at] = {
+    ...row,
+    pending: false,
+    ...(isError ? { failed: true, summary: "failed" } : {}),
+    ...(!isError && diff ? { summary: editSummary(output) } : {}),
+  }
+  const block: Message = {
+    ...toolResultMessage(output, isError, meta),
+    resultOf: callId,
+    // The row already says what happened; the diff speaks for itself.
+    ...(!isError && diff ? { text: "" } : {}),
+  }
+  let insert = at + 1
+  while (insert < next.length && next[insert]?.resultOf === callId) insert += 1
+  next.splice(insert, 0, block)
   return next
+}
+
+/** "Edited a.ts (2 replacements)." -> "2 replacements"; else a short first line. */
+function editSummary(output: string): string {
+  const count = output.match(/\((\d+ replacements?)\)/)?.[1]
+  if (count) return count
+  const first = (output.split("\n")[0] ?? "").trim().replace(/\.$/, "")
+  return first.length > 48 ? `${first.slice(0, 47)}…` : first || "done"
 }
 
 function errorCardHeadline(info: ProviderErrorInfo): string {
@@ -531,6 +567,16 @@ const TODO_GLYPH: Record<TodoMeta["status"], string> = {
   completed: "[x]",
 }
 
+/** First meaningful line of a thought, trimmed to fit one row. */
+export function thinkingGist(text: string, max = 72): string {
+  const line =
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l !== "") ?? ""
+  return line.length > max ? `${line.slice(0, max - 3)}...` : line
+}
+
 function ThinkingBlock(props: {
   thinkingText: string
   open: boolean
@@ -542,26 +588,51 @@ function ThinkingBlock(props: {
     props.startedAt !== undefined && props.closedAt !== undefined
       ? Math.max(0, Math.round((props.closedAt - props.startedAt) / 1000))
       : undefined
+  const gist = () => thinkingGist(props.thinkingText)
   return (
     <box flexDirection="column">
       <Show
         when={props.open}
         fallback={
-          <text fg={themeTokens().muted}>
-            {seconds() !== undefined ? `thought for ${seconds()}s` : "thought"}
+          <text>
+            <Tint fg={themeTokens().muted} italic>
+              {seconds() !== undefined ? `thought for ${seconds()}s` : "thought"}
+            </Tint>
+            <Tint fg={themeTokens().muted} italic>
+              {!props.expanded && gist() !== "" ? ` - ${gist()}` : ""}
+            </Tint>
+            <Tint fg={themeTokens().border}>
+              {!props.expanded && props.thinkingText.trim() !== "" ? "  (ctrl+r)" : ""}
+            </Tint>
           </text>
         }
       >
         <box flexDirection="column">
-          <text fg={themeTokens().muted}>{"thinking…"}</text>
+          <text>
+            <Tint fg={themeTokens().muted} italic>
+              {"thinking…"}
+            </Tint>
+          </text>
           <For each={props.thinkingText.split("\n").slice(-3)}>
-            {(line) => <text fg={themeTokens().muted}>{`  ${line}`}</text>}
+            {(line) => (
+              <text>
+                <Tint fg={themeTokens().muted} italic>{`  ${line}`}</Tint>
+              </text>
+            )}
           </For>
         </box>
       </Show>
       <Show when={props.expanded && !props.open && props.thinkingText.trim() !== ""}>
         <box paddingLeft={2} flexDirection="column">
-          <text fg={themeTokens().muted}>{props.thinkingText.trim()}</text>
+          <For each={props.thinkingText.trim().split("\n")}>
+            {(line) => (
+              <text>
+                <Tint fg={themeTokens().muted} italic>
+                  {line}
+                </Tint>
+              </text>
+            )}
+          </For>
         </box>
       </Show>
     </box>
@@ -593,7 +664,7 @@ function MessageLine(props: { line: string; tone: string | undefined; structured
 function MessageLines(props: { text: string; tone: string | undefined; structured?: boolean }) {
   return (
     <box flexDirection="column">
-      <For each={props.text.split("\n")}>
+      <For each={props.text === "" ? [] : props.text.split("\n")}>
         {(line) => (
           <MessageLine line={line} tone={props.tone} structured={props.structured ?? false} />
         )}
@@ -602,8 +673,20 @@ function MessageLines(props: { text: string; tone: string | undefined; structure
   )
 }
 
-function Tint(props: { fg: string; children: string }) {
-  return <span {...({ fg: props.fg } as unknown as Record<string, never>)}>{props.children}</span>
+function Tint(props: { fg: string; italic?: boolean; bold?: boolean; children: string }) {
+  return (
+    <span
+      {...({
+        style: {
+          fg: props.fg,
+          ...(props.italic ? { italic: true } : {}),
+          ...(props.bold ? { bold: true } : {}),
+        },
+      } as unknown as Record<string, never>)}
+    >
+      {props.children}
+    </span>
+  )
 }
 
 /** Verb colour per tool family (layout.toolTone). */
@@ -628,6 +711,7 @@ function toneColor(tone: ToolTone): string {
 function ToolCallRow(props: {
   text: string
   summary?: string
+  failed?: boolean
   pending?: boolean
   /** Live elapsed for a running call ("running 12s"), from the 1s ticker. */
   runningFor?: string
@@ -641,7 +725,7 @@ function ToolCallRow(props: {
       <Tint fg={name() === "bash" ? themeTokens().fg : themeTokens().muted}>
         {args() !== "" ? ` ${args()}` : ""}
       </Tint>
-      <Tint fg={themeTokens().success}>
+      <Tint fg={props.failed ? themeTokens().error : themeTokens().success}>
         {props.summary !== undefined ? ` · ${props.summary}` : ""}
       </Tint>
       <Tint fg={themeTokens().muted}>
@@ -833,6 +917,23 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   /** Key of the subagent whose conversation fills the center, or undefined (main). */
   const [agentView, setAgentView] = createSignal<string | undefined>(undefined)
   const [agentMessages, setAgentMessages] = createSignal<Message[]>([])
+  /**
+   * Every foreground command this session ran (bash calls), with its output
+   * — live while it runs. Background tasks come from the registry instead.
+   */
+  const [fgShells, setFgShells] = createSignal<(ShellView & { output: string })[]>([])
+  const runningShellCount = () => fgShells().filter((shell) => shell.status === "running").length
+  /** Id of the shell whose output fills the center, or undefined. */
+  const [shellView, setShellView] = createSignal<string | undefined>(undefined)
+  /** Polled log tail of the viewed background shell. */
+  const [bgShellOutput, setBgShellOutput] = createSignal("")
+  const updateFgShell = (id: string, patch: Partial<ShellView & { output: string }>) => {
+    const current = fgShells()
+    const at = current.findIndex((shell) => shell.id === id)
+    if (at < 0) return false
+    setFgShells(current.map((shell, i) => (i === at ? { ...shell, ...patch } : shell)))
+    return true
+  }
   const [changedFiles, setChangedFiles] = createSignal<string[]>([])
   const [sessionUsage, setSessionUsage] = createSignal<Usage>({
     input: 0,
@@ -874,6 +975,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     setAgents(next)
     if (agentView() === key) loadAgentMessages(entry)
   }
+  createEffect(() => {
+    if (agentView() !== undefined) setShellView(undefined)
+  })
   /** Alt+Right / Alt+Left: main -> agent 1 -> ... -> agent n -> main. */
   const cycleAgentView = (step: 1 | -1) => {
     const keys = [undefined, ...agents().map((a) => a.key)]
@@ -893,6 +997,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const syncPanels = () => {
     setAgents([])
     setAgentView(undefined)
+    setFgShells([])
+    setShellView(undefined)
     try {
       const { header, events } = SessionJournal.replay(session.journal.path)
       const timeline = project(header, events).timeline
@@ -1572,9 +1678,33 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           pending: true,
           startedAt: Date.now(),
         })
+        const input = event.input as { command?: unknown; background?: unknown } | undefined
+        if (event.name === "bash" && input?.background !== true) {
+          setFgShells(
+            [
+              ...fgShells(),
+              {
+                kind: "fg" as const,
+                id: event.callId,
+                command: typeof input?.command === "string" ? input.command : "",
+                status: "running" as const,
+                startedAt: Date.now(),
+                output: "",
+              },
+            ].slice(-50),
+          )
+        }
         break
       }
       case "tool-progress": {
+        if (updateFgShell(event.callId, { output: event.text })) {
+          setMessages(
+            messages().map((m) =>
+              m.isCall && m.callId === event.callId ? { ...m, liveOutput: event.text } : m,
+            ),
+          )
+          break
+        }
         const all = [...messages()]
         const line: Message = {
           kind: "info",
@@ -1591,6 +1721,15 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         break
       }
       case "tool-result": {
+        const exitCode = metaBash(event.meta)?.exitCode
+        updateFgShell(event.callId, {
+          output: event.output,
+          status:
+            exitCode === undefined || event.output.includes("stopped by the user")
+              ? "killed"
+              : "exited",
+          ...(exitCode !== undefined ? { exitCode } : {}),
+        })
         const live = messages().filter((m) => m.progressId !== event.callId)
         setMessages(applyToolResult(live, event.callId, event.output, event.isError, event.meta))
         stepAnchor = messages().length
@@ -2091,6 +2230,48 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     },
     toggleSidebar: () => {
       setSidebarPref(layout().sidebar ? "off" : "on")
+    },
+    shells: (arg) => {
+      const list = shells()
+      const [verb, rest] = arg.split(/\s+/, 2)
+      const pick = (n: string | undefined) =>
+        n && /^\d+$/.test(n) ? list[Number(n) - 1] : undefined
+      if (verb === "main" || verb === "close") {
+        openShell(undefined)
+        return
+      }
+      if (verb === "stop" || verb === "kill") {
+        const target = rest ? pick(rest) : viewedShell()
+        if (rest && !target) {
+          push({ kind: "error", text: `no shell ${rest} — /shells lists them` })
+          return
+        }
+        stopShell(target)
+        return
+      }
+      if (verb && /^\d+$/.test(verb)) {
+        const target = pick(verb)
+        if (!target) {
+          push({ kind: "error", text: `no shell ${verb} — /shells lists them` })
+          return
+        }
+        openShell(target.id)
+        return
+      }
+      if (list.length === 0) {
+        push({ kind: "info", text: "no shells yet this session" })
+        return
+      }
+      const now = Date.now()
+      push({
+        kind: "info",
+        text: [
+          "shells this session:",
+          ...list.map((shell, i) => `  ${shellRow(shell, i + 1, now, 72)}`),
+          "",
+          "/shells N opens one's output · /shells stop N stops it · Esc back",
+        ].join("\n"),
+      })
     },
     agents: (arg) => {
       const list = agents()
@@ -3238,6 +3419,16 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         cycleAgentView(1)
         return
       }
+      if (name === "s") {
+        key.preventDefault()
+        toggleShellView()
+        return
+      }
+      if (name === "k") {
+        key.preventDefault()
+        stopShell(viewedShell())
+        return
+      }
       if (/^[0-9]$/.test(name)) {
         key.preventDefault()
         const n = Number(name)
@@ -3254,7 +3445,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
     if (panelKeysLive && key.meta && (key.name === "left" || key.name === "right")) {
       key.preventDefault()
-      cycleAgentView(key.name === "right" ? 1 : -1)
+      if (shellView() !== undefined) cycleShellView(key.name === "right" ? 1 : -1)
+      else cycleAgentView(key.name === "right" ? 1 : -1)
       return
     }
     if (panelKeysLive && key.ctrl && key.name === "t") {
@@ -3265,11 +3457,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     if (
       panelKeysLive &&
       key.name === "escape" &&
-      agentView() !== undefined &&
+      (agentView() !== undefined || shellView() !== undefined) &&
       cmdList().length === 0
     ) {
       key.preventDefault()
       setAgentView(undefined)
+      setShellView(undefined)
       return
     }
     if (
@@ -3495,22 +3688,69 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       bgShellsKey = key
       setBgShells(list)
     }
+    refreshBgShellOutput()
     // Keep running background shells' elapsed times moving while idle too.
     if (!busy() && list.some((t) => t.status === "running")) setElapsedTick((t) => t + 1)
   }, 1000)
   onCleanup(() => clearInterval(bgPoll))
-  const shells = (): ShellView[] => [
-    ...messages()
-      .filter((m) => m.pending && m.toolName === "bash" && m.startedAt !== undefined)
-      .map((m) => ({
-        kind: "fg" as const,
-        id: m.callId ?? "fg",
-        command: m.text.replace(/^bash /, ""),
-        status: "running" as const,
-        startedAt: m.startedAt as number,
-      })),
-    ...bgShells().slice(-8),
-  ]
+  /** Every shell this session, in start order — ordinals are stable. */
+  const shells = (): ShellView[] =>
+    [...fgShells(), ...bgShells().slice(-20)].sort((a, b) => a.startedAt - b.startedAt)
+  const viewedShell = () => shells().find((shell) => shell.id === shellView())
+  const viewedShellOutput = (): string => {
+    const shell = viewedShell()
+    if (!shell) return ""
+    if (shell.kind === "bg") return bgShellOutput()
+    return fgShells().find((s) => s.id === shell.id)?.output ?? ""
+  }
+  const refreshBgShellOutput = () => {
+    const shell = viewedShell()
+    if (shell?.kind === "bg") setBgShellOutput(bgTasks.tail(shell.id, 20_000) ?? "")
+  }
+  const openShell = (id: string | undefined) => {
+    setShellView(id)
+    if (id !== undefined) {
+      setAgentView(undefined)
+      refreshBgShellOutput()
+    }
+  }
+  /** Ctrl+X S: open the running shell (else the latest); again closes it. */
+  const toggleShellView = () => {
+    if (shellView() !== undefined) {
+      openShell(undefined)
+      return
+    }
+    const list = shells()
+    const target = list.filter((s) => s.status === "running").at(-1) ?? list.at(-1)
+    if (!target) {
+      push({ kind: "info", text: "no shells yet this session" })
+      return
+    }
+    openShell(target.id)
+  }
+  const cycleShellView = (step: 1 | -1) => {
+    const list = shells()
+    if (list.length === 0) return
+    const at = list.findIndex((s) => s.id === shellView())
+    const next = list[(at + step + list.length) % list.length]
+    openShell(next?.id)
+  }
+  const stopShell = (shell: ShellView | undefined) => {
+    if (!shell) {
+      push({ kind: "info", text: "open a shell first (Ctrl+X S or /shells N)" })
+      return
+    }
+    const ordinal = shells().findIndex((s) => s.id === shell.id) + 1
+    if (shell.status !== "running") {
+      push({ kind: "info", text: `shell ${ordinal} already finished` })
+      return
+    }
+    const ok = shell.kind === "fg" ? killCommand(shell.id) : bgTasks.kill(shell.id)
+    push({
+      kind: "info",
+      text: ok ? `stopped shell ${ordinal}: ${shell.command}` : `shell ${ordinal} is not running`,
+    })
+  }
   /** Wall clock for elapsed shell times — ticks once a second while busy. */
   const clock = (): number => {
     elapsedTick()
@@ -3590,7 +3830,24 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               />
             )}
           </Show>
-          <box flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2}>
+          <Show when={!pagerOpen() && viewedShell()}>
+            {(shell: Accessor<ShellView>) => (
+              <ShellPane
+                shell={shell()}
+                ordinal={shells().findIndex((s) => s.id === shell().id) + 1}
+                total={shells().length}
+                now={clock()}
+                output={viewedShellOutput()}
+              />
+            )}
+          </Show>
+          <box
+            flexGrow={1}
+            minHeight={0}
+            paddingLeft={2}
+            paddingRight={2}
+            visible={pagerOpen() || viewedShell() === undefined}
+          >
             <Show
               when={!pagerOpen()}
               fallback={
@@ -3812,17 +4069,30 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                                       />
                                                     }
                                                   >
-                                                    <ToolCallRow
-                                                      text={message.text}
-                                                      summary={message.summary}
-                                                      pending={message.pending}
-                                                      runningFor={
-                                                        message.pending &&
-                                                        message.startedAt !== undefined
-                                                          ? runningFor(message.startedAt)
-                                                          : undefined
-                                                      }
-                                                    />
+                                                    <box flexDirection="column">
+                                                      <ToolCallRow
+                                                        text={message.text}
+                                                        summary={message.summary}
+                                                        failed={message.failed}
+                                                        pending={message.pending}
+                                                        runningFor={
+                                                          message.pending &&
+                                                          message.startedAt !== undefined
+                                                            ? runningFor(message.startedAt)
+                                                            : undefined
+                                                        }
+                                                      />
+                                                      <Show
+                                                        when={
+                                                          message.pending &&
+                                                          liveTail(message.liveOutput) !== ""
+                                                        }
+                                                      >
+                                                        <text fg={themeTokens().muted}>
+                                                          {liveTail(message.liveOutput)}
+                                                        </text>
+                                                      </Show>
+                                                    </box>
                                                   </Show>
                                                 }
                                               >
@@ -4245,7 +4515,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         <text fg={busy() ? themeTokens().accent : themeTokens().muted}>
           {busy()
             ?
-              `${SPINNER[spin()]} thinking… ${elapsedText()}  `
+              `${SPINNER[spin()]} ${runningShellCount() > 0 ? `running ${runningShellCount() === 1 ? "a command" : `${runningShellCount()} commands`}… (Ctrl+X S to watch)` : "thinking…"} ${elapsedText()}  `
             : status()
               ? `${status()}  `
               :

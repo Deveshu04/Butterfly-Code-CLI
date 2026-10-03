@@ -6,6 +6,9 @@ import { cleanCommandOutput } from "../output-hygiene"
 import type { ToolDefinition } from "../registry"
 import { DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS, runCommand } from "../shell"
 
+/** Tail of live output kept for the UI while a command runs. */
+const LIVE_OUTPUT_CHARS = 8_000
+
 export const bashInput = z.object({
   command: z.string().describe("Shell command to execute (POSIX syntax; Git Bash on Windows)"),
   timeout: z
@@ -63,7 +66,32 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
       }
     }
 
-    const result = await runCommand(input.command, { cwd: ctx.cwd, timeoutMs: input.timeout })
+    // Live output for the UI: the last few lines, at most ~4 updates/s.
+    let live = ""
+    let lastSent = 0
+    let pending: ReturnType<typeof setTimeout> | undefined
+    const send = () => {
+      pending = undefined
+      lastSent = Date.now()
+      ctx.progress?.(live)
+    }
+    const result = await runCommand(input.command, {
+      cwd: ctx.cwd,
+      timeoutMs: input.timeout,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      ...(ctx.callId !== undefined ? { id: ctx.callId } : {}),
+      ...(ctx.progress
+        ? {
+            onOutput: (text: string) => {
+              live = (live + text).slice(-LIVE_OUTPUT_CHARS)
+              if (pending) return
+              const wait = Math.max(0, 250 - (Date.now() - lastSent))
+              pending = setTimeout(send, wait)
+            },
+          }
+        : {}),
+    })
+    if (pending) clearTimeout(pending)
     const meta = { command: input.command, exitCode: result.exitCode }
 
     const stdout = cleanCommandOutput(result.stdout)
@@ -72,6 +100,10 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
     if (stdout.trim() !== "") parts.push(stdout.trimEnd())
     if (stderr.trim() !== "") parts.push(`[stderr]\n${stderr.trimEnd()}`)
 
+    if (result.killed) {
+      parts.push("Command was stopped by the user before it finished.")
+      return { output: parts.join("\n"), isError: true, meta }
+    }
     if (result.timedOut) {
       const limit = input.timeout ?? DEFAULT_COMMAND_TIMEOUT_MS
       parts.push(`Command timed out after ${limit}ms and was killed (including child processes).`)

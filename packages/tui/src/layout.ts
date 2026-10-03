@@ -304,19 +304,75 @@ export function shellCounts(shells: ShellView[]): { running: number; background:
   }
 }
 
-export function shellRow(shell: ShellView, now: number, width: number): string {
-  const tag = shell.kind === "fg" ? "fg " : shell.id.padEnd(3)
+/**
+ * One row per shell, numbered for /shells N:
+ *   "1 > npm test              12s"   running
+ *   "2   bun run lint       exit 1"   finished
+ *   "3 > bg1 bun run dev       4m"   background
+ */
+export function shellRow(shell: ShellView, ordinal: number, now: number, width: number): string {
   const state =
     shell.status === "running"
       ? shortElapsed(now - shell.startedAt)
       : shell.status === "killed"
-        ? "killed"
+        ? "stopped"
         : `exit ${shell.exitCode ?? "?"}`
   const mark = shell.status === "running" ? ">" : " "
-  const room = Math.max(6, width - tag.length - state.length - 4)
+  const lead = `${ordinal} ${mark} ${shell.kind === "bg" ? `${shell.id} ` : ""}`
+  const room = Math.max(6, width - lead.length - state.length - 1)
   const command = shell.command.replace(/\s+/g, " ")
   const cut = command.length > room ? `${command.slice(0, room - 1)}~` : command.padEnd(room)
-  return `${mark} ${tag} ${cut} ${state}`
+  return `${lead}${cut} ${state}`
+}
+
+/**
+ * Which shells the panel lists, with their session-wide ordinal: every
+ * running one first, then the most recent finished ones, up to `limit`.
+ */
+export function shellsForPanel(
+  shells: ShellView[],
+  limit: number,
+): { shell: ShellView; ordinal: number }[] {
+  const numbered = shells.map((shell, i) => ({ shell, ordinal: i + 1 }))
+  const running = numbered.filter((e) => e.shell.status === "running")
+  const finished = numbered.filter((e) => e.shell.status !== "running")
+  const room = Math.max(0, limit - running.length)
+  const shown = [...running.slice(0, limit), ...(room > 0 ? finished.slice(-room) : [])]
+  return shown.sort((a, b) => a.ordinal - b.ordinal)
+}
+
+/** The last few lines of a running command's output, for under its row. */
+export function liveTail(output: string | undefined, lines = 4): string {
+  if (!output) return ""
+  return output
+    .replace(/\r/g, "")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .slice(-lines)
+    .map((line) => `  ${line}`)
+    .join("\n")
+}
+
+/** Header over the center pane while a shell's output is open. */
+export function shellViewTitle(
+  shell: ShellView,
+  ordinal: number,
+  total: number,
+  now: number,
+): string {
+  const state =
+    shell.status === "running"
+      ? `running ${shortElapsed(now - shell.startedAt)}`
+      : shell.status === "killed"
+        ? "stopped"
+        : `exit ${shell.exitCode ?? "?"}`
+  const kind = shell.kind === "bg" ? ` (background ${shell.id})` : ""
+  return `shell ${ordinal}/${total}${kind} - ${state}`
+}
+
+/** The keys that work in the shell view (stop only while it runs). */
+export function shellViewHint(shell: ShellView): string {
+  return `Esc back - Alt+Left/Right other shells${shell.status === "running" ? " - Ctrl+X K stop" : ""}`
 }
 
 export function shellStripLine(shells: ShellView[], now: number): string {

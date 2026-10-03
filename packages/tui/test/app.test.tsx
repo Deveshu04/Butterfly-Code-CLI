@@ -1105,7 +1105,7 @@ test("Enter on a bare / runs the selected command, not the raw slash", async () 
         home={tempDir("bfly-home-")}
       />
     ),
-    { width: 100, height: 80 },
+    { width: 100, height: 84 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/")
@@ -3854,17 +3854,19 @@ test("reasoning deltas render a live thinking block (height-capped to 3 lines) t
     expect(collapsed).toMatch(/thought for \d+s/)
     expect(collapsed).not.toContain("thinking…")
     expect(collapsed).not.toContain("beta-reasoning")
+    // ...but a one-line gist of what it was about, never a bare "thought".
+    expect(collapsed).toMatch(/thought for \d+s - alpha-reasoning {2}\(ctrl\+r\)/)
 
     expect(spanFgFor(t, "thought for")).toEqual(hexToInts(DARK_TOKENS.muted))
 
     t.mockInput.pressKey("r", { ctrl: true })
-    const expanded = await waitForFrameSlow(t, (frame) => frame.includes("alpha-reasoning"))
-    expect(expanded).toContain("beta-reasoning")
+    const expanded = await waitForFrameSlow(t, (frame) => frame.includes("beta-reasoning"))
+    expect(expanded).toContain("alpha-reasoning")
     expect(expanded).toContain("gamma-reasoning")
     expect(expanded).toContain("delta-reasoning")
 
     t.mockInput.pressKey("r", { ctrl: true })
-    await waitForFrameSlow(t, (frame) => !frame.includes("alpha-reasoning"))
+    await waitForFrameSlow(t, (frame) => !frame.includes("beta-reasoning"))
 
     t.renderer.destroy()
   } finally {
@@ -3875,7 +3877,9 @@ test("reasoning deltas render a live thinking block (height-capped to 3 lines) t
 test("an inline <think> block from a qwen-style model feeds the SAME thinking presentation instead of vanishing", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
-  const server = startFakeChatServer("<think>\nqwen reasoning here\n</think>\nqwen final answer")
+  const server = startFakeChatServer(
+    "<think>\nqwen reasoning here\nand a second line\n</think>\nqwen final answer",
+  )
   try {
     const t = await testRender(
       () => (
@@ -3895,12 +3899,12 @@ test("an inline <think> block from a qwen-style model feeds the SAME thinking pr
     t.mockInput.pressEnter()
 
     const settled = await waitForFrameSlow(t, (frame) => frame.includes("qwen final answer"))
-    expect(settled).toContain("thought")
-    expect(settled).not.toContain("qwen reasoning here")
+    expect(settled).toMatch(/thought( for \d+s)? - qwen reasoning here/)
+    expect(settled).not.toContain("and a second line")
     expect(settled).not.toContain("<think>")
 
     t.mockInput.pressKey("r", { ctrl: true })
-    const expanded = await waitForFrameSlow(t, (frame) => frame.includes("qwen reasoning here"))
+    const expanded = await waitForFrameSlow(t, (frame) => frame.includes("and a second line"))
     expect(expanded).toContain("qwen final answer")
 
     t.renderer.destroy()
@@ -4667,6 +4671,59 @@ test("very wide terminal: an agents column, and Alt+Right opens a subagent's own
   }
 }, 40_000)
 
+test("a running command streams under its row; Ctrl+X S shows its output and Ctrl+X K stops it", async () => {
+  const cwd = tempDir("bfly-tui-shell-")
+  await gitFixture(cwd)
+  const server = startFakeSequenceServer([
+    toolCallStreamBody("bash", { command: "echo first-line; sleep 30; echo END-$((1+1))" }, "b1"),
+    textStreamBody("It was stopped."),
+  ])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{
+            model: "fake/m",
+            providers: { fake: { baseURL: server.baseURL } },
+            permissions: { "*": "allow" },
+          }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 140, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("run it")
+    t.mockInput.pressEnter()
+    const live = await waitForFrameSlow(
+      t,
+      (f) => f.includes("  first-line") && f.includes("running"),
+    )
+    expect(live).toContain("running a command")
+
+    t.mockInput.pressKey("x", { ctrl: true })
+    t.mockInput.pressKey("s")
+    const view = await waitForFrameSlow(t, (f) => f.includes("shell 1/1 - running"))
+    expect(view).toContain("$ echo first-line; sleep 30; echo END-$((1+1))")
+    expect(view).toContain("Ctrl+X K stop")
+
+    const started = Date.now()
+    t.mockInput.pressKey("x", { ctrl: true })
+    t.mockInput.pressKey("k")
+    await waitForFrameSlow(t, (f) => f.includes("shell 1/1 - stopped"), 10_000)
+    expect(Date.now() - started).toBeLessThan(10_000)
+
+    t.mockInput.pressEscape()
+    const back = await waitForFrameSlow(t, (f) => f.includes("It was stopped."), 10_000)
+    expect(back).toContain("stopped shell 1")
+    expect(back).not.toContain("END-2")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 40_000)
+
 test("narrow terminal: plan and agents stay pinned above the composer", async () => {
   const { t, server, frame } = await runScenario(100)
   try {
@@ -4709,7 +4766,9 @@ test("actions sit behind a rail apart from prose; a running shell shows live and
     const running = await waitForFrameSlow(t, (f) => f.includes("Shells 1 running"))
     expect(running).toContain("│ read a.ts · 30 lines")
     expect(running).toMatch(/│ \$ sleep 2 && echo built\s+running \d+s/)
-    expect(running).toContain("> fg  sleep 2 && echo built")
+    expect(running).toContain("1 > sleep 2 && echo built")
+    expect(spanFgFor(t, "read")).toEqual(hexToInts(DARK_TOKENS.link))
+    expect(spanFgFor(t, "a.ts")).toEqual(hexToInts(DARK_TOKENS.muted))
     const done = await waitForFrameSlow(t, (f) => f.includes("The build passes."), 20_000)
     expect(done).toMatch(/│ \$ sleep 2 && echo built\s+ok · \ds/)
     // Prose has no rail.

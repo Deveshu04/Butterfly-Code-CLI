@@ -9,6 +9,9 @@ import {
   shellCounts,
   shellRow,
   shellStripLine,
+  shellsForPanel,
+  shellViewHint,
+  shellViewTitle,
   type TodoItemView,
   todoProgress,
   todoRows,
@@ -214,14 +217,61 @@ function ShellsSection(props: { shells: ShellView[]; now: number; width: number 
           : `Shells ${props.shells.length}`
       }
     >
-      <For each={props.shells}>
-        {(shell) => (
-          <text fg={shell.status === "running" ? themeTokens().accent : themeTokens().muted}>
-            {shellRow(shell, props.now, props.width)}
+      <For each={shellsForPanel(props.shells, 6)}>
+        {(entry) => (
+          <text
+            fg={
+              entry.shell.status === "running"
+                ? themeTokens().accent
+                : entry.shell.status === "exited" && entry.shell.exitCode === 0
+                  ? themeTokens().muted
+                  : themeTokens().error
+            }
+          >
+            {shellRow(entry.shell, entry.ordinal, props.now, props.width)}
           </text>
         )}
       </For>
+      <text fg={themeTokens().border}>Ctrl+X S output · /shells</text>
     </Section>
+  )
+}
+
+export function ShellPane(props: {
+  shell: ShellView
+  ordinal: number
+  total: number
+  now: number
+  output: string
+}) {
+  return (
+    <box flexGrow={1} minHeight={0} flexDirection="column" paddingLeft={2} paddingRight={2}>
+      <box flexShrink={0} flexDirection="column">
+        <text fg={props.shell.status === "running" ? themeTokens().accent : themeTokens().muted}>
+          <b>{shellViewTitle(props.shell, props.ordinal, props.total, props.now)}</b>
+        </text>
+        <box flexDirection="row">
+          <text fg={themeTokens().accent}>{"$ "}</text>
+          <text fg={themeTokens().fg}>{props.shell.command}</text>
+        </box>
+        <text fg={themeTokens().border}>{shellViewHint(props.shell)}</text>
+      </box>
+      <scrollbox
+        flexGrow={1}
+        marginTop={1}
+        stickyScroll
+        stickyStart="bottom"
+        viewportOptions={{ paddingRight: 2 }}
+      >
+        <text fg={props.output.trim() === "" ? themeTokens().muted : themeTokens().fg}>
+          {props.output.trim() === ""
+            ? props.shell.status === "running"
+              ? "(no output yet)"
+              : "(no output)"
+            : props.output.replace(/\s+$/, "")}
+        </text>
+      </scrollbox>
+    </box>
   )
 }
 

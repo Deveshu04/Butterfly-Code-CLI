@@ -45,6 +45,7 @@ export interface CommandActions {
   toggleSidebar(): void
   /** "" lists the session's subagents; "N" opens agent N; "main" returns. */
   agents(arg: string): void
+  shells(arg: string): void
   planMode(): boolean
   contextText(): string
   initProject(): void
@@ -356,6 +357,13 @@ export const COMMANDS: SlashCommand[] = [
     run: (arg, a) => a.agents(arg.trim()),
   },
   {
+    name: "shells",
+    args: "[N|stop N|main]",
+    description: "every shell command this session — N opens its live output, stop N stops it",
+    keywords: ["terminal", "terminals", "output", "running", "stop"],
+    run: (arg, a) => a.shells(arg.trim()),
+  },
+  {
     name: "sidebar",
     args: "",
     description: "show or hide the side panel (plan, agents, usage, changed files)",
@@ -610,7 +618,7 @@ export function renderHelp(): string {
     "Ctrl+O opens the transcript pager",
     "Shift+Tab cycles thinking effort (default > low > medium > high > xhigh > none)",
     "Alt+Left/Right switch between the main conversation and each parallel agent's; Esc goes back",
-    "Ctrl+X then B toggles the sidebar · A opens the next agent · 0-9 jumps to main/agent N",
+    "Ctrl+X then B toggles the sidebar · A opens the next agent · 0-9 jumps to main/agent N · S shows a shell's live output · K stops that shell",
     "Ctrl+T expands/collapses the pinned plan (narrow terminals)",
     "Ctrl+R expands/collapses the last thinking block (this session's view only — thinking blocks are not replayed on /resume)",
   ]

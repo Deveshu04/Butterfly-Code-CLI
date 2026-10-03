@@ -181,14 +181,44 @@ test("shell rows show what is running, for how long, and how finished ones ended
     startedAt: 0,
     exitCode: 2,
   }
-  const row = shellRow(fg, 12_000, 30)
-  expect(row).toStartWith("> fg  npm test ")
+  const row = shellRow(fg, 1, 12_000, 30)
+  expect(row).toStartWith("1 > npm test ")
   expect(row).toEndWith(" 12s")
   expect(row.length).toBe(30)
-  expect(shellRow(done, 0, 30)).toStartWith("  bg2 make ")
-  expect(shellRow(done, 0, 30)).toEndWith(" exit 2")
+  expect(shellRow(done, 3, 0, 30)).toStartWith("3   bg2 make ")
+  expect(shellRow(done, 3, 0, 30)).toEndWith(" exit 2")
+  expect(shellRow({ ...fg, status: "killed" }, 1, 0, 30)).toEndWith(" stopped")
   expect(shellStripLine([fg, bg, done], 5_000)).toBe(
     "shells 2 running: npm test 5s +1 (1 background)",
   )
   expect(shellStripLine([done], 0)).toBe("")
+})
+
+test("the shells panel keeps running shells, then the latest finished, numbered session-wide", async () => {
+  const { shellsForPanel, shellViewTitle, shellViewHint } = await import("../src/layout")
+  const make = (id: string, status: "running" | "exited") => ({
+    kind: "fg" as const,
+    id,
+    command: id,
+    status,
+    startedAt: 0,
+    exitCode: 0,
+  })
+  const shells = [
+    make("a", "running"),
+    make("b", "exited"),
+    make("c", "exited"),
+    make("d", "exited"),
+    make("e", "running"),
+  ]
+  expect(shellsForPanel(shells, 3).map((e) => `${e.ordinal}${e.shell.id}`)).toEqual([
+    "1a",
+    "4d",
+    "5e",
+  ])
+  expect(shellsForPanel(shells, 10).length).toBe(5)
+  expect(shellViewTitle(shells[0] as never, 1, 5, 65_000)).toBe("shell 1/5 - running 1m 05s")
+  expect(shellViewTitle(shells[1] as never, 2, 5, 0)).toBe("shell 2/5 - exit 0")
+  expect(shellViewHint(shells[0] as never)).toContain("Ctrl+X K stop")
+  expect(shellViewHint(shells[1] as never)).not.toContain("stop")
 })
