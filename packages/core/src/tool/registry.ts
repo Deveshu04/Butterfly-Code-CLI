@@ -19,6 +19,23 @@ export interface AskRequest {
   input: unknown
 }
 
+export interface SubagentUpdate {
+  id: string
+  index: number
+  total: number
+  /** The subagent's brief. */
+  task: string
+  model: string
+  isolation: boolean
+  phase: "queued" | "running" | "done" | "failed"
+  /** Tool calls made so far. */
+  steps: number
+  /** One ASCII line: what it is doing right now. */
+  activity: string
+  /** Its own journal (written live) — a client can replay it to show the conversation. */
+  journalPath?: string
+}
+
 export interface ToolContext {
   cwd: string
   rules: PermissionRules
@@ -36,6 +53,8 @@ export interface ToolContext {
   autoApproveReadOnly?: boolean
   /** UI-only live status for this call (runner → RunnerEvent "tool-progress"). */
   progress?: (text: string) => void
+  /** UI-only structured subagent status (runner → RunnerEvent "subagent"). */
+  subagent?: (update: SubagentUpdate) => void
 }
 
 export interface ToolOutcome {

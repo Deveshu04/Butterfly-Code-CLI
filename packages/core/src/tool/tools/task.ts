@@ -3,7 +3,7 @@ import { type PermissionRules, resolvePermission } from "../../permission/tree"
 import type { ProviderPort } from "../../provider/port"
 import type { ModelCost } from "../../provider/pricing"
 import type { Usage } from "../../session/events"
-import type { ToolContext, ToolDefinition, ToolOutcome } from "../registry"
+import type { SubagentUpdate, ToolContext, ToolDefinition, ToolOutcome } from "../registry"
 import { ToolRegistry } from "../registry"
 import {
   createWorktree,
@@ -36,7 +36,10 @@ const modelField = z
     'Which model runs the subagent. "small" (default): the cheaper subagent_model/small_model — right for search, reading, routine edits, tests. "main": your own model, for subtasks that need real reasoning.',
   )
 
+/** Subagents running at once; a larger batch runs in waves. */
 export const MAX_PARALLEL_TASKS = 6
+/** Most subtasks one call may carry (models over-split; waves absorb it). */
+export const MAX_BATCH_TASKS = 12
 
 export const taskInput = z.object({
   op: z
@@ -51,10 +54,10 @@ export const taskInput = z.object({
   tasks: z
     .array(z.object({ task: z.string(), isolation: isolationField, model: modelField }))
     .min(1)
-    .max(MAX_PARALLEL_TASKS)
+    .max(MAX_BATCH_TASKS)
     .optional()
     .describe(
-      `Fan out up to ${MAX_PARALLEL_TASKS} INDEPENDENT subtasks that run IN PARALLEL, each in its own context (and own worktree if isolated). Use instead of 'task' whenever work splits into parts that don't depend on each other.`,
+      `Up to ${MAX_BATCH_TASKS} INDEPENDENT subtasks, run IN PARALLEL (${MAX_PARALLEL_TASKS} at a time), each in its own context (and own worktree if isolated). Use instead of 'task' whenever work splits into parts that don't depend on each other.`,
     ),
   worktree: z.string().optional().describe("op=merge|discard: the worktree id from a task report"),
 })
@@ -168,11 +171,17 @@ export function sumSpend(spends: (ToolSpend | undefined)[]): ToolSpend | undefin
   }
 }
 
+/** What a subagent run reports as it goes (see SubagentUpdate). */
+export type StepCallback = (
+  activity: string,
+  info?: { steps?: number; journalPath?: string },
+) => void
+
 export async function runSubagentTurn(
   opts: SubagentTurnOptions,
   promptText: string,
   signal?: AbortSignal,
-  onStep?: (status: string) => void,
+  onStep?: StepCallback,
 ): Promise<SubagentTurnResult> {
   // Lazy import breaks the runner↔tool dependency cycle.
   const { runUserTurn } = await import("../../session/runner")
@@ -180,6 +189,7 @@ export async function runSubagentTurn(
 
   const model = opts.model()
   const journal = SessionJournal.create(opts.sessionsDir)
+  onStep?.("starting", { journalPath: journal.path, steps: 0 })
   const cost = opts.costFor?.(model)
   const outcome = await runUserTurn(
     {
@@ -209,7 +219,7 @@ export async function runSubagentTurn(
   }
 }
 
-function stepReporter(onStep: (status: string) => void): (event: { type: string }) => void {
+function stepReporter(onStep: StepCallback): (event: { type: string }) => void {
   let steps = 0
   let writing = false
   return (event) => {
@@ -220,12 +230,12 @@ function stepReporter(onStep: (status: string) => void): (event: { type: string 
       const detail = JSON.stringify(e.input ?? {})
         .replace(/\s+/g, " ")
         .slice(0, 60)
-      onStep(`step ${steps} - ${e.name ?? "tool"} ${detail}`)
+      onStep(`${e.name ?? "tool"} ${detail}`, { steps })
     } else if (e.type === "text-delta" && !writing && (e.text ?? "").trim() !== "") {
       writing = true
-      onStep(`step ${steps} - writing summary`)
+      onStep("writing summary", { steps })
     } else if (e.type === "notice" && typeof e.text === "string" && e.text.startsWith("retrying")) {
-      onStep(`step ${steps} - ${e.text.slice(0, 60)}`)
+      onStep(e.text.slice(0, 60), { steps })
     }
   }
 }
@@ -324,7 +334,7 @@ async function runInWorktree(
   created: Created,
   task: string,
   ctx: ToolContext,
-  onStep?: (status: string) => void,
+  onStep?: StepCallback,
 ): Promise<ToolOutcome> {
   const subagentHeadNote = created.mainTreeDirty
     ? " NOTE: the main working tree currently has UNCOMMITTED changes that are NOT present here — this is a checkout of the last commit (HEAD) only, so some files may look older than what the user sees."
@@ -436,7 +446,7 @@ async function runOne(
   sub: { task: string; isolation?: "worktree"; model?: Tier },
   ctx: ToolContext,
   created?: Created,
-  onStep?: (status: string) => void,
+  onStep?: StepCallback,
 ): Promise<ToolOutcome> {
   const tiered = withTier(opts, sub.model).opts
   if (sub.isolation === "worktree") {
@@ -445,6 +455,71 @@ async function runOne(
   }
   const result = await runSubagentTurn(tiered, `${sub.task}${READ_ONLY_SUFFIX}`, ctx.signal, onStep)
   return { output: result.summary, meta: { journal: result.journalPath, spend: spendOf(result) } }
+}
+
+/**
+ * Live status for a set of subagents: the plain multi-line progress text
+ * (one "[i/n] activity" row each) and one structured SubagentUpdate per
+ * change, both UI-only.
+ */
+function subagentTracker(
+  ctx: ToolContext,
+  subs: { task: string; model: string; isolation: boolean }[],
+): { step: (i: number) => StepCallback; finish: (i: number, failed: boolean) => void } {
+  const state: SubagentUpdate[] = subs.map((sub, index) => ({
+    id: String(index),
+    index,
+    total: subs.length,
+    task: sub.task,
+    model: sub.model,
+    isolation: sub.isolation,
+    phase: "queued",
+    steps: 0,
+    activity: "queued",
+  }))
+  const emit = (i: number) => {
+    const current = state[i]
+    if (current) ctx.subagent?.({ ...current })
+    ctx.progress?.(
+      state
+        .map((s) =>
+          s.total > 1
+            ? `[${s.index + 1}/${s.total}] ${s.phase === "running" ? `step ${s.steps} - ${s.activity}` : s.activity}`
+            : s.phase === "running"
+              ? `step ${s.steps} - ${s.activity}`
+              : s.activity,
+        )
+        .join("\n"),
+    )
+  }
+  state.forEach((_, i) => {
+    const current = state[i]
+    if (current) ctx.subagent?.({ ...current })
+  })
+  return {
+    step: (i) => (activity, info) => {
+      const current = state[i]
+      if (!current) return
+      state[i] = {
+        ...current,
+        phase: "running",
+        activity,
+        ...(info?.steps !== undefined ? { steps: info.steps } : {}),
+        ...(info?.journalPath !== undefined ? { journalPath: info.journalPath } : {}),
+      }
+      emit(i)
+    },
+    finish: (i, failed) => {
+      const current = state[i]
+      if (!current) return
+      state[i] = {
+        ...current,
+        phase: failed ? "failed" : "done",
+        activity: failed ? "failed" : "done",
+      }
+      emit(i)
+    },
+  }
 }
 
 /** Bounded-concurrency map preserving order. */
@@ -482,23 +557,30 @@ async function runBatch(
   for (const sub of subs) {
     created.push(sub.isolation === "worktree" ? await createFor(opts, sub.task) : undefined)
   }
-  const status = subs.map(() => "queued")
-  const report = () =>
-    ctx.progress?.(status.map((line, i) => `[${i + 1}/${subs.length}] ${line}`).join("\n"))
+  // Live progress (UI-only): one line per subtask re-sent whole on every
+  // change, plus a structured update per subagent for clients with panels.
+  const tracker = subagentTracker(
+    ctx,
+    subs.map((sub) => ({
+      task: sub.task,
+      model: withTier(opts, sub.model).label,
+      isolation: sub.isolation === "worktree",
+    })),
+  )
   const outcomes = await mapLimit(subs, MAX_PARALLEL_TASKS, async (sub, i) => {
     const slot = created[i]
-    if (slot && "error" in slot) return { output: slot.error, isError: true } as ToolOutcome
-    const onStep = (line: string) => {
-      status[i] = line
-      report()
+    if (slot && "error" in slot) {
+      tracker.finish(i, true)
+      return { output: slot.error, isError: true } as ToolOutcome
     }
+    const onStep = tracker.step(i)
     try {
       onStep("starting")
       const outcome = await runOne(opts, sub, ctx, slot, onStep)
-      onStep(outcome.isError ? "failed" : "done")
+      tracker.finish(i, outcome.isError === true)
       return outcome
     } catch (error) {
-      onStep("failed")
+      tracker.finish(i, true)
       return {
         output: `subagent failed: ${error instanceof Error ? error.message : String(error)}`,
         isError: true,
@@ -613,16 +695,36 @@ export function createTaskTool(opts: TaskToolOptions): ToolDefinition<TaskInput>
         if (gate.refused) return gate.refused
         const created = await createFor(opts, input.task)
         if ("error" in created) return { output: created.error, isError: true }
+        const tracker = subagentTracker(ctx, [
+          { task: input.task, model: withTier(opts, input.model).label, isolation: true },
+        ])
         const outcome = await runOne(
           opts,
           { task: input.task, isolation: "worktree", model: input.model },
           ctx,
           created,
-          ctx.progress,
+          tracker.step(0),
         )
+        tracker.finish(0, outcome.isError === true)
         return gate.note ? { ...outcome, output: `${outcome.output}${gate.note}` } : outcome
       }
-      return runOne(opts, { task: input.task, model: input.model }, ctx, undefined, ctx.progress)
+      const tracker = subagentTracker(ctx, [
+        { task: input.task, model: withTier(opts, input.model).label, isolation: false },
+      ])
+      try {
+        const outcome = await runOne(
+          opts,
+          { task: input.task, model: input.model },
+          ctx,
+          undefined,
+          tracker.step(0),
+        )
+        tracker.finish(0, outcome.isError === true)
+        return outcome
+      } catch (error) {
+        tracker.finish(0, true)
+        throw error
+      }
     },
   }
 }

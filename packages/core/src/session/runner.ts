@@ -10,7 +10,13 @@ import type {
   TurnEvent,
 } from "../provider/port"
 import { computeCostUSD, type ModelCost } from "../provider/pricing"
-import type { AskDecision, AskRequest, ToolRegistry, ToolRunResult } from "../tool/registry"
+import type {
+  AskDecision,
+  AskRequest,
+  SubagentUpdate,
+  ToolRegistry,
+  ToolRunResult,
+} from "../tool/registry"
 import { TODO_STATE_KEY, type TodoItem } from "../tool/tools/todo"
 import { assemble } from "./assembly"
 import { compactSession, type ModelLimits, needsCompaction } from "./compaction"
@@ -33,6 +39,8 @@ export type RunnerEvent =
     }
   | { type: "notice"; text: string }
   | { type: "tool-progress"; callId: string; text: string }
+  /** Structured live status of a subagent spawned by tool call `callId` (UI-only). */
+  | { type: "subagent"; callId: string; update: SubagentUpdate }
   | { type: "step-retracted"; attempt: number }
 
 export interface RunnerDeps {
@@ -583,6 +591,8 @@ export async function runUserTurn(
                       isResultVisible: (id) => visibleResults.has(id),
                       progress: (text) =>
                         deps.onEvent?.({ type: "tool-progress", callId: call.callId, text }),
+                      subagent: (update) =>
+                        deps.onEvent?.({ type: "subagent", callId: call.callId, update }),
                       ...(deps.autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
                       rules: deps.rules,
                       ask: deps.ask,

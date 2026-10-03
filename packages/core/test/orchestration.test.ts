@@ -273,3 +273,41 @@ test("a fan-out streams live per-subtask progress and reports its spend", async 
   const spend = (result.meta as { spend?: { usage: typeof usage } }).spend
   expect(spend?.usage).toEqual({ input: 40, output: 20, cacheRead: 0, cacheWrite: 0 })
 })
+
+test("subagents report structured live status: queued → running (with journal) → done", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bfly-orch-structured-"))
+  const provider = new RoutingProvider((brief) => say(`ok: ${brief.split("\n")[0]}`), 20)
+  const tool = createTaskTool(options(dir, provider))
+  const updates: import("../src/tool/registry").SubagentUpdate[] = []
+  await tool.execute(
+    { tasks: [{ task: "alpha" }, { task: "beta", model: "main" }] },
+    ctx(dir, { subagent: (u) => updates.push(u) }),
+  )
+  const forAlpha = updates.filter((u) => u.id === "0")
+  expect(forAlpha[0]).toMatchObject({
+    phase: "queued",
+    task: "alpha",
+    total: 2,
+    model: "small-model",
+  })
+  expect(forAlpha.some((u) => u.phase === "running" && u.journalPath?.endsWith(".jsonl"))).toBe(
+    true,
+  )
+  expect(forAlpha.at(-1)?.phase).toBe("done")
+  expect(updates.filter((u) => u.id === "1").at(-1)).toMatchObject({
+    phase: "done",
+    model: "big-model",
+  })
+})
+
+test("a batch larger than the parallel cap runs in waves instead of being rejected", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bfly-orch-waves-"))
+  const provider = new RoutingProvider((brief) => say(`ok: ${brief.split("\n")[0]}`), 30)
+  const tool = createTaskTool(options(dir, provider))
+  const tasks = Array.from({ length: 9 }, (_, i) => ({ task: `part ${i + 1}` }))
+  const parsed = tool.inputSchema.safeParse({ tasks })
+  expect(parsed.success).toBe(true)
+  const result = await tool.execute({ tasks }, ctx(dir))
+  expect(result.output).toContain("9 subagents ran in parallel")
+  expect(provider.peak).toBeLessThanOrEqual(6)
+})
