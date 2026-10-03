@@ -9,8 +9,9 @@ export interface ModelCost {
 }
 
 export function computeCostUSD(usage: Usage, cost: ModelCost): number {
+  const fresh = Math.max(0, usage.input - usage.cacheRead - usage.cacheWrite)
   return (
-    (usage.input * (cost.input ?? 0) +
+    (fresh * (cost.input ?? 0) +
       usage.output * (cost.output ?? 0) +
       usage.cacheRead * (cost.cacheRead ?? 0) +
       usage.cacheWrite * (cost.cacheWrite ?? 0)) /

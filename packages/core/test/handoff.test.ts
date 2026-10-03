@@ -151,7 +151,7 @@ test("runHandoffTurn reports costUSD from the model's pricing", async () => {
     // USD per 1M tokens (models.dev shape).
     cost: { input: 3, output: 15, cacheRead: 0.3 },
   })
-  expect(result.costUSD).toBeCloseTo((1_000 * 3 + 500 * 15 + 200 * 0.3) / 1_000_000, 12)
+  expect(result.costUSD).toBeCloseTo((800 * 3 + 500 * 15 + 200 * 0.3) / 1_000_000, 12)
   expect(result.budgetExceeded).toBe(false)
 })
 
