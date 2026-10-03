@@ -783,6 +783,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
   const modelCost = () => costForRef(modelRef())
+  const summaryModel = (ref: string): string | undefined => {
+    const explicit = config().small_model
+    if (explicit) return explicit
+    if (config().auto_small_model === false) return undefined
+    try {
+      const parsed = parseModelRef(ref)
+      const id = catalog.cheapCompanion(parsed.providerId, parsed.modelId)
+      return id ? `${parsed.providerId}/${id}` : undefined
+    } catch {
+      return undefined
+    }
+  }
   const imageInputSupported = () => {
     const ref = modelRef()
     if (!ref) return false
@@ -1384,7 +1396,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       try {
         const result = await compactSession({
           provider: freshProvider(),
-          model: config().small_model ?? ref,
+          model: summaryModel(ref) ?? ref,
           journal: session.journal,
         })
         push({
@@ -1406,7 +1418,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         `context    ${used.toLocaleString()} used${limit ? ` / ${limit.toLocaleString()} (${pct}%)` : " (limit unknown)"}`,
         `thinking   ${reasoning() ?? "provider default"}`,
         `spend      ${formatUSD(sessionCost())} this session${config().maxSpendUSD !== undefined ? ` (cap $${config().maxSpendUSD?.toFixed(2)}/turn)` : ""}`,
-        `small      ${config().small_model ?? "not set"}`,
+        `small      ${config().small_model ?? (summaryModel(modelRef() ?? "") ? `${summaryModel(modelRef() ?? "")} (auto — cheapest-tier same-provider model, for summaries)` : "not set")}`,
         `journal    ${displayPath(session.journal.path)}`,
         `last turn  ${lastTurnMarker() || "—"}`,
       ].join("\n")
@@ -2015,7 +2027,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           handoffPath: queuePaths.handoff,
           signal: loopAbort.signal,
           ...(config().retries !== undefined ? { retries: config().retries } : {}),
-          ...(config().small_model ? { smallModel: config().small_model } : {}),
+          ...(summaryModel(ref) ? { smallModel: summaryModel(ref) } : {}),
           onEvent: (event: LoopEvent) => {
             if ("progress" in event) creditLoopSpend(event.progress.usage)
             setLoopCard((prev) => applyLoopEvent(prev ?? INITIAL_LOOP_CARD, event))
@@ -2283,7 +2295,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         let result = await generateCommitMessage({
           cwd: props.cwd,
           provider: freshProvider(),
-          model: config().small_model ?? ref,
+          model: summaryModel(ref) ?? ref,
         })
         if (result.failure) {
           push({ kind: "error", text: `git failed: ${describeGitFailure(result.failure)}` })
@@ -2303,7 +2315,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           result = await generateCommitMessage({
             cwd: props.cwd,
             provider: freshProvider(),
-            model: config().small_model ?? ref,
+            model: summaryModel(ref) ?? ref,
           })
           if (result.nothingStaged) {
             push({ kind: "info", text: "still nothing staged after `git add -u`" })
@@ -2625,14 +2637,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(config().retries !== undefined ? { retries: config().retries } : {}),
         ...(config().autoContinue !== undefined ? { autoContinue: config().autoContinue } : {}),
         ...(config().autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
-        ...(config().small_model ? { smallModel: config().small_model } : {}),
+        ...(summaryModel(ref) ? { smallModel: summaryModel(ref) } : {}),
         codeMap: (files) => {
           const db = graphDb()
           return db ? focusedSkeleton(db, files.join(" "), 400) : ""
         },
-        ...(costForRef(config().small_model)
-          ? { smallModelCost: costForRef(config().small_model) }
-          : {}),
+        ...(costForRef(summaryModel(ref)) ? { smallModelCost: costForRef(summaryModel(ref)) } : {}),
         imageInputSupported: imageInputSupported(),
         ask: (request) => askPermission(request, turnRules),
       },
@@ -2658,7 +2668,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           if (config().memory?.autoReview !== false) {
             const evolved = await evolveAfterTurn({
               provider: freshProvider(),
-              model: config().small_model ?? ref,
+              model: summaryModel(ref) ?? ref,
               journal: session.journal,
               paths,
               skillDir: skillDirs[0] as string,
@@ -2666,7 +2676,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               autoSkills: config().memory?.autoSkills !== false,
               approval: config().memory?.approval === true,
             })
-            const evolverCost = costForRef(config().small_model ?? ref)
+            const evolverCost = costForRef(summaryModel(ref) ?? ref)
             if (evolverCost) setSessionCost((c) => c + computeCostUSD(evolved.usage, evolverCost))
             const line = describeEvolution(evolved)
             if (line !== "") push({ kind: "info", text: line })

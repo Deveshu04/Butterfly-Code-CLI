@@ -159,6 +159,47 @@ export class ModelsCatalog {
     return models.sort((a, b) => a.id.localeCompare(b.id))
   }
 
+  cheapCompanion(providerId: string, modelId: string): string | undefined {
+    const main = this.lookup(providerId, modelId)
+    const mainIn = main?.cost?.input
+    const mainOut = main?.cost?.output
+    if (mainIn === undefined || mainIn <= 0) return undefined
+    const provider = this.data[providerId] as
+      | { models?: Record<string, Record<string, unknown>> }
+      | undefined
+    const raw = provider?.models ?? {}
+    const vendor = (id: string) => (id.includes("/") ? id.slice(0, id.indexOf("/")) : "")
+    const released = (id: string): number | undefined => {
+      const date = raw[id]?.["release_date"]
+      const time = typeof date === "string" ? Date.parse(date) : Number.NaN
+      return Number.isNaN(time) ? undefined : time
+    }
+    const mainReleased = released(modelId)
+    const EIGHTEEN_MONTHS = 548 * 24 * 60 * 60 * 1000
+    const candidates: { id: string; released: number; price: number }[] = []
+    for (const id of Object.keys(raw)) {
+      if (id === modelId || vendor(id) !== vendor(modelId)) continue
+      if (raw[id]?.["status"] === "deprecated") continue
+      const entry = this.lookup(providerId, id)
+      const input = entry?.cost?.input
+      const output = entry?.cost?.output
+      if (!entry || entry.toolCall === false || entry.context < 32_000) continue
+      if (input === undefined || input <= 0 || input > mainIn / 3) continue
+      if (mainOut !== undefined && output !== undefined && output > mainOut / 3) continue
+      const when = released(id)
+      if (
+        mainReleased !== undefined &&
+        when !== undefined &&
+        mainReleased - when > EIGHTEEN_MONTHS
+      ) {
+        continue
+      }
+      candidates.push({ id, released: when ?? 0, price: input })
+    }
+    candidates.sort((a, b) => b.released - a.released || b.price - a.price)
+    return candidates[0]?.id
+  }
+
   lookup(providerId: string, modelId: string): CatalogEntry | undefined {
     const provider = this.data[providerId] as
       | { models?: Record<string, Record<string, unknown>> }

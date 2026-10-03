@@ -269,7 +269,15 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
       return undefined
     }
   }
-  const smallModelCost = config.small_model ? costFor(config.small_model) : undefined
+  // Summarization-class work (compaction, evolver): small_model, else a
+  // catalog-derived cheap same-provider companion (auto_small_model).
+  const autoSmall =
+    config.small_model === undefined && config.auto_small_model !== false
+      ? catalog.cheapCompanion(ref.providerId, ref.modelId)
+      : undefined
+  const summaryModel =
+    config.small_model ?? (autoSmall ? `${ref.providerId}/${autoSmall}` : undefined)
+  const smallModelCost = summaryModel ? costFor(summaryModel) : undefined
   const system = buildSystem(modelRef, {
     cwd,
     platform: process.platform,
@@ -332,7 +340,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
         ...(config.autoContinue !== undefined ? { autoContinue: config.autoContinue } : {}),
         ...(entry ? { limits: { context: entry.context, output: entry.output } } : {}),
         imageInputSupported: entry?.imageInput === true,
-        ...(config.small_model ? { smallModel: config.small_model } : {}),
+        ...(summaryModel ? { smallModel: summaryModel } : {}),
         onEvent: (event) => {
           renderEvent(event, opts.json)
           if (event.type === "finish" && opts.budget !== undefined) {
@@ -380,7 +388,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     if (config.memory?.autoReview !== false) {
       const evolved = await evolveAfterTurn({
         provider,
-        model: config.small_model ?? modelRef,
+        model: summaryModel ?? modelRef,
         journal,
         paths,
         skillDir: join(cwd, ".butterfly", "skills"),
@@ -390,7 +398,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
       })
       const line = describeEvolution(evolved)
       if (line !== "" && !opts.json) process.stdout.write(`\n[${line}]`)
-      const evolverCost = costFor(config.small_model ?? modelRef)
+      const evolverCost = costFor(summaryModel ?? modelRef)
       if (evolverCost) costUSD += computeCostUSD(evolved.usage, evolverCost)
     }
 

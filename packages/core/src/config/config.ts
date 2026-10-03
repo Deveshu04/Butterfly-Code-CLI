@@ -11,6 +11,12 @@ export const ButterflyConfig = z.object({
   model: z.string().optional(),
   small_model: z.string().optional(),
   /**
+   * When small_model is unset, pick a cheap same-provider model from the
+   * models.dev catalog for summarization-class work (compaction, memory
+   * evolver, commit messages) instead of the main model. Default true.
+   */
+  auto_small_model: z.boolean().optional(),
+  /**
    * Default model for task subagents (parallel fan-out, worktree workers).
    * Falls back to small_model, then the main model. The main model stays
    * the orchestrator and can opt a subtask into itself with model:"main".
