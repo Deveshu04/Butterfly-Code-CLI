@@ -262,3 +262,19 @@ test("bash output reaches the model without color codes or progress frames", asy
   )
   expect(result.output).toBe("red\n100%")
 })
+
+test("grep path normalization handles drive-letter paths", async () => {
+  const { normalizeLine } = await import("../src/tool/tools/grep")
+  expect(normalizeLine("src\\a.ts:3:x")).toBe("src/a.ts:3:x")
+  expect(normalizeLine("C:\\repo\\src\\a.ts:12:const a = 1")).toBe(
+    "C:/repo/src/a.ts:12:const a = 1",
+  )
+})
+
+test("grep cuts minified lines to a preview", async () => {
+  const dir = fixtureDir()
+  writeFileSync(join(dir, "bundle.js"), `var needle=1;${"x".repeat(5_000)}\n`)
+  const result = await grepTool.execute({ pattern: "needle" }, ctx(dir))
+  expect(result.output.length).toBeLessThan(600)
+  expect(result.output).toContain("needle")
+}, 20_000)

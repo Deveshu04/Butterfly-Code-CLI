@@ -58,8 +58,17 @@ export async function resolveRipgrep(): Promise<string> {
   }
 }
 
-function normalizeLine(line: string): string {
-  const colon = line.indexOf(":")
+/** Matched lines wider than this are cut (minified bundles, lockfiles, data). */
+export const GREP_MAX_COLUMNS = 300
+
+/**
+ * rg prints backslash path separators on Windows — normalize just the path
+ * part. A drive-letter path (`C:\repo\a.ts:12:…`, from an absolute `path`
+ * argument) has its first colon inside the path, so skip past it.
+ */
+export function normalizeLine(line: string): string {
+  const from = /^[A-Za-z]:[\\/]/.test(line) ? 2 : 0
+  const colon = line.indexOf(":", from)
   if (colon < 0) return line
   return line.slice(0, colon).replaceAll("\\", "/") + line.slice(colon)
 }
@@ -78,6 +87,11 @@ export const grepTool: ToolDefinition<z.infer<typeof grepInput>> = {
       "never",
       "--max-count",
       "50",
+      // One minified line can be 100k+ chars and would swallow the whole
+      // output budget; rg keeps a preview prefix and says how much it cut.
+      "--max-columns",
+      String(GREP_MAX_COLUMNS),
+      "--max-columns-preview",
       "-g",
       "!node_modules/**",
       "-g",
