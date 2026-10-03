@@ -20,6 +20,10 @@ const MARK: Record<TodoItem["status"], string> = {
   completed: "[x]",
 }
 
+export function renderTodos(items: TodoItem[]): string {
+  return items.map((item) => `${MARK[item.status]} ${item.text}`).join("\n")
+}
+
 export const todoTool: ToolDefinition<z.infer<typeof todoInput>> = {
   name: "todo",
   description:
@@ -30,7 +34,6 @@ export const todoTool: ToolDefinition<z.infer<typeof todoInput>> = {
     if (input.items.length === 0) {
       return { output: "(todo list cleared)", meta: { todos: [] } }
     }
-    const rendered = input.items.map((item) => `${MARK[item.status]} ${item.text}`).join("\n")
-    return { output: rendered, meta: { todos: input.items } }
+    return { output: renderTodos(input.items), meta: { todos: input.items } }
   },
 }

@@ -1,9 +1,11 @@
 import { estimateTokens } from "../context/tokens"
 import type { ProviderPort } from "../provider/port"
 import { settle } from "../tool/settle"
+import type { TodoItem } from "../tool/tools/todo"
 import { now, type SessionEvent, type Usage } from "./events"
 import { SessionJournal } from "./journal"
 import { foldTimeline, type TimelineEntry } from "./projector"
+import { renderTodos, todosFromTimeline } from "./todo-state"
 
 export const OUTPUT_RESERVE_TOKENS = 16_384
 export const VERBATIM_TAIL_TOKENS = 10_000
@@ -33,6 +35,38 @@ export interface CompactionPlan {
   keepFromIndex: number
   /** Textual rendering of everything being cut, fed to the summarizer. */
   cutRendered: string
+  /** The todo list standing right now (harness state — survives verbatim). */
+  todos?: TodoItem[]
+  /** Paths changed via the edit tool in the cut region, plus earlier cuts'. */
+  files: string[]
+}
+
+function editedFiles(entries: TimelineEntry[]): string[] {
+  const files = new Set<string>()
+  const pending = new Map<string, string>()
+  for (const { event } of entries) {
+    if (event.type === "session.compacted") {
+      for (const file of event.files ?? []) files.add(file)
+    } else if (event.type === "tool.call" && event.name === "edit") {
+      const path = (event.input as { file_path?: unknown } | null)?.file_path
+      if (typeof path === "string") pending.set(event.callId, path)
+    } else if (event.type === "tool.result" && !event.isError) {
+      const path = pending.get(event.callId)
+      if (path !== undefined) files.add(path)
+    }
+  }
+  return [...files]
+}
+
+export function harnessRecord(plan: Pick<CompactionPlan, "todos" | "files">): string {
+  const sections: string[] = []
+  if (plan.todos && plan.todos.length > 0) {
+    sections.push(`## Todo list (harness record — current)\n${renderTodos(plan.todos)}`)
+  }
+  if (plan.files.length > 0) {
+    sections.push(`## Files edited so far (harness record)\n${plan.files.join("\n")}`)
+  }
+  return sections.join("\n")
 }
 
 export interface ModelLimits {
@@ -104,9 +138,12 @@ export function planCompaction(
     .join("\n\n")
   if (rendered.trim() === "") return null
 
+  const todos = todosFromTimeline(entries.map((entry) => entry.event))
   return {
     keepFromIndex,
     cutRendered: settle(rendered, { maxChars: CUT_RENDER_MAX_CHARS }).text,
+    ...(todos ? { todos } : {}),
+    files: editedFiles(cut),
   }
 }
 
@@ -141,10 +178,14 @@ export async function compactSession(
 
   if (summary.trim() === "") return null
 
+  const record = harnessRecord(plan)
+  if (record !== "") summary = `${summary.trimEnd()}\n${record}`
   deps.journal.append({
     type: "session.compacted",
     summary,
     keepFromIndex: plan.keepFromIndex,
+    ...(plan.todos ? { todos: plan.todos } : {}),
+    ...(plan.files.length > 0 ? { files: plan.files } : {}),
     time: now(),
   })
   return { summary, keepFromIndex: plan.keepFromIndex }

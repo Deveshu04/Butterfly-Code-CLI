@@ -64,6 +64,16 @@ export const SessionEvent = z.discriminatedUnion("type", [
     summary: z.string(),
     /** Events with index < keepFromIndex are superseded by the summary. */
     keepFromIndex: z.number(),
+    todos: z
+      .array(
+        z.object({
+          text: z.string(),
+          status: z.enum(["pending", "in_progress", "completed"]),
+        }),
+      )
+      .optional(),
+    /** Files changed via the edit tool up to the cut (cumulative across compactions). */
+    files: z.array(z.string()).optional(),
   }),
   z.object({ ...base, type: z.literal("tool.pruned"), callIds: z.array(z.string()) }),
   z.object({

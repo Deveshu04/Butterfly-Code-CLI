@@ -17,8 +17,9 @@ import { compactSession, type ModelLimits, needsCompaction } from "./compaction"
 import { now, type SessionEvent, type Usage } from "./events"
 import { type HookConfig, type HookRunRecord, runHooks } from "./hooks"
 import { SessionJournal } from "./journal"
-import { project } from "./projector"
+import { foldTimeline, project } from "./projector"
 import { planPrune } from "./prune"
+import { todosFromTimeline } from "./todo-state"
 
 export type RunnerEvent =
   | TurnEvent
@@ -249,6 +250,12 @@ export async function runUserTurn(
     await runHooks(deps.hooks, "turn.start", { cwd: deps.cwd }, { onRun: journalHookRun }).catch(
       () => {},
     )
+  }
+  {
+    const { events } = SessionJournal.replay(journal.path)
+    const todos = todosFromTimeline(foldTimeline(events).entries.map((entry) => entry.event))
+    if (todos) state[TODO_STATE_KEY] = todos
+    else delete state[TODO_STATE_KEY]
   }
 
   const planContinuation = (
