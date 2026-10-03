@@ -7,6 +7,8 @@ import {
   commandHints,
   commandMatches,
   commandMatchLabel,
+  commandMatchReason,
+  editDistance,
   expandTemplate,
   findCommand,
   loadCustomCommands,
@@ -368,9 +370,8 @@ test("/provider <name> dispatches to CommandActions.selectProvider with the trim
 })
 
 
-test("commandMatches surfaces alias rows — /res must include /sessions (aliased /resume)", () => {
-  const withoutAlias = commandMatches("/res")
-  expect(withoutAlias.map((c) => c.name)).toContain("sessions")
+test("commandMatches surfaces /resume for /res, and prefix rows still show", () => {
+  expect(commandMatches("/res")[0]?.name).toBe("resume")
   expect(commandMatches("/rev").map((c) => c.name)).toContain("review")
 })
 
@@ -380,11 +381,76 @@ test("commandMatches never double-lists a command that matches by both name and 
 })
 
 test("commandMatchLabel prefers the alias that actually matched the draft over the primary name", () => {
-  const sessions = COMMANDS.find((c) => c.name === "sessions")
-  if (!sessions) throw new Error("sessions command missing")
-  expect(commandMatchLabel(sessions, "/res")).toBe("resume")
-  expect(commandMatchLabel(sessions, "/sess")).toBe("sessions")
-  expect(commandMatchLabel(sessions, "/sessions")).toBe("sessions")
+  const resume = COMMANDS.find((c) => c.name === "resume")
+  if (!resume) throw new Error("resume command missing")
+  expect(commandMatchLabel(resume, "/cont")).toBe("continue")
+  expect(commandMatchLabel(resume, "/res")).toBe("resume")
+  // A keyword hit labels with the real name — Tab must complete to something dispatchable.
+  expect(commandMatchLabel(resume, "/history")).toBe("resume")
+})
+
+test("synonym keywords surface and dispatch the command people meant", () => {
+  const cases: [string, string][] = [
+    ["/history", "resume"],
+    ["/llm", "model"],
+    ["/revert", "undo"],
+    ["/checkpoint", "rewind"],
+    ["/summarize", "compact"],
+    ["/jobs", "tasks"],
+    ["/autopilot", "loop"],
+    ["/sarvam", "provider"],
+  ]
+  for (const [typed, expected] of cases) {
+    expect(commandMatches(typed)[0]?.name).toBe(expected)
+    const match = findCommand(`${typed} extra`)
+    expect(match && "command" in match ? match.command.name : "").toBe(expected)
+    if (match && "command" in match) expect(match.arg).toBe("extra")
+  }
+  expect(commandMatchReason(COMMANDS.find((c) => c.name === "resume") as never, "/history")).toBe(
+    'matches "history"',
+  )
+})
+
+test("typos rank the intended command first but only suggest (never auto-dispatch)", () => {
+  expect(commandMatches("/modle")[0]?.name).toBe("model")
+  expect(commandMatches("/hepl")[0]?.name).toBe("help")
+  expect(commandMatches("/resmue")[0]?.name).toBe("resume")
+  const typo = findCommand("/modle")
+  expect(typo && "suggestions" in typo ? typo.suggestions[0]?.name : "").toBe("model")
+})
+
+test("a keyword shared by two commands never auto-dispatches", () => {
+  // Construct the ambiguity from the table itself so this stays true as keywords evolve.
+  const counts = new Map<string, number>()
+  for (const command of COMMANDS)
+    for (const k of command.keywords ?? []) counts.set(k, (counts.get(k) ?? 0) + 1)
+  for (const [keyword, count] of counts) {
+    if (count < 2) continue
+    if (COMMANDS.some((c) => c.name === keyword || c.aliases?.includes(keyword))) continue
+    const match = findCommand(`/${keyword}`)
+    const prefixOwners = COMMANDS.filter(
+      (c) => c.name.startsWith(keyword) || c.aliases?.some((a) => a.startsWith(keyword)),
+    )
+    if (prefixOwners.length === 1) continue
+    expect(match && "suggestions" in match).toBe(true)
+  }
+})
+
+test("paths and prose after a slash never fuzzy-match a command", () => {
+  expect(commandMatches("/usr/bin/foo is broken")).toEqual([])
+  expect(commandMatches("/zzz")).toEqual([])
+})
+
+test("editDistance counts adjacent transpositions as one edit", () => {
+  expect(editDistance("modle", "model")).toBe(1)
+  expect(editDistance("resume", "resume")).toBe(0)
+  expect(editDistance("abc", "")).toBe(3)
+})
+
+test("keywords never collide with another command's name or alias", () => {
+  const names = new Set(COMMANDS.flatMap((c) => [c.name, ...(c.aliases ?? [])]))
+  for (const command of COMMANDS)
+    for (const keyword of command.keywords ?? []) expect(names.has(keyword)).toBe(false)
 })
 
 test("/paste-img is registered and invokes CommandActions.pasteImage", () => {

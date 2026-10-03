@@ -119,7 +119,12 @@ function toolCallStreamBody(toolName: string, args: unknown, callId: string): st
           delta: {
             role: "assistant",
             tool_calls: [
-              { index: 0, id: callId, type: "function", function: { name: toolName, arguments: JSON.stringify(args) } },
+              {
+                index: 0,
+                id: callId,
+                type: "function",
+                function: { name: toolName, arguments: JSON.stringify(args) },
+              },
             ],
           },
           finish_reason: null,
@@ -139,7 +144,9 @@ function textStreamBody(replyText: string): string {
   return (
     sseChunk({
       id: "1",
-      choices: [{ index: 0, delta: { role: "assistant", content: replyText }, finish_reason: null }],
+      choices: [
+        { index: 0, delta: { role: "assistant", content: replyText }, finish_reason: null },
+      ],
     }) +
     sseChunk({
       id: "1",
@@ -1082,8 +1089,11 @@ test("Enter on a bare / runs the selected command, not the raw slash", async () 
 })
 
 
-test("/res surfaces the resume row (alias of /sessions), and Enter dispatches it", async () => {
+test("/res surfaces /resume first, and Enter opens the session picker", async () => {
   const cwd = tempDir("bfly-tui-")
+  const past = SessionJournal.create(join(cwd, ".butterfly", "sessions"), "pickme0001")
+  past.append({ type: "session.created", cwd, time: now() })
+  past.append({ type: "message.user", id: "u1", text: "refactor the parser", time: now() })
   const t = await testRender(
     () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
     { width: 100, height: 32 },
@@ -1091,12 +1101,28 @@ test("/res surfaces the resume row (alias of /sessions), and Enter dispatches it
   await t.renderOnce()
   t.mockInput.typeText("/res")
   await t.waitForFrame((frame: string) => frame.includes("↑↓ select"))
-  const frame = t.captureCharFrame()
-  expect(frame).toContain("/resume")
-  expect(frame).toContain("alias of /sessions")
+  expect(t.captureCharFrame()).toContain("/resume")
   t.mockInput.pressEnter()
-  await waitForFrameSlow(t, (f: string) => f.includes("sessions (newest first)"))
-  expect(t.captureCharFrame()).toContain("(current)")
+  await waitForFrameSlow(t, (f: string) => f.includes("resume a session"))
+  expect(t.captureCharFrame()).toContain("refactor the parser")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("resumed session pickme00"))
+  t.renderer.destroy()
+})
+
+test("synonyms reach commands: /history opens the resume picker, /llm the model list", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 100, height: 32 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/history")
+  await t.waitForFrame((frame: string) => frame.includes("↑↓ select"))
+  expect(t.captureCharFrame()).toContain('matches "history"')
+  t.mockInput.pressEnter()
+  // No past sessions in a fresh dir — the picker says so instead of opening empty.
+  await waitForFrameSlow(t, (f: string) => f.includes("no past sessions to resume yet"))
   t.renderer.destroy()
 })
 
@@ -1179,7 +1205,11 @@ test("/new clears any stale duration from the status bar — replay must never f
     t.mockInput.typeText("/new")
     t.mockInput.pressEnter()
     const after = await waitForFrameSlow(t, (frame) => frame.includes("fresh session started"))
-    const lastLine = after.split("\n").filter((l) => l.trim() !== "").at(-1) ?? ""
+    const lastLine =
+      after
+        .split("\n")
+        .filter((l) => l.trim() !== "")
+        .at(-1) ?? ""
     expect(lastLine).not.toContain("in 5 · out 3")
     expect(lastLine).not.toMatch(/\d+s\b/)
     expect(lastLine).toContain("/help for commands")
@@ -1209,7 +1239,11 @@ test("the ctx gauge right-aligns to the row's far edge, not clumped against the 
     t.mockInput.typeText("hi")
     t.mockInput.pressEnter()
     const frame = await waitForFrameSlow(t, (f) => f.includes("ctx 8"), 15_000)
-    const lastLine = frame.split("\n").filter((l) => l.trim() !== "").at(-1) ?? ""
+    const lastLine =
+      frame
+        .split("\n")
+        .filter((l) => l.trim() !== "")
+        .at(-1) ?? ""
     const idx = lastLine.indexOf("ctx 8")
     expect(idx).toBeGreaterThan(-1)
     expect(lastLine.length - (idx + "ctx 8".length)).toBeLessThanOrEqual(2)
@@ -1246,7 +1280,11 @@ test("at narrow widths the meters drop instead of colliding with the status text
       (f) => /in 5 · out 3 · cached 0 · 1 steps · \d+s/.test(f),
       15_000,
     )
-    const lastLine = frame.split("\n").filter((l) => l.trim() !== "").at(-1) ?? ""
+    const lastLine =
+      frame
+        .split("\n")
+        .filter((l) => l.trim() !== "")
+        .at(-1) ?? ""
     expect(lastLine).not.toContain("ctx ")
     t.renderer.destroy()
   } finally {
@@ -1680,9 +1718,7 @@ test("Esc at the ollama model picker cancels — nothing is written", async () =
 test("Esc at the key step cancels the whole flow — no key typed, no config written", async () => {
   const home = tempDir("bfly-home-")
   const t = await testRender(
-    () => (
-      <App cwd={tempDir("bfly-tui-")} config={{ model: "anthropic/claude-x" }} home={home} />
-    ),
+    () => <App cwd={tempDir("bfly-tui-")} config={{ model: "anthropic/claude-x" }} home={home} />,
     { width: 100, height: 30 },
   )
   await t.renderOnce()
@@ -3240,7 +3276,9 @@ test("/loop run completes, summarizes the outcome into the transcript, and drain
     t.mockInput.pressEnter()
     t.mockInput.typeText("what happened while looping")
     t.mockInput.pressEnter()
-    const queued = await waitForFrameSlow(t, (frame) => frame.includes("what happened while looping"))
+    const queued = await waitForFrameSlow(t, (frame) =>
+      frame.includes("what happened while looping"),
+    )
     expect(queued).toContain("(queued)")
 
     const summary = await waitForFrameSlow(
@@ -3677,7 +3715,10 @@ test("reasoning deltas render a live thinking block (height-capped to 3 lines) t
       () => (
         <App
           cwd={cwd}
-          config={{ model: "fake/mock-reasoning", providers: { fake: { baseURL: server.baseURL } } }}
+          config={{
+            model: "fake/mock-reasoning",
+            providers: { fake: { baseURL: server.baseURL } },
+          }}
           home={tempDir("bfly-home-")}
         />
       ),
@@ -3727,7 +3768,10 @@ test("an inline <think> block from a qwen-style model feeds the SAME thinking pr
       () => (
         <App
           cwd={cwd}
-          config={{ model: "fake/mock-inline-think", providers: { fake: { baseURL: server.baseURL } } }}
+          config={{
+            model: "fake/mock-inline-think",
+            providers: { fake: { baseURL: server.baseURL } },
+          }}
           home={tempDir("bfly-home-")}
         />
       ),
@@ -3833,7 +3877,10 @@ test("bash results render a $ command cell with dim output and a right-aligned e
       () => (
         <App
           cwd={cwd}
-          config={{ model: "fake/mock-bash-cell", providers: { fake: { baseURL: server.baseURL } } }}
+          config={{
+            model: "fake/mock-bash-cell",
+            providers: { fake: { baseURL: server.baseURL } },
+          }}
           home={tempDir("bfly-home-")}
         />
       ),
@@ -3885,7 +3932,10 @@ test("a provider error renders a structured card from the classified error — k
       () => (
         <App
           cwd={cwd}
-          config={{ model: "fake/mock-error", providers: { fake: { baseURL: `http://127.0.0.1:${server.port}/v1` } } }}
+          config={{
+            model: "fake/mock-error",
+            providers: { fake: { baseURL: `http://127.0.0.1:${server.port}/v1` } },
+          }}
           home={tempDir("bfly-home-")}
         />
       ),
