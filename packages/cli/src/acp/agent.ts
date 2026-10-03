@@ -99,6 +99,7 @@ interface AcpSession {
   model: string
   system: string
   retries?: number
+  autoApproveReadOnly?: boolean
   state: Record<string, unknown>
   bgTasks: BgTaskRegistry
   episodic: EpisodicIndex
@@ -354,6 +355,7 @@ export class AcpAgent {
       model: modelRef,
       system,
       ...(config.retries !== undefined ? { retries: config.retries } : {}),
+      ...(config.autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
       state,
       bgTasks,
       episodic,
@@ -537,6 +539,7 @@ export class AcpAgent {
           ask,
           state: session.state,
           ...(session.retries !== undefined ? { retries: session.retries } : {}),
+          ...(session.autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
           createSnapshot,
           listUntracked,
           signal: abortController.signal,

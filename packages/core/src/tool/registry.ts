@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { type PermissionRules, resolvePermission } from "../permission/tree"
+import { type PermissionRules, resolvePermissionWithSource } from "../permission/tree"
 import type { ToolSpec } from "../provider/port"
 import { repairToolInput, resolveToolName } from "./repair"
 import { type SettleOptions, settle } from "./settle"
@@ -32,6 +32,8 @@ export interface ToolContext {
   /** Provider call id of the call being executed (runner-supplied). */
   callId?: string
   isResultVisible?: (callId: string) => boolean
+  /** Honor tools' autoAllow for blanket asks (default true). */
+  autoApproveReadOnly?: boolean
 }
 
 export interface ToolOutcome {
@@ -48,6 +50,12 @@ export interface ToolDefinition<I = unknown> {
   permissionTarget?: (input: I) => string | undefined
   /** Extra disclosure for the approval prompt only — never used for matching. */
   permissionNote?: (input: I) => string | undefined
+  /**
+   * True when this exact call is provably side-effect free (e.g. a
+   * read-only shell pipeline). Lets a BLANKET "ask" resolve to allow;
+   * explicit user patterns and denies are never softened.
+   */
+  autoAllow?: (input: I) => boolean
   execute(input: I, ctx: ToolContext): Promise<ToolOutcome>
 }
 
@@ -65,6 +73,7 @@ interface RegisteredTool {
   inputSchema: z.ZodType
   permissionTarget?: (input: unknown) => string | undefined
   permissionNote?: (input: unknown) => string | undefined
+  autoAllow?: (input: unknown) => boolean
   execute(input: unknown, ctx: ToolContext): Promise<ToolOutcome>
 }
 
@@ -136,7 +145,14 @@ export class ToolRegistry {
     }
 
     const target = tool.permissionTarget?.(parsed.data)
-    const decision = resolvePermission(ctx.rules, name, target)
+    const resolved = resolvePermissionWithSource(ctx.rules, name, target)
+    const decision =
+      resolved.decision === "ask" &&
+      resolved.blanket &&
+      ctx.autoApproveReadOnly !== false &&
+      tool.autoAllow?.(parsed.data) === true
+        ? "allow"
+        : resolved.decision
     if (decision === "deny") {
       return withNotes(
         errorResult(

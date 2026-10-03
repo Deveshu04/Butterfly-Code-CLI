@@ -1,5 +1,6 @@
 import { join } from "node:path"
 import { z } from "zod"
+import { isProvablyReadOnly } from "../../permission/readonly-bash"
 import { BG_TASKS_STATE_KEY, BgTaskRegistry } from "../bg-tasks"
 import { cleanCommandOutput } from "../output-hygiene"
 import type { ToolDefinition } from "../registry"
@@ -42,6 +43,9 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
     "Execute one shell command in the workspace (stateless — no shell state persists between calls). POSIX syntax. Default timeout 2 minutes, max 10. Non-zero exit codes are reported as errors with the output. background:true runs it detached instead of waiting.",
   inputSchema: bashInput,
   permissionTarget: (input) => input.command,
+  // `ls`, `git status`, `rg foo | head` … run without a prompt under a
+  // blanket bash:"ask" (permission/readonly-bash.ts has the proof rules).
+  autoAllow: (input) => input.background !== true && isProvablyReadOnly(input.command),
   async execute(input, ctx) {
     if (input.background === true) {
       const registry = bgRegistry(ctx)

@@ -38,7 +38,8 @@ export const readTool: ToolDefinition<z.infer<typeof readInput>> = {
       }
     }
 
-    const cache = (ctx.state[READ_CACHE_KEY] ??= new Map()) as Map<string, ReadRecord>
+    if (!(ctx.state[READ_CACHE_KEY] instanceof Map)) ctx.state[READ_CACHE_KEY] = new Map()
+    const cache = ctx.state[READ_CACHE_KEY] as Map<string, ReadRecord>
     const key = `${path}\0${input.offset ?? 1}\0${input.limit ?? DEFAULT_READ_LIMIT}`
     const hash = Bun.hash(content).toString(36)
     const previous = cache.get(key)

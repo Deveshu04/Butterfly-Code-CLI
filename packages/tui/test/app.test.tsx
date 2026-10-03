@@ -3713,7 +3713,8 @@ test("an approval that fires while the pager is open is NOT answerable by pager 
 test("Ctrl+C during a real in-turn approval denies it, journals the paired tool.result, and unblocks the turn", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
-  const server = startFakeToolCallServer("echo interrupted-approval")
+  // Not a read-only command: those run without asking (readonly-bash.ts).
+  const server = startFakeToolCallServer("touch interrupted-approval")
   const t = await testRender(
     () => (
       <App
@@ -3999,8 +4000,8 @@ test("bash results render a $ command cell with dim output and a right-aligned e
     t.mockInput.typeText("run two commands")
     t.mockInput.pressEnter()
 
-    await waitForFrameSlow(t, (f) => f.includes("approve?") && f.includes("alpha-success"))
-    t.mockInput.pressKey("y")
+    // bash asks by default (TUI_DEFAULT_RULES), but the provably read-only
+    // `echo` runs without a prompt (readonly-bash.ts) — only `test` asks.
     await waitForFrameSlow(t, (f) => f.includes("approve?") && f.includes("test -f"))
     t.mockInput.pressKey("y")
 

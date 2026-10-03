@@ -71,6 +71,8 @@ export interface RunnerDeps {
   autoContinue?: number
   /** Lifecycle hooks — pre.tool hooks can BLOCK a tool call. */
   hooks?: HookConfig[]
+  /** Provably read-only calls skip blanket asks (default true; config autoApproveReadOnly). */
+  autoApproveReadOnly?: boolean
   /** UI stream hook — deltas, tool calls, tool results. */
   onEvent?: (event: RunnerEvent) => void
   signal?: AbortSignal
@@ -565,6 +567,7 @@ export async function runUserTurn(
                       cwd: deps.cwd,
                       callId: call.callId,
                       isResultVisible: (id) => visibleResults.has(id),
+                      ...(deps.autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
                       rules: deps.rules,
                       ask: deps.ask,
                       state,

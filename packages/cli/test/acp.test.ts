@@ -657,7 +657,8 @@ test("with no configured permissions, bash asks (interactive posture) instead of
   const cwd = gitCwd("bfly-acp-cwd-") // no butterfly.jsonc at all
 
   const provider = new MockProvider(
-    oneToolCallThenText({ callId: "c1", name: "bash", input: { command: "echo hi" } }),
+    // Not provably read-only (those run unasked — readonly-bash.ts).
+    oneToolCallThenText({ callId: "c1", name: "bash", input: { command: "touch hi" } }),
   )
   const { peer, sent } = makeAgent(provider, { model: "mock/model", home })
 

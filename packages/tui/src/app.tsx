@@ -2590,6 +2590,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(limit ? { limits: { context: limit } } : {}),
         ...(config().retries !== undefined ? { retries: config().retries } : {}),
         ...(config().autoContinue !== undefined ? { autoContinue: config().autoContinue } : {}),
+        ...(config().autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
         ...(config().small_model ? { smallModel: config().small_model } : {}),
         ...(costForRef(config().small_model)
           ? { smallModelCost: costForRef(config().small_model) }

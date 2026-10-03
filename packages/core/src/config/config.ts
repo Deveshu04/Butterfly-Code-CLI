@@ -38,6 +38,12 @@ export const ButterflyConfig = z.object({
    * working still open, or its reply hit the output cap. Default 2; 0 off.
    */
   autoContinue: z.number().int().min(0).max(10).optional(),
+  /**
+   * Run provably read-only shell commands (`ls`, `git status`, `rg x | head`)
+   * without asking when bash is a blanket "ask". Explicit permission
+   * patterns always win. Default true; false asks for every command.
+   */
+  autoApproveReadOnly: z.boolean().optional(),
   memory: z
     .object({
       /** Post-turn memory review. Default true. */
