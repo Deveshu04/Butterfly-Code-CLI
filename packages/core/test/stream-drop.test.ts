@@ -11,6 +11,7 @@ import type { TurnEvent } from "../src/provider/port"
 const base = { id: "c1", object: "chat.completion.chunk", created: 0, model: "m" }
 const chunk = (c: unknown) => `data: ${JSON.stringify(c)}\n\n`
 let mode: "drop" | "complete" = "drop"
+let finishReason = "stop"
 
 const server = Bun.serve({
   port: 0,
@@ -22,7 +23,7 @@ const server = Bun.serve({
     const body =
       mode === "drop"
         ? head
-        : `${head}${chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}${chunk({ ...base, choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } })}data: [DONE]\n\n`
+        : `${head}${chunk({ ...base, choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })}${chunk({ ...base, choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } })}data: [DONE]\n\n`
     return new Response(body, { headers: { "content-type": "text/event-stream" } })
   },
 })
@@ -66,4 +67,19 @@ test("a complete stream still finishes cleanly", async () => {
     reason: "stop",
     usage: { input: 3, output: 2, cacheRead: 0, cacheWrite: 0 },
   })
+})
+
+test("vendor spellings of 'cut off at the output cap' arrive as length, not error", async () => {
+  mode = "complete"
+  for (const raw of ["max_tokens", "MAX_TOKENS", "max_output_tokens", "model_length"]) {
+    finishReason = raw
+    const events = await turn()
+    const last = events.at(-1)
+    expect(last?.type === "finish" ? last.reason : undefined).toBe("length")
+  }
+  finishReason = "something_else"
+  const events = await turn()
+  const last = events.at(-1)
+  expect(last?.type === "finish" ? last.reason : undefined).toBe("error")
+  finishReason = "stop"
 })

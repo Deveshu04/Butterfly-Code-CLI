@@ -116,6 +116,18 @@ export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 /** Floor for the context-clamped output cap — below this a reply is useless. */
 const MIN_OUTPUT_TOKENS = 1_024
 export const MAX_LENGTH_CONTINUATIONS = 4
+/** A provider error that is about the output cap we sent, whatever the vendor calls it. */
+const OUTPUT_CAP_ERROR =
+  /max[_ ]?(completion[_ ]|output[_ ]|new[_ ])?tokens|maxOutputTokens|num_predict|(completion|output) tokens/i
+const learnedOutputCaps = new Map<string, number | "omit">()
+
+/** The largest plausible cap a cap-rejection message names below what we sent. */
+export function capFromError(message: string, sent: number): number | "omit" {
+  const numbers = [...message.matchAll(/\d[\d,_]*/g)]
+    .map((match) => Number(match[0].replace(/[,_]/g, "")))
+    .filter((n) => Number.isFinite(n) && n >= 256 && n < sent)
+  return numbers.length > 0 ? Math.max(...numbers) : "omit"
+}
 /** Auto-continue nudges per turn (RunnerDeps.autoContinue). */
 export const DEFAULT_AUTO_CONTINUE = 2
 const RETRY_BASE_MS = 2_000
@@ -301,8 +313,11 @@ export async function runUserTurn(
   }
 
   /** The output cap for the next step: configured/catalog cap, clamped to the window. */
-  const outputCap = (): number => {
-    const base = deps.maxOutputTokens ?? deps.limits?.output ?? DEFAULT_MAX_OUTPUT_TOKENS
+  const outputCap = (): number | undefined => {
+    const learned = learnedOutputCaps.get(deps.model)
+    if (learned === "omit") return undefined
+    const configured = deps.maxOutputTokens ?? deps.limits?.output ?? DEFAULT_MAX_OUTPUT_TOKENS
+    const base = learned !== undefined ? Math.min(learned, configured) : configured
     const context = deps.limits?.context
     if (context === undefined || lastStepInput === undefined) return base
     // Some providers reject prompt + max_tokens > window outright; leave
@@ -313,13 +328,16 @@ export async function runUserTurn(
 
   const planContinuation = (
     reason: FinishReason | undefined,
-    stepText: string,
+    produced: boolean,
+    cutToolCall: boolean,
   ): { text: string; notice: string; kind: "length" | "todo" } | null => {
     if (reason === "length") {
-      if (lengthContinuations >= MAX_LENGTH_CONTINUATIONS || stepText.trim() === "") return null
+      if (lengthContinuations >= MAX_LENGTH_CONTINUATIONS || !produced) return null
       return {
         kind: "length",
-        text: "[harness] Your last reply was cut off by the output-token limit. Continue exactly where it stopped — do not repeat what you already wrote. Keep each reply short; put long content in files with the edit tool.",
+        text: cutToolCall
+          ? "[harness] Your last reply hit the output-token limit while you were still writing a tool call, so that call was NOT run. Issue it again, smaller: split large file content across several edits instead of one huge call."
+          : "[harness] Your last reply was cut off by the output-token limit. Continue exactly where it stopped — do not repeat what you already wrote. Keep each reply short; put long content in files with the edit tool.",
         notice: `reply hit the output limit — continuing (${lengthContinuations + 1}/${MAX_LENGTH_CONTINUATIONS})`,
       }
     }
@@ -395,13 +413,14 @@ export async function runUserTurn(
       toolCalls.length = 0
       finish = undefined
       let failure: Extract<TurnEvent, { type: "error" }> | undefined
+      const sentCap = outputCap()
 
       for await (const event of deps.provider.streamTurn({
         model: deps.model,
         messages,
         tools: registry.list(),
         ...(deps.reasoning !== undefined ? { reasoning: deps.reasoning } : {}),
-        maxOutputTokens: outputCap(),
+        ...(sentCap !== undefined ? { maxOutputTokens: sentCap } : {}),
         signal: deps.signal,
       })) {
         if (event.type === "error") {
@@ -461,6 +480,25 @@ export async function runUserTurn(
       }
 
       const retryable = kind !== undefined && RETRYABLE_ERROR_KINDS.has(kind)
+      const capMessage = `${failure.info?.message ?? ""} ${failure.info?.detail ?? ""} ${failure.message}`
+      if (
+        !retryable &&
+        kind !== "auth" &&
+        kind !== "quota" &&
+        sentCap !== undefined &&
+        OUTPUT_CAP_ERROR.test(capMessage) &&
+        !deps.signal?.aborted
+      ) {
+        const next = capFromError(capMessage, sentCap)
+        learnedOutputCaps.set(deps.model, next)
+        deps.onEvent?.({ type: "step-retracted", attempt })
+        deps.onEvent?.({
+          type: "notice",
+          text: `provider rejected an output cap of ${sentCap} tokens — retrying with ${next === "omit" ? "its own default" : next}`,
+        })
+        attempt -= 1
+        continue
+      }
       if (!retryable || attempt > maxRetries) {
         deps.onEvent?.(failure)
         throw new Error(`Provider error: ${failure.message}`)
@@ -566,7 +604,12 @@ export async function runUserTurn(
       }
     }
 
-    if (finish?.reason === "tool-calls" && toolCalls.length > 0) {
+    // Complete tool calls run whatever the finish label says: several
+    // OpenAI-compatible servers report "stop" alongside finished tool_calls.
+    // A "length" finish is different — the last call's arguments may be cut.
+    const runCalls =
+      toolCalls.length > 0 && (finish?.reason === "tool-calls" || finish?.reason === "stop")
+    if (runCalls) {
       if (toolCalls.some((call) => isTodoCall(call.name))) todoTouched = true
       for (const call of toolCalls) {
         if (interrupted || deps.signal?.aborted) {
@@ -720,10 +763,17 @@ export async function runUserTurn(
       continue
     }
     if (deps.signal?.aborted) interrupted = true
-    abandonPendingCalls(toolCalls, "the turn ended before this call ran")
+    const cutToolCall = finish?.reason === "length" && toolCalls.length > 0
+    abandonPendingCalls(
+      toolCalls,
+      cutToolCall
+        ? "your reply hit the output-token limit before this call was complete"
+        : "the turn ended before this call ran",
+    )
 
-    if (!interrupted && toolCalls.length === 0 && steps < maxSteps) {
-      const nudge = planContinuation(finish?.reason, stepText)
+    if (!interrupted && (toolCalls.length === 0 || cutToolCall) && steps < maxSteps) {
+      const produced = stepText.trim() !== "" || stepReasoning.trim() !== "" || toolCalls.length > 0
+      const nudge = planContinuation(finish?.reason, produced, cutToolCall)
       if (nudge) {
         if (nudge.kind === "length") lengthContinuations += 1
         else continuations += 1

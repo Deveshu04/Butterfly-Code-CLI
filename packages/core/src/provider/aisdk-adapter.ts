@@ -31,10 +31,27 @@ export function mapUsage(usage: AiUsage | undefined): Usage {
   }
 }
 
-export function mapFinishReason(reason: string): FinishReason {
+/**
+ * Raw finish reasons that mean "cut off at the output cap". The native
+ * Anthropic/Gemini SDKs already map theirs to "length"; the generic
+ * OpenAI-compatible mapper only knows the literal "length", so every other
+ * vendor spelling arrives as "other" and would end a turn silently.
+ */
+const RAW_TRUNCATION_REASONS = new Set([
+  "length",
+  "max_tokens",
+  "max_output_tokens",
+  "max_completion_tokens",
+  "model_length",
+  "token_limit",
+  "model_context_window_exceeded",
+])
+
+export function mapFinishReason(reason: string, raw?: string): FinishReason {
   if (reason === "stop") return "stop"
   if (reason === "tool-calls") return "tool-calls"
   if (reason === "length") return "length"
+  if (raw !== undefined && RAW_TRUNCATION_REASONS.has(raw.toLowerCase())) return "length"
   return "error"
 }
 
@@ -228,6 +245,7 @@ export class AiSdkProvider implements ProviderPort {
     let finishReason: FinishReason = "stop"
     let sawFinish = false
     let truncated = false
+    let rawFinishReason: string | undefined
 
     try {
       for await (const part of result.stream) {
@@ -252,6 +270,7 @@ export class AiSdkProvider implements ProviderPort {
           case "finish-step": {
             usage = mapUsage(part.usage as AiUsage)
             const step = part as { finishReason?: string; rawFinishReason?: string }
+            rawFinishReason = step.rawFinishReason ?? rawFinishReason
             // The SDK synthesizes a finish when the SSE stream simply ends:
             // "other", no raw provider reason, no usage. A real completion
             // always carries the provider's own finish_reason.
@@ -263,7 +282,10 @@ export class AiSdkProvider implements ProviderPort {
           }
           case "finish":
             sawFinish = true
-            finishReason = mapFinishReason(part.finishReason)
+            finishReason = mapFinishReason(
+              part.finishReason,
+              (part as { rawFinishReason?: string }).rawFinishReason ?? rawFinishReason,
+            )
             break
           case "error":
             yield buildErrorEvent(part.error, providerId)

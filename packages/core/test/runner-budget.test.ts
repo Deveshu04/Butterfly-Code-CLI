@@ -295,7 +295,7 @@ test("tool calls emitted with a non-tool-calls finish reason are still answered"
   const provider = new MockProvider([
     [
       { type: "tool-call", callId: "c1", name: "echo", input: { text: "orphan" } },
-      { type: "finish", reason: "stop", usage: bigUsage },
+      { type: "finish", reason: "error", usage: bigUsage },
     ],
   ])
   const deps = makeDeps(provider)

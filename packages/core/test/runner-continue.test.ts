@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { latestTurnFacts } from "../src/memory/evolve"
 import { SessionJournal } from "../src/session/journal"
 import {
+  capFromError,
   DEFAULT_MAX_OUTPUT_TOKENS,
   MAX_LENGTH_CONTINUATIONS,
   type RunnerDeps,
@@ -195,4 +196,65 @@ test("an interrupted turn is never auto-continued", async () => {
   expect(provider.requests.length).toBeLessThanOrEqual(2)
   const { events } = SessionJournal.replay(deps.journal.path)
   expect(events.some((e) => e.type === "message.user" && e.synthetic === true)).toBe(false)
+})
+
+test("a tool call cut off by the output cap is re-requested, not silently dropped", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "text-delta" as const, text: "Writing the file" },
+      { type: "tool-call" as const, callId: "c1", name: "todo", input: { items: '[{"te' } },
+      { type: "finish" as const, reason: "length" as const, usage: zeroUsage },
+    ],
+    callTodo("c2", ["completed"]),
+    say("Done."),
+  ])
+  const { deps, notices } = makeDeps(provider)
+  const outcome = await runUserTurn(deps, "write it")
+  expect(outcome.text).toBe("Done.")
+  expect(provider.requests.length).toBe(3)
+  expect(notices.some((n) => n.includes("output limit — continuing"))).toBe(true)
+  const sent = JSON.stringify(provider.requests[1]?.messages)
+  expect(sent).toContain("before this call was complete")
+  expect(sent).toContain("call was NOT run")
+})
+
+test("complete tool calls run even when the provider labels the finish 'stop'", async () => {
+  const provider = new MockProvider([
+    [
+      { type: "tool-call" as const, callId: "c1", name: "todo", input: todos(["completed"]) },
+      { type: "finish" as const, reason: "stop" as const, usage: zeroUsage },
+    ],
+    say("ok"),
+  ])
+  const { deps } = makeDeps(provider)
+  await runUserTurn(deps, "go")
+  expect(provider.requests.length).toBe(2)
+  const { events } = SessionJournal.replay(deps.journal.path)
+  const result = events.find((e) => e.type === "tool.result")
+  expect(result?.type === "tool.result" ? result.isError : true).toBe(false)
+})
+
+test("a provider that rejects the output cap gets the ceiling it names, then none", async () => {
+  const reject = (message: string) => [
+    {
+      type: "error" as const,
+      message,
+      info: { kind: "bad_request" as const, message },
+    },
+  ]
+  const provider = new MockProvider([
+    reject("max_tokens is too large: 8192. This model supports at most 4096 completion tokens"),
+    say("hi"),
+  ])
+  const { deps, notices } = makeDeps(provider, { model: "cap-test/a" })
+  await runUserTurn(deps, "x")
+  expect(provider.requests.map((r) => r.maxOutputTokens)).toEqual([8_192, 4_096])
+  expect(notices.some((n) => n.includes("rejected an output cap of 8192"))).toBe(true)
+
+  const vague = new MockProvider([reject("invalid max_tokens"), say("hi")])
+  await runUserTurn(makeDeps(vague, { model: "cap-test/b" }).deps, "x")
+  expect(vague.requests[1]?.maxOutputTokens).toBeUndefined()
+
+  expect(capFromError("limit is 1,000 but got 8192", 8_192)).toBe(1_000)
+  expect(capFromError("bad max_tokens", 8_192)).toBe("omit")
 })
