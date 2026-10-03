@@ -118,6 +118,14 @@ export { McpHub, type McpServerConfig, type McpToolInfo } from "./mcp/hub"
 export { createMcpTool } from "./mcp/mcp-tool"
 export { type EpisodicHit, EpisodicIndex } from "./memory/episodic"
 export {
+  describeEvolution,
+  EVOLVE_PROMPT,
+  type EvolveOutcome,
+  evolveAfterTurn,
+  latestTurnFacts,
+  worthReviewing,
+} from "./memory/evolve"
+export {
   applyMemoryOp,
   loadMemory,
   type MemoryPaths,
@@ -126,10 +134,32 @@ export {
   scanForInjection,
   USER_MEMORY_CAP,
 } from "./memory/files"
+export {
+  forgetMemoryLine,
+  type MemoryLine,
+  memoryLines,
+  renderMemoryView,
+  renderSkillsView,
+  skillStatus,
+} from "./memory/manage"
 export { createMemoryTool } from "./memory/memory-tool"
 export { REVIEWER_PROMPT, reviewTurn } from "./memory/reviewer"
 export { createSkillTool } from "./memory/skill-tool"
-export { listSkills, promotedSkills, readSkill, recordSkillRun, skillsIndex } from "./memory/skills"
+export {
+  deleteSkill,
+  draftSkills,
+  isPromoted,
+  listSkills,
+  PROMOTION_THRESHOLD,
+  promotedSkills,
+  promoteSkill,
+  readSkill,
+  recordSkillRun,
+  recordSkillUse,
+  type SkillMeta,
+  skillsIndex,
+  writeAgentSkill,
+} from "./memory/skills"
 // Permissions
 export {
   computeAllowPattern,

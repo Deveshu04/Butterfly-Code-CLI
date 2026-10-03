@@ -18,6 +18,13 @@ export interface CommandActions {
   memoryText(): string
   permissionsText(): string
   skillsText(): string
+  memoryAdd(scope: "project" | "user", text: string): void
+  memoryForget(n: number): void
+  memorySearch(query: string): string
+  pickSkill(): void
+  showSkill(name: string): string
+  promoteSkill(name: string): void
+  deleteSkill(name: string): void
   listSessionsText(): string
   /** Arrow-key picker over past sessions (same rows as listSessionsText). */
   pickSession(): void
@@ -182,10 +189,27 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: "memory",
-    args: "",
-    description: "show project + user memory files",
-    keywords: ["remember", "notes", "mem", "facts", "recall"],
-    run: (_arg, a) => a.info(a.memoryText()),
+    args: "[add|user|forget|search …]",
+    description: "what the agent has learned — view, add, forget, or search past sessions",
+    keywords: ["remember", "notes", "mem", "facts", "recall", "learned", "forget"],
+    run: (arg, a) => {
+      const trimmed = arg.trim()
+      if (trimmed === "") {
+        a.info(a.memoryText(), true)
+        return
+      }
+      const [verb = "", ...rest] = trimmed.split(/\s+/)
+      const value = rest.join(" ").trim()
+      if ((verb === "add" || verb === "project") && value) a.memoryAdd("project", value)
+      else if (verb === "user" && value) a.memoryAdd("user", value.replace(/^add\s+/, ""))
+      else if ((verb === "forget" || verb === "remove" || verb === "rm") && /^\d+$/.test(value))
+        a.memoryForget(Number(value))
+      else if (verb === "search" && value) a.info(a.memorySearch(value))
+      else
+        a.error(
+          "usage: /memory | /memory add <fact> | /memory user <fact> | /memory forget <n> | /memory search <words>",
+        )
+    },
   },
   {
     name: "permissions",
@@ -196,10 +220,24 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: "skills",
-    args: "",
-    description: "list available skills",
-    keywords: ["skill", "playbooks", "recipes"],
-    run: (_arg, a) => a.info(a.skillsText()),
+    args: "[show|promote|delete <name>]",
+    description: "skill library (yours + self-learned) — no arg opens the picker",
+    keywords: ["skill", "playbooks", "recipes", "procedures", "learned-skills"],
+    run: (arg, a) => {
+      const trimmed = arg.trim()
+      if (trimmed === "") {
+        a.pickSkill()
+        return
+      }
+      const [verb = "", ...rest] = trimmed.split(/\s+/)
+      const name = rest.join(" ").trim()
+      if (verb === "list") a.info(a.skillsText(), true)
+      else if (verb === "show" && name) a.info(a.showSkill(name))
+      else if (verb === "promote" && name) a.promoteSkill(name)
+      else if ((verb === "delete" || verb === "rm" || verb === "remove") && name)
+        a.deleteSkill(name)
+      else a.error("usage: /skills | /skills list | /skills show|promote|delete <name>")
+    },
   },
   {
     name: "resume",

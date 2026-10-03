@@ -1154,6 +1154,52 @@ test("/graph reports the code graph and the project map lands in .butterfly", as
   t.renderer.destroy()
 })
 
+test("/memory add stores a fact, /memory lists it numbered, /memory forget removes it", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 110, height: 40 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/memory add tests run with bun test")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("remembered (project)"))
+  expect(readFileSync(join(cwd, ".butterfly", "PROJECT.md"), "utf8")).toContain(
+    "tests run with bun test",
+  )
+  t.mockInput.typeText("/memory")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("/memory forget <n>"))
+  expect(t.captureCharFrame()).toMatch(/1\s+tests run with bun test/)
+  t.mockInput.typeText("/memory forget 1")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("forgot project #1"))
+  expect(readFileSync(join(cwd, ".butterfly", "PROJECT.md"), "utf8")).toBe("")
+  t.renderer.destroy()
+})
+
+test("/skills opens a picker over learned skills and Enter shows the body", async () => {
+  const cwd = tempDir("bfly-tui-")
+  const dir = join(cwd, ".butterfly", "skills", "release-npm")
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    join(dir, "SKILL.md"),
+    "---\nname: release-npm\ndescription: cut a release\norigin: agent\nverified: 1\n---\n1. bun test\n2. npm publish\n",
+  )
+  const t = await testRender(
+    () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    { width: 110, height: 40 },
+  )
+  await t.renderOnce()
+  t.mockInput.typeText("/skills")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("skills — type to filter"))
+  expect(t.captureCharFrame()).toContain("draft 1/2 verified")
+  t.mockInput.pressEnter()
+  await waitForFrameSlow(t, (f: string) => f.includes("2. npm publish"))
+  t.renderer.destroy()
+})
+
 test("synonyms reach commands: /history opens the resume picker, /llm the model list", async () => {
   const cwd = tempDir("bfly-tui-")
   const t = await testRender(

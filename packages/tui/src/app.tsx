@@ -4,6 +4,7 @@ import { basename, isAbsolute, join } from "node:path"
 import {
   AiSdkProvider,
   type AttentionAction,
+  applyMemoryOp,
   BG_TASKS_STATE_KEY,
   BgTaskRegistry,
   type ButterflyConfig,
@@ -22,16 +23,20 @@ import {
   createTaskTool,
   createWebTool,
   decideAttention,
+  deleteSkill,
+  describeEvolution,
   describeGitFailure,
   describeProviderError,
   describeReviewScope,
   doctor,
   EpisodicIndex,
   editTool,
+  evolveAfterTurn,
   expandMentions,
   exportSessionMarkdown,
   fetchProviderModels,
   focusedSkeleton,
+  forgetMemoryLine,
   forkSession,
   formatUSD,
   frecencyStorePath,
@@ -45,6 +50,7 @@ import {
   type LoopEvent,
   listMentionCandidates,
   listSessions,
+  listSkills,
   listUntracked,
   loadConfig,
   loadFrecency,
@@ -65,15 +71,18 @@ import {
   preloadHandoff,
   prepareImageAttachments,
   project,
+  promoteSkill,
   type ReasoningEffort,
   type ReviewEvent,
   type RunnerEvent,
   rankByFrecency,
+  readSkill,
   readTool,
   renderDoctorReport,
+  renderMemoryView,
   renderMentionBlock,
+  renderSkillsView,
   restoreSnapshot,
-  reviewTurn,
   runCommand,
   runHandoffTurn,
   runHooks,
@@ -87,6 +96,7 @@ import {
   saveHandoff,
   setHookEnabled,
   setPermissionRule,
+  skillStatus,
   skillsIndex,
   stageAllTracked,
   type TaskToolOptions,
@@ -1381,21 +1391,70 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     },
     setReasoning,
     reasoning,
-    memoryText: () => {
-      const current = loadMemory(paths)
-      return [
-        `PROJECT (${paths.project}):`,
-        current.project.trim() || "  (empty)",
-        "",
-        `USER (${paths.user}):`,
-        current.user.trim() || "  (empty)",
-        "",
-        "(frozen at session start — edits apply next session; the agent updates these via its memory tool)",
-      ].join("\n")
+    memoryText: () => renderMemoryView(paths),
+    memoryAdd: (scope, text) => {
+      const result = applyMemoryOp(paths, { op: "add", scope, text })
+      if (result.ok)
+        push({
+          kind: "info",
+          text: `remembered (${scope}): ${text} — in the prompt from next session`,
+        })
+      else push({ kind: "error", text: result.message })
+    },
+    memoryForget: (n) => {
+      const removed = forgetMemoryLine(paths, n)
+      if (removed) push({ kind: "info", text: `forgot ${removed.scope} #${n}: ${removed.text}` })
+      else push({ kind: "error", text: `no memory line #${n} — /memory shows the numbers` })
+    },
+    memorySearch: (query) => {
+      const hits = episodic.search(query, 6)
+      if (hits.length === 0) return `no past-session matches for "${query}"`
+      return hits
+        .map(
+          (hit) =>
+            `[${hit.time.slice(0, 10)} ${hit.type} ${hit.sessionId.slice(0, 8)}] ${hit.text.replace(/\s+/g, " ").slice(0, 200)}`,
+        )
+        .join("\n")
     },
     permissionsText: () => JSON.stringify(config().permissions ?? TUI_DEFAULT_RULES, null, 2),
-    skillsText: () =>
-      skillsIndex(skillDirs) || "no skills yet — add .butterfly/skills/<name>/SKILL.md",
+    skillsText: () => renderSkillsView(skillDirs),
+    pickSkill: () => {
+      const skills = listSkills(skillDirs)
+      if (skills.length === 0) {
+        push({ kind: "info", text: renderSkillsView(skillDirs) })
+        return
+      }
+      setPicker({
+        title: "skills — type to filter · ↑↓ · Enter show · Esc",
+        items: skills.map((skill) => ({
+          label: `${skill.name}  [${skillStatus(skill)}]  ${skill.description}`,
+          value: skill.name,
+        })),
+        index: 0,
+        filter: "",
+        onPick: (name) => push({ kind: "info", text: actions.showSkill(name) }),
+      })
+    },
+    showSkill: (name) => {
+      const meta = listSkills(skillDirs).find((skill) => skill.name === name)
+      const body = readSkill(skillDirs, name)
+      if (!meta || body === null) return `no skill named "${name}"`
+      return `${meta.name} — ${meta.description}\n${skillStatus(meta)} · ${meta.path}\n\n${body}\n\n/skills promote ${meta.name} · /skills delete ${meta.name}`
+    },
+    promoteSkill: (name) => {
+      const meta = promoteSkill(skillDirs, name)
+      if (meta)
+        push({
+          kind: "info",
+          text: `promoted ${name} — in every session's skill index from next session`,
+        })
+      else push({ kind: "error", text: `no skill named "${name}"` })
+    },
+    deleteSkill: (name) => {
+      const removed = deleteSkill(skillDirs, name)
+      if (removed) push({ kind: "info", text: `deleted skill ${name} (${removed})` })
+      else push({ kind: "error", text: `no skill named "${name}"` })
+    },
     listSessionsText: () => {
       lastListing = listSessions(join(props.cwd, ".butterfly", "sessions")).filter(
         (s) => s.title !== "(empty session)" || s.path === session.journal.path,
@@ -2475,14 +2534,19 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           // Keep graph.db + project-map.md in step with what this turn edited.
           await codeGraph?.sync().catch(() => {})
           graph = graphDb()
-          const small = config().small_model
-          if (small) {
-            await reviewTurn({
+          if (config().memory?.autoReview !== false) {
+            const evolved = await evolveAfterTurn({
               provider: freshProvider(),
-              model: small,
+              model: config().small_model ?? ref,
               journal: session.journal,
               paths,
+              skillDir: skillDirs[0] as string,
+              skillDirs,
+              autoSkills: config().memory?.autoSkills !== false,
+              approval: config().memory?.approval === true,
             })
+            const line = describeEvolution(evolved)
+            if (line !== "") push({ kind: "info", text: line })
           }
         })()
       })

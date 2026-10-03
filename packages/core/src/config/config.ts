@@ -27,6 +27,16 @@ export const ButterflyConfig = z.object({
   /** Hard dollar ceiling per turn (priced from models.dev). */
   maxSpendUSD: z.number().positive().optional(),
   retries: z.number().int().min(0).optional(),
+  memory: z
+    .object({
+      /** Post-turn memory review. Default true. */
+      autoReview: z.boolean().optional(),
+      /** Let the reviewer draft + reinforce skills. Default true. */
+      autoSkills: z.boolean().optional(),
+      /** Stage agent memory writes as .pending files for human approval. Default false. */
+      approval: z.boolean().optional(),
+    })
+    .optional(),
   notifications: z.boolean().optional(),
   theme: z.string().optional(),
   mcp: z

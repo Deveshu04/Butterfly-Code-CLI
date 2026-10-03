@@ -17,8 +17,10 @@ import {
   createTaskTool,
   createWebTool,
   decideAttention,
+  describeEvolution,
   EpisodicIndex,
   editTool,
+  evolveAfterTurn,
   expandMentions,
   formatUSD,
   frecencyStorePath,
@@ -40,7 +42,6 @@ import {
   type RunnerEvent,
   readTool,
   renderMentionBlock,
-  reviewTurn,
   runUserTurn,
   SessionJournal,
   skillsIndex,
@@ -332,13 +333,19 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     }
     // Leave graph.db + project-map.md matching the code this run produced.
     await codeGraph.sync().catch(() => {})
-    if (config.small_model) {
-      await reviewTurn({
+    if (config.memory?.autoReview !== false) {
+      const evolved = await evolveAfterTurn({
         provider,
-        model: config.small_model,
+        model: config.small_model ?? modelRef,
         journal,
         paths,
+        skillDir: join(cwd, ".butterfly", "skills"),
+        skillDirs,
+        autoSkills: config.memory?.autoSkills !== false,
+        approval: config.memory?.approval === true,
       })
+      const line = describeEvolution(evolved)
+      if (line !== "" && !opts.json) process.stdout.write(`\n[${line}]`)
     }
 
     if (opts.json) {

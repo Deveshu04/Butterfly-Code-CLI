@@ -25,7 +25,7 @@ export interface ReviewOutcome {
 
 const TURN_RENDER_CAP = 8_000
 
-function renderLatestTurn(journalPath: string): string {
+export function renderLatestTurn(journalPath: string): string {
   const { events } = SessionJournal.replay(journalPath)
   const lastUser = events.map((e) => e.type).lastIndexOf("message.user")
   const slice = lastUser >= 0 ? events.slice(lastUser) : events
@@ -42,7 +42,7 @@ function renderLatestTurn(journalPath: string): string {
   return lines.join("\n").slice(0, TURN_RENDER_CAP)
 }
 
-function extractJsonArray(text: string): unknown[] | null {
+export function extractJsonArray(text: string): unknown[] | null {
   const start = text.indexOf("[")
   const end = text.lastIndexOf("]")
   if (start < 0 || end <= start) return null
