@@ -74,6 +74,8 @@ import {
   planQuickAdd,
   preloadHandoff,
   prepareImageAttachments,
+  presetBaseURL,
+  presetEnvKey,
   project,
   promoteSkill,
   type ReasoningEffort,
@@ -93,6 +95,7 @@ import {
   runLoop,
   runReview,
   runUserTurn,
+  SELF_NAMED_PROVIDERS,
   SessionJournal,
   type SessionSummary,
   safeRewindIndex,
@@ -529,6 +532,12 @@ interface ProviderChoice {
   example: string
 }
 
+/** The provider's API key from its conventional env var, when one is set. */
+function presetKeyFromEnv(providerId: string): string | undefined {
+  const name = presetEnvKey(providerId)
+  return name ? process.env[name] : undefined
+}
+
 const PROVIDERS: ProviderChoice[] = [
   { id: "sarvam", needsKey: true, example: "sarvam-105b" },
   { id: "openai", needsKey: true, example: "gpt-5-mini" },
@@ -536,6 +545,7 @@ const PROVIDERS: ProviderChoice[] = [
   { id: "anthropic", needsKey: true, example: "claude-sonnet-4-6" },
   { id: "google", needsKey: true, example: "gemini-2.5-flash" },
   { id: "nvidia", needsKey: true, example: "meta/llama-3.3-70b-instruct" },
+  { id: "litellm", needsKey: true, example: "gpt-4o (any model_name on your proxy)" },
   { id: "ollama", needsKey: false, example: "qwen3:8b" },
   { id: "lmstudio", needsKey: false, example: "qwen/qwen3-8b" },
 ]
@@ -1197,8 +1207,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   ): Promise<{ models: { id: string; context?: number; name?: string }[]; live: boolean }> => {
     const providerConfig = config().providers?.[providerId]
     const live = await fetchProviderModels(providerId, {
-      apiKey: apiKey ?? providerConfig?.apiKey,
-      baseURL: providerConfig?.baseURL,
+      apiKey: apiKey ?? providerConfig?.apiKey ?? presetKeyFromEnv(providerId),
+      baseURL: providerConfig?.baseURL ?? presetBaseURL(providerId),
     })
     if (live.length > 0) return { models: live, live: true }
     return { models: catalog.listModels(providerId), live: false }
@@ -1247,7 +1257,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       if (fromCatalog) {
         push({ kind: "info", text: `note: ${catalogFallbackNote(provider)}` })
       }
-      if (provider !== "ollama" && provider !== "lmstudio" && !catalog.lookup(provider, modelId)) {
+      if (!SELF_NAMED_PROVIDERS.has(provider) && !catalog.lookup(provider, modelId)) {
         push({
           kind: "info",
           text: `note: "${provider}/${modelId}" is not in the models.dev catalog — double-check the id if requests fail (/provider to change it).`,
@@ -2390,7 +2400,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       refreshCtxLimit()
       push({ kind: "info", text: `Saved to ${path}` })
       push({ kind: "info", text: `Ready on ${stage.provider}/${modelId} — describe a task below.` })
-      if (stage.provider !== "ollama" && stage.provider !== "lmstudio") {
+      if (!SELF_NAMED_PROVIDERS.has(stage.provider)) {
         if (!catalog.lookup(stage.provider, modelId)) {
           push({
             kind: "info",

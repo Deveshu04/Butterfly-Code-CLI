@@ -185,8 +185,11 @@ export {
 export {
   createModelResolver,
   type ModelResolver,
+  normalizeGatewayBase,
   parseModelRef,
+  presetBaseURL,
   presetEnvKey,
+  SELF_NAMED_PROVIDERS,
 } from "./provider/hub"
 export { fetchProviderModels, type ProviderModel } from "./provider/list-models"
 export { OfflineMockProvider } from "./provider/mock-provider"

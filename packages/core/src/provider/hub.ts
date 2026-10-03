@@ -23,6 +23,8 @@ export function parseModelRef(ref: string): ParsedModelRef {
 interface Preset {
   kind: "anthropic" | "google" | "openai-compatible"
   baseURL?: string
+  /** Env var that overrides `baseURL` (self-hosted gateways live anywhere). */
+  baseURLEnv?: string
   envKey?: string
   headers?: Record<string, string>
   /** Header that carries the API key in addition to `Authorization: Bearer`. */
@@ -96,13 +98,41 @@ const PRESETS: Record<string, Preset> = {
     keyHeader: "api-subscription-key",
     transformBody: normalizeSarvamBody,
   },
+  litellm: {
+    kind: "openai-compatible",
+    baseURL: "http://localhost:4000/v1",
+    baseURLEnv: "LITELLM_BASE_URL",
+    envKey: "LITELLM_API_KEY",
+  },
   ollama: { kind: "openai-compatible", baseURL: "http://localhost:11434/v1" },
   lmstudio: { kind: "openai-compatible", baseURL: "http://127.0.0.1:1234/v1" },
 }
 
+/** "http://host:4000" → "http://host:4000/v1" (LiteLLM serves both; the SDK appends /chat/completions). */
+export function normalizeGatewayBase(url: string): string {
+  const trimmed = url.trim().replace(/\/+$/, "")
+  return /\/v\d+$/.test(trimmed) ? trimmed : `${trimmed}/v1`
+}
+
+/**
+ * Providers whose model ids are chosen by the user's own deployment, not a
+ * vendor catalog — "not in models.dev" is expected for them, never a typo.
+ */
+export const SELF_NAMED_PROVIDERS: ReadonlySet<string> = new Set(["ollama", "lmstudio", "litellm"])
+
 /** Which env var (if any) a provider preset expects an API key from — /doctor's key-presence check. */
 export function presetEnvKey(providerId: string): string | undefined {
   return PRESETS[providerId]?.envKey
+}
+
+/** The base URL a preset resolves to (env override applied) — for live model listing. */
+export function presetBaseURL(
+  providerId: string,
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const preset = PRESETS[providerId]
+  const fromEnv = preset?.baseURLEnv ? env[preset.baseURLEnv] : undefined
+  return fromEnv ? normalizeGatewayBase(fromEnv) : preset?.baseURL
 }
 
 export interface ResolvedModel {
@@ -121,7 +151,8 @@ export function createModelResolver(
     const preset = PRESETS[providerId]
     const override = config.providers?.[providerId]
     const apiKey = override?.apiKey || (preset?.envKey ? env[preset.envKey] : undefined)
-    const baseURL = override?.baseURL ?? preset?.baseURL
+    const envBase = preset?.baseURLEnv ? env[preset.baseURLEnv] : undefined
+    const baseURL = override?.baseURL ?? (envBase ? normalizeGatewayBase(envBase) : preset?.baseURL)
     const headers = {
       ...preset?.headers,
       ...(preset?.keyHeader && apiKey ? { [preset.keyHeader]: apiKey } : {}),

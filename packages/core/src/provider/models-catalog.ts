@@ -37,6 +37,9 @@ export function catalogCacheStatus(
 
 export const MODELS_DEV_URL = "https://models.dev/api.json"
 
+/** Providers whose model ids belong to OTHER vendors (resolved via lookupAcross). */
+export const GATEWAY_PROVIDERS: ReadonlySet<string> = new Set(["litellm"])
+
 export const BUILTIN_MODELS: Record<string, Record<string, CatalogEntry>> = {
   sarvam: {
     "sarvam-105b": {
@@ -116,6 +119,26 @@ export class ModelsCatalog {
     }
   }
 
+  /**
+   * First catalog entry for a bare model id under any provider, trying the
+   * id as given, then without a "vendor/" prefix, then with the prefix as
+   * the provider ("anthropic/claude-x" → provider anthropic, model claude-x).
+   */
+  lookupAcross(modelId: string): CatalogEntry | undefined {
+    const slash = modelId.indexOf("/")
+    if (slash > 0) {
+      const direct = this.lookup(modelId.slice(0, slash), modelId.slice(slash + 1))
+      if (direct) return direct
+    }
+    const bare = slash > 0 ? modelId.slice(modelId.lastIndexOf("/") + 1) : modelId
+    for (const providerId of Object.keys(this.data)) {
+      if (GATEWAY_PROVIDERS.has(providerId)) continue
+      const entry = this.lookup(providerId, modelId) ?? this.lookup(providerId, bare)
+      if (entry) return entry
+    }
+    return undefined
+  }
+
   static empty(): ModelsCatalog {
     return new ModelsCatalog({})
   }
@@ -141,7 +164,14 @@ export class ModelsCatalog {
       | { models?: Record<string, Record<string, unknown>> }
       | undefined
     const model = provider?.models?.[modelId]
-    if (!model) return BUILTIN_MODELS[providerId]?.[modelId]
+    if (!model) {
+      const builtin = BUILTIN_MODELS[providerId]?.[modelId]
+      if (builtin) return builtin
+      // Gateways (LiteLLM) front other vendors' models under the same ids —
+      // "gpt-4o", "anthropic/claude-sonnet-4-6". Resolve the underlying model
+      // so limits, pricing and image support still work through the proxy.
+      return GATEWAY_PROVIDERS.has(providerId) ? this.lookupAcross(modelId) : undefined
+    }
     const limit = model["limit"] as { context?: number; output?: number } | undefined
     if (typeof limit?.context !== "number") return undefined
     const cost = model["cost"] as

@@ -105,6 +105,37 @@ export async function fetchProviderModels(
           context: entry.context,
         }))
       }
+      case "litellm": {
+        // /model/info (LiteLLM-native) carries context + per-token pricing;
+        // /v1/models is the OpenAI-standard fallback (ids only).
+        const base = (opts.baseURL ?? "http://localhost:4000/v1").replace(/\/v\d+$/, "")
+        const headers = opts.apiKey ? { Authorization: `Bearer ${opts.apiKey}` } : undefined
+        try {
+          const info = await fetchFn(`${base}/model/info`, { headers })
+          if (info.ok) {
+            const body = (await info.json()) as {
+              data?: {
+                model_name: string
+                model_info?: { max_input_tokens?: number | null; max_tokens?: number | null }
+              }[]
+            }
+            const seen = new Set<string>()
+            const models: ProviderModel[] = []
+            for (const entry of body.data ?? []) {
+              if (seen.has(entry.model_name)) continue // one row per alias, not per deployment
+              seen.add(entry.model_name)
+              const context = entry.model_info?.max_input_tokens ?? entry.model_info?.max_tokens
+              models.push({ id: entry.model_name, ...(context ? { context } : {}) })
+            }
+            if (models.length > 0) return models
+          }
+        } catch {
+        }
+        const response = await fetchFn(`${base}/v1/models`, { headers })
+        if (!response.ok) return []
+        const body = (await response.json()) as { data?: { id: string }[] }
+        return (body.data ?? []).map((m) => ({ id: m.id }))
+      }
       case "lmstudio": {
         // Native endpoint (0.4+) carries max_context_length; shim does not.
         const base = (opts.baseURL ?? "http://127.0.0.1:1234/v1").replace(/\/v1$/, "")
