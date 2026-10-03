@@ -254,3 +254,11 @@ test("edit does not syntax-gate non-code files", async () => {
   )
   expect(result.isError).toBeFalsy()
 })
+
+test("bash output reaches the model without color codes or progress frames", async () => {
+  const result = await bashTool.execute(
+    { command: "printf '\\033[31mred\\033[0m\\n10%%\\r100%%\\n'" },
+    ctx(fixtureDir()),
+  )
+  expect(result.output).toBe("red\n100%")
+})

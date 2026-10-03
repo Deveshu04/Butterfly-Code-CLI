@@ -1,6 +1,7 @@
 import { join } from "node:path"
 import { z } from "zod"
 import { BG_TASKS_STATE_KEY, BgTaskRegistry } from "../bg-tasks"
+import { cleanCommandOutput } from "../output-hygiene"
 import type { ToolDefinition } from "../registry"
 import { DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS, runCommand } from "../shell"
 
@@ -61,9 +62,11 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
     const result = await runCommand(input.command, { cwd: ctx.cwd, timeoutMs: input.timeout })
     const meta = { command: input.command, exitCode: result.exitCode }
 
+    const stdout = cleanCommandOutput(result.stdout)
+    const stderr = cleanCommandOutput(result.stderr)
     const parts: string[] = []
-    if (result.stdout.trim() !== "") parts.push(result.stdout.trimEnd())
-    if (result.stderr.trim() !== "") parts.push(`[stderr]\n${result.stderr.trimEnd()}`)
+    if (stdout.trim() !== "") parts.push(stdout.trimEnd())
+    if (stderr.trim() !== "") parts.push(`[stderr]\n${stderr.trimEnd()}`)
 
     if (result.timedOut) {
       const limit = input.timeout ?? DEFAULT_COMMAND_TIMEOUT_MS
