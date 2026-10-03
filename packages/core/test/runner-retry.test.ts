@@ -246,7 +246,9 @@ test("abort fired MID-backoff cancels the wait immediately rather than running t
       {
         type: "error",
         message: "slow provider",
-        info: { kind: "unavailable", message: "slow provider" },
+        // retryAfterSec pins the backoff: full jitter can draw < 20ms,
+        // letting the retry fire before the abort (a ~1% flake).
+        info: { kind: "unavailable", message: "slow provider", retryAfterSec: 1 },
       },
     ],
   ])
@@ -270,7 +272,7 @@ test("an abort mid-backoff journals turn.completed and nothing for the doomed st
       {
         type: "error",
         message: "overloaded",
-        info: { kind: "unavailable", message: "overloaded" },
+        info: { kind: "unavailable", message: "overloaded", retryAfterSec: 1 },
       },
     ],
   ])
