@@ -68,6 +68,7 @@ import {
   moduleOverview,
   mutatingSubagentRegistry,
   now,
+  OLLAMA_DEFAULT_BASE,
   type PermissionRules,
   type ProviderErrorInfo,
   parseModelRef,
@@ -77,6 +78,7 @@ import {
   prepareImageAttachments,
   presetBaseURL,
   presetEnvKey,
+  probeOllamaContext,
   project,
   promoteSkill,
   type ReasoningEffort,
@@ -102,6 +104,7 @@ import {
   safeRewindIndex,
   saveGlobalConfig,
   saveHandoff,
+  servedContextWarning,
   setHookEnabled,
   setPermissionRule,
   skillStatus,
@@ -813,15 +816,45 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   // models.dev catalog (cached on disk): model lists + context limits.
   let catalog = ModelsCatalog.empty()
+  /** Context lengths local servers actually serve (ref → tokens), from probes. */
+  const servedLimits = new Map<string, number>()
   const refreshCtxLimit = () => {
     const ref = modelRef()
     if (!ref) return
     try {
       const parsed = parseModelRef(ref)
-      setCtxLimit(catalog.lookup(parsed.providerId, parsed.modelId)?.context)
+      const catalogLimit = catalog.lookup(parsed.providerId, parsed.modelId)?.context
+      const served = servedLimits.get(ref)
+      setCtxLimit(
+        served !== undefined && (catalogLimit === undefined || served < catalogLimit)
+          ? served
+          : catalogLimit,
+      )
     } catch {
       setCtxLimit(undefined)
     }
+  }
+  const probeServedContext = async (): Promise<void> => {
+    const ref = modelRef()
+    if (!ref || servedLimits.has(ref)) return
+    let parsed: ReturnType<typeof parseModelRef>
+    try {
+      parsed = parseModelRef(ref)
+    } catch {
+      return
+    }
+    if (parsed.providerId !== "ollama") return
+    const base =
+      config().providers?.["ollama"]?.baseURL ?? presetBaseURL("ollama") ?? OLLAMA_DEFAULT_BASE
+    const served = await probeOllamaContext(base, parsed.modelId)
+    if (served === undefined || servedLimits.has(ref)) return
+    servedLimits.set(ref, served)
+    refreshCtxLimit()
+    const prefixTokens =
+      Math.ceil(frozenSystem(ref).length / 4) +
+      Math.ceil(JSON.stringify(registry.list()).length / 4)
+    const warning = servedContextWarning(parsed.modelId, served, prefixTokens)
+    if (warning) push({ kind: "error", text: warning })
   }
   void ModelsCatalog.load({
     cachePath: join(home, ".config", "butterfly", "models-cache.json"),
@@ -829,6 +862,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     .then((loaded) => {
       catalog = loaded
       refreshCtxLimit()
+      void probeServedContext()
     })
     .catch(() => {})
 
@@ -2603,6 +2637,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     )
       .then((outcome) => {
         setSessionCost((c) => c + outcome.costUSD)
+        void probeServedContext()
         const start = turnStartedAt()
         const marker = turnMarker(outcome.usage, outcome.steps, Date.now() - (start ?? Date.now()))
         setStatus(marker)

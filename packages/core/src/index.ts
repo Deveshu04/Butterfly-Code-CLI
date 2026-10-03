@@ -192,6 +192,12 @@ export {
   SELF_NAMED_PROVIDERS,
 } from "./provider/hub"
 export { fetchProviderModels, type ProviderModel } from "./provider/list-models"
+export {
+  LOCAL_CONTEXT_HEADROOM,
+  OLLAMA_DEFAULT_BASE,
+  probeOllamaContext,
+  servedContextWarning,
+} from "./provider/local-context"
 export { OfflineMockProvider } from "./provider/mock-provider"
 export {
   type CatalogCacheStatus,

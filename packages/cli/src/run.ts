@@ -37,15 +37,19 @@ import {
   moduleOverview,
   mutatingSubagentRegistry,
   OfflineMockProvider,
+  OLLAMA_DEFAULT_BASE,
   type PermissionRules,
   type ProviderPort,
   parseModelRef,
   preloadHandoff,
+  presetBaseURL,
+  probeOllamaContext,
   type RunnerEvent,
   readTool,
   renderMentionBlock,
   runUserTurn,
   SessionJournal,
+  servedContextWarning,
   skillsIndex,
   type TaskToolOptions,
   ToolRegistry,
@@ -341,6 +345,19 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     )
 
     const { usage } = outcome
+    // A local server serving a smaller context than the prefix needs
+    // truncates silently — say so (stderr: stdout stays the answer).
+    if (ref.providerId === "ollama") {
+      const served = await probeOllamaContext(
+        config.providers?.["ollama"]?.baseURL ?? presetBaseURL("ollama") ?? OLLAMA_DEFAULT_BASE,
+        ref.modelId,
+      )
+      const prefixTokens =
+        Math.ceil(system.length / 4) + Math.ceil(JSON.stringify(registry.list()).length / 4)
+      const warning =
+        served === undefined ? undefined : servedContextWarning(ref.modelId, served, prefixTokens)
+      if (warning) process.stderr.write(`\n[warning: ${warning}]\n`)
+    }
     /** Turn spend incl. subagents/compaction, plus the evolver below. */
     let costUSD = outcome.costUSD
     const summary = {
