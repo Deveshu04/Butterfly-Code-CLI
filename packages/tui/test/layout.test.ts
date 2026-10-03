@@ -143,7 +143,12 @@ test("a long plan is windowed around the current item", async () => {
 
 test("tool verbs are grouped into colour families", async () => {
   const { toolTone } = await import("../src/layout")
-  expect(["read", "glob", "grep", "explore"].map(toolTone)).toEqual(["read", "read", "read", "read"])
+  expect(["read", "glob", "grep", "explore"].map(toolTone)).toEqual([
+    "read",
+    "read",
+    "read",
+    "read",
+  ])
   expect(toolTone("edit")).toBe("edit")
   expect(toolTone("bash")).toBe("shell")
   expect(toolTone("task")).toBe("agent")
@@ -154,15 +159,36 @@ test("shell rows show what is running, for how long, and how finished ones ended
   const { shellRow, shellStripLine, shortElapsed } = await import("../src/layout")
   expect(shortElapsed(12_000)).toBe("12s")
   expect(shortElapsed(184_000)).toBe("3m 04s")
-  const fg = { kind: "fg" as const, id: "c1", command: "npm test", status: "running" as const, startedAt: 0 }
-  const bg = { kind: "bg" as const, id: "bg1", command: "bun run dev --port 3000", status: "running" as const, startedAt: 0 }
-  const done = { kind: "bg" as const, id: "bg2", command: "make", status: "exited" as const, startedAt: 0, exitCode: 2 }
+  const fg = {
+    kind: "fg" as const,
+    id: "c1",
+    command: "npm test",
+    status: "running" as const,
+    startedAt: 0,
+  }
+  const bg = {
+    kind: "bg" as const,
+    id: "bg1",
+    command: "bun run dev --port 3000",
+    status: "running" as const,
+    startedAt: 0,
+  }
+  const done = {
+    kind: "bg" as const,
+    id: "bg2",
+    command: "make",
+    status: "exited" as const,
+    startedAt: 0,
+    exitCode: 2,
+  }
   const row = shellRow(fg, 12_000, 30)
   expect(row).toStartWith("> fg  npm test ")
   expect(row).toEndWith(" 12s")
   expect(row.length).toBe(30)
   expect(shellRow(done, 0, 30)).toStartWith("  bg2 make ")
   expect(shellRow(done, 0, 30)).toEndWith(" exit 2")
-  expect(shellStripLine([fg, bg, done], 5_000)).toBe("shells 2 running: npm test 5s +1 (1 background)")
+  expect(shellStripLine([fg, bg, done], 5_000)).toBe(
+    "shells 2 running: npm test 5s +1 (1 background)",
+  )
   expect(shellStripLine([done], 0)).toBe("")
 })

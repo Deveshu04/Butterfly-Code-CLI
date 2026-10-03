@@ -80,6 +80,7 @@ export interface RunnerDeps {
   maxSpendUSD?: number
   retries?: number
   autoContinue?: number
+  maxOutputTokens?: number
   /** Lifecycle hooks — pre.tool hooks can BLOCK a tool call. */
   hooks?: HookConfig[]
   /** Provably read-only calls skip blanket asks (default true; config autoApproveReadOnly). */
@@ -110,6 +111,11 @@ export const DEFAULT_MAX_STEPS = 50
 /** Cap on a tool-calling step's journaled reasoning (see message.assistant.reasoning). */
 export const MAX_JOURNALED_REASONING = 32_000
 export const DEFAULT_RETRIES = 3
+/** Output cap when neither RunnerDeps.maxOutputTokens nor limits.output is known. */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192
+/** Floor for the context-clamped output cap — below this a reply is useless. */
+const MIN_OUTPUT_TOKENS = 1_024
+export const MAX_LENGTH_CONTINUATIONS = 4
 /** Auto-continue nudges per turn (RunnerDeps.autoContinue). */
 export const DEFAULT_AUTO_CONTINUE = 2
 const RETRY_BASE_MS = 2_000
@@ -247,7 +253,9 @@ export async function runUserTurn(
   let warned75 = false
   let warned90 = false
   let continuations = 0
-  let lengthNudged = false
+  let lengthContinuations = 0
+  /** Prompt size of the previous step (provider-reported) — clamps the output cap. */
+  let lastStepInput: number | undefined
   /** Context-overflow recovery runs at most once per turn. */
   let overflowRecovered = false
   let lastNudgeTodos: string | undefined
@@ -292,18 +300,31 @@ export async function runUserTurn(
     else delete state[TODO_STATE_KEY]
   }
 
+  /** The output cap for the next step: configured/catalog cap, clamped to the window. */
+  const outputCap = (): number => {
+    const base = deps.maxOutputTokens ?? deps.limits?.output ?? DEFAULT_MAX_OUTPUT_TOKENS
+    const context = deps.limits?.context
+    if (context === undefined || lastStepInput === undefined) return base
+    // Some providers reject prompt + max_tokens > window outright; leave
+    // headroom for the tool results appended since the last step.
+    const room = context - lastStepInput - 4_096
+    return Math.max(MIN_OUTPUT_TOKENS, Math.min(base, room))
+  }
+
   const planContinuation = (
     reason: FinishReason | undefined,
-  ): { text: string; notice: string } | null => {
-    const limit = deps.autoContinue ?? DEFAULT_AUTO_CONTINUE
-    if (limit <= 0 || continuations >= limit) return null
-    if (reason === "length" && !lengthNudged) {
-      lengthNudged = true
+    stepText: string,
+  ): { text: string; notice: string; kind: "length" | "todo" } | null => {
+    if (reason === "length") {
+      if (lengthContinuations >= MAX_LENGTH_CONTINUATIONS || stepText.trim() === "") return null
       return {
-        text: "[harness] Your last reply was cut off by the output-token limit. Continue exactly where it stopped — do not repeat what you already wrote.",
-        notice: `reply hit the output limit — continuing (${continuations + 1}/${limit})`,
+        kind: "length",
+        text: "[harness] Your last reply was cut off by the output-token limit. Continue exactly where it stopped — do not repeat what you already wrote. Keep each reply short; put long content in files with the edit tool.",
+        notice: `reply hit the output limit — continuing (${lengthContinuations + 1}/${MAX_LENGTH_CONTINUATIONS})`,
       }
     }
+    const limit = deps.autoContinue ?? DEFAULT_AUTO_CONTINUE
+    if (limit <= 0 || continuations >= limit) return null
     if (reason !== "stop" || !todoTouched) return null
     const todos = (state[TODO_STATE_KEY] as TodoItem[] | undefined) ?? []
     const open = todos.filter((item) => item.status !== "completed")
@@ -315,6 +336,7 @@ export async function runUserTurn(
       .map((item) => `${item.status === "in_progress" ? "[~]" : "[ ]"} ${item.text}`)
       .join("\n")
     return {
+      kind: "todo",
       text: `[harness] You stopped, but your todo list still has ${open.length} unfinished item(s):\n${list}\nKeep going until they are done. If an item is actually finished, blocked, or no longer needed, update the todo list to say so (and why) — then end with a short summary.`,
       notice: `${open.length} todo(s) still open — continuing (${continuations + 1}/${limit})`,
     }
@@ -379,6 +401,7 @@ export async function runUserTurn(
         messages,
         tools: registry.list(),
         ...(deps.reasoning !== undefined ? { reasoning: deps.reasoning } : {}),
+        maxOutputTokens: outputCap(),
         signal: deps.signal,
       })) {
         if (event.type === "error") {
@@ -460,6 +483,7 @@ export async function runUserTurn(
 
     if (finish) {
       totals.input += finish.usage.input
+      if (finish.usage.input > 0) lastStepInput = finish.usage.input
       totals.output += finish.usage.output
       totals.cacheRead += finish.usage.cacheRead
       totals.cacheWrite += finish.usage.cacheWrite
@@ -699,9 +723,10 @@ export async function runUserTurn(
     abandonPendingCalls(toolCalls, "the turn ended before this call ran")
 
     if (!interrupted && toolCalls.length === 0 && steps < maxSteps) {
-      const nudge = planContinuation(finish?.reason)
+      const nudge = planContinuation(finish?.reason, stepText)
       if (nudge) {
-        continuations += 1
+        if (nudge.kind === "length") lengthContinuations += 1
+        else continuations += 1
         journal.append({
           type: "message.user",
           id: crypto.randomUUID(),
@@ -711,6 +736,22 @@ export async function runUserTurn(
         })
         deps.onEvent?.({ type: "notice", text: nudge.notice })
         continue
+      }
+      if (finish?.reason === "length") {
+        deps.onEvent?.({
+          type: "notice",
+          text: "reply was cut off by the output-token limit — type 'continue' to resume",
+        })
+      } else if (todoTouched) {
+        const open = ((state[TODO_STATE_KEY] as TodoItem[] | undefined) ?? []).filter(
+          (item) => item.status !== "completed",
+        )
+        if (open.length > 0) {
+          deps.onEvent?.({
+            type: "notice",
+            text: `turn ended with ${open.length} todo(s) still open — type 'continue' to resume`,
+          })
+        }
       }
     }
     break

@@ -4,7 +4,13 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { latestTurnFacts } from "../src/memory/evolve"
 import { SessionJournal } from "../src/session/journal"
-import { type RunnerDeps, type RunnerEvent, runUserTurn } from "../src/session/runner"
+import {
+  DEFAULT_MAX_OUTPUT_TOKENS,
+  MAX_LENGTH_CONTINUATIONS,
+  type RunnerDeps,
+  type RunnerEvent,
+  runUserTurn,
+} from "../src/session/runner"
 import { ToolRegistry } from "../src/tool/registry"
 import { todoTool } from "../src/tool/tools/todo"
 import { MockProvider, zeroUsage } from "./helpers/mock-provider"
@@ -110,12 +116,70 @@ test("stale todos from an earlier turn never trigger a nudge", async () => {
   expect(provider.requests.length).toBe(1)
 })
 
-test("a reply cut off at the output cap gets exactly one continue-where-you-stopped", async () => {
-  const provider = new MockProvider([say("The answer is", "length"), say(" 42.", "length")])
-  const { deps, notices } = makeDeps(provider)
-  await runUserTurn(deps, "explain")
-  expect(provider.requests.length).toBe(2)
-  expect(notices.some((n) => n.includes("output limit"))).toBe(true)
+test("a cut-off reply keeps resuming until it finishes, even after a todo nudge", async () => {
+  const provider = new MockProvider([
+    callTodo("t1", ["in_progress", "pending"]),
+    say("stopping early"),
+    say("Step 1 is", "length"),
+    say(" done; step 2 needs", "length"),
+    say(" one more change", "length"),
+    callTodo("t2", ["completed", "completed"]),
+    say("All done."),
+  ])
+  const { deps, notices } = makeDeps(provider, { autoContinue: 1 })
+  const outcome = await runUserTurn(deps, "work")
+  expect(outcome.text).toBe("All done.")
+  expect(provider.requests.length).toBe(7)
+  expect(notices.filter((n) => n.includes("output limit — continuing")).length).toBe(3)
+  expect(JSON.stringify(provider.requests[3]?.messages)).toContain(
+    "cut off by the output-token limit",
+  )
+})
+
+test("cut-off continuations are capped and progress-gated, then the stop is announced", async () => {
+  const many = new MockProvider(Array.from({ length: 8 }, () => say("more", "length")))
+  const capped = makeDeps(many)
+  await runUserTurn(capped.deps, "explain")
+  expect(many.requests.length).toBe(1 + MAX_LENGTH_CONTINUATIONS)
+  expect(capped.notices.at(-1)).toContain("type 'continue' to resume")
+
+  const empty = new MockProvider([say("The answer is", "length"), say("", "length")])
+  const gated = makeDeps(empty)
+  await runUserTurn(gated.deps, "explain")
+  expect(empty.requests.length).toBe(2)
+  expect(gated.notices.at(-1)).toContain("cut off by the output-token limit")
+})
+
+test("a turn that ends with open todos says so instead of ending silently", async () => {
+  const provider = new MockProvider([callTodo("t1", ["in_progress"]), say("I need your input")])
+  const { deps, notices } = makeDeps(provider, { autoContinue: 0 })
+  await runUserTurn(deps, "work")
+  expect(notices.at(-1)).toBe("turn ended with 1 todo(s) still open — type 'continue' to resume")
+})
+
+test("every step sends an explicit output cap, clamped to what the window has left", async () => {
+  const fallback = new MockProvider([say("hi")])
+  await runUserTurn(makeDeps(fallback).deps, "x")
+  expect(fallback.requests[0]?.maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT_TOKENS)
+
+  const usage = { ...zeroUsage, input: 120_000 }
+  const clamped = new MockProvider([
+    [
+      { type: "tool-call" as const, callId: "t1", name: "todo", input: todos(["completed"]) },
+      { type: "finish" as const, reason: "tool-calls" as const, usage },
+    ],
+    [
+      { type: "text-delta" as const, text: "ok" },
+      { type: "finish" as const, reason: "stop" as const, usage },
+    ],
+  ])
+  await runUserTurn(makeDeps(clamped, { limits: { context: 128_000, output: 16_384 } }).deps, "x")
+  expect(clamped.requests[0]?.maxOutputTokens).toBe(16_384)
+  expect(clamped.requests[1]?.maxOutputTokens).toBe(128_000 - 120_000 - 4_096)
+
+  const explicit = new MockProvider([say("hi")])
+  await runUserTurn(makeDeps(explicit, { maxOutputTokens: 4_000 }).deps, "x")
+  expect(explicit.requests[0]?.maxOutputTokens).toBe(4_000)
 })
 
 test("an interrupted turn is never auto-continued", async () => {

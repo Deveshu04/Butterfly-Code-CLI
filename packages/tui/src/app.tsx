@@ -1066,6 +1066,17 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
   const modelCost = () => costForRef(modelRef())
+  /** The model's output-token ceiling from the catalog (sent as max_tokens). */
+  const outputLimit = () => {
+    const ref = modelRef()
+    if (!ref) return undefined
+    try {
+      const parsed = parseModelRef(ref)
+      return catalog.lookup(parsed.providerId, parsed.modelId)?.output
+    } catch {
+      return undefined
+    }
+  }
   const summaryModel = (ref: string): string | undefined => {
     const explicit = config().small_model
     if (explicit) return explicit
@@ -3060,7 +3071,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(config().maxSpendUSD !== undefined ? { maxSpendUSD: config().maxSpendUSD } : {}),
         ...(config().hooks?.length ? { hooks: config().hooks } : {}),
         ...(reasoning() !== undefined ? { reasoning: reasoning() } : {}),
-        ...(limit ? { limits: { context: limit } } : {}),
+        ...(limit ? { limits: { context: limit, output: outputLimit() } } : {}),
+        // Without limits the runner still sends its own explicit cap, so a
+        // provider default (Sarvam's 2048) never truncates replies.
+        ...(!limit && outputLimit() ? { maxOutputTokens: outputLimit() } : {}),
         ...(config().retries !== undefined ? { retries: config().retries } : {}),
         ...(config().autoContinue !== undefined ? { autoContinue: config().autoContinue } : {}),
         ...(config().autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),

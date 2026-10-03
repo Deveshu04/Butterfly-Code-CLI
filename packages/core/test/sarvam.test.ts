@@ -59,7 +59,11 @@ function provider() {
   )
 }
 
-async function turn(reasoning?: ReasoningEffort, toolOutput?: string): Promise<TurnEvent[]> {
+async function turn(
+  reasoning?: ReasoningEffort,
+  toolOutput?: string,
+  maxOutputTokens?: number,
+): Promise<TurnEvent[]> {
   const events: TurnEvent[] = []
   for await (const event of provider().streamTurn({
     model: "sarvam/sarvam-105b",
@@ -78,6 +82,7 @@ async function turn(reasoning?: ReasoningEffort, toolOutput?: string): Promise<T
         : []),
     ],
     ...(reasoning ? { reasoning } : {}),
+    ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
   })) {
     events.push(event)
   }
@@ -130,6 +135,12 @@ test("a blank tool result never reaches Sarvam as whitespace-only content", asyn
   const messages = captured.at(-1)?.body["messages"] as { role: string; content: unknown }[]
   const tool = messages.find((m) => m.role === "tool")
   expect(tool?.content).toBe("(no output)")
+})
+
+test("the output cap reaches Sarvam as max_tokens (its own default is only 2048)", async () => {
+  captured.length = 0
+  await turn(undefined, undefined, 16_384)
+  expect(captured.at(-1)?.body["max_tokens"]).toBe(16_384)
 })
 
 test("normalizeSarvamBody: developer role, max_completion_tokens, unknown effort", () => {
