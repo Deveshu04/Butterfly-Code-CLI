@@ -1,5 +1,6 @@
 import { estimateTokens } from "../context/tokens"
 import type { ProviderPort } from "../provider/port"
+import { resolveToolName } from "../tool/repair"
 import { settle } from "../tool/settle"
 import type { TodoItem } from "../tool/tools/todo"
 import { now, type SessionEvent, type Usage } from "./events"
@@ -47,7 +48,7 @@ function editedFiles(entries: TimelineEntry[]): string[] {
   for (const { event } of entries) {
     if (event.type === "session.compacted") {
       for (const file of event.files ?? []) files.add(file)
-    } else if (event.type === "tool.call" && event.name === "edit") {
+    } else if (event.type === "tool.call" && resolveToolName(event.name, ["edit"]) === "edit") {
       const path = (event.input as { file_path?: unknown } | null)?.file_path
       if (typeof path === "string") pending.set(event.callId, path)
     } else if (event.type === "tool.result" && !event.isError) {

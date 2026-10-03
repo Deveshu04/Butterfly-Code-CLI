@@ -19,7 +19,7 @@ import { type HookConfig, type HookRunRecord, runHooks } from "./hooks"
 import { SessionJournal } from "./journal"
 import { foldTimeline, project } from "./projector"
 import { planPrune } from "./prune"
-import { todosFromTimeline } from "./todo-state"
+import { isTodoCall, todosFromTimeline } from "./todo-state"
 
 export type RunnerEvent =
   | TurnEvent
@@ -457,7 +457,7 @@ export async function runUserTurn(
     }
 
     if (finish?.reason === "tool-calls" && toolCalls.length > 0) {
-      if (toolCalls.some((call) => call.name === "todo")) todoTouched = true
+      if (toolCalls.some((call) => isTodoCall(call.name))) todoTouched = true
       for (const call of toolCalls) {
         if (interrupted || deps.signal?.aborted) {
           interrupted = true
@@ -505,9 +505,11 @@ export async function runUserTurn(
                       ask: deps.ask,
                       state,
                       signal: deps.signal,
-                      beforeExecute: async () => {
+                      // The resolved name, not call.name: a repaired call
+                      // ("run_command" → bash) still gets its checkpoint.
+                      beforeExecute: async (toolName) => {
                         armExecuteRace()
-                        if (deps.createSnapshot && MUTATING_TOOLS.has(call.name)) {
+                        if (deps.createSnapshot && MUTATING_TOOLS.has(toolName)) {
                           const tree = await deps.createSnapshot(deps.cwd)
                           if (!tree) return
                           const untracked = deps.listUntracked
@@ -517,7 +519,7 @@ export async function runUserTurn(
                             type: "turn.snapshot",
                             tree,
                             callId: call.callId,
-                            tool: call.name,
+                            tool: toolName,
                             argsPreview: firstLine(call.input),
                             untracked,
                             time: now(),

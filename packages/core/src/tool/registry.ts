@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { type PermissionRules, resolvePermission } from "../permission/tree"
 import type { ToolSpec } from "../provider/port"
+import { repairToolInput, resolveToolName } from "./repair"
 import { type SettleOptions, settle } from "./settle"
 
 export interface AskDenial {
@@ -27,7 +28,7 @@ export interface ToolContext {
   state: Record<string, unknown>
   settle?: SettleOptions
   signal?: AbortSignal
-  beforeExecute?: () => Promise<void>
+  beforeExecute?: (toolName: string) => Promise<void>
 }
 
 export interface ToolOutcome {
@@ -93,15 +94,40 @@ export class ToolRegistry {
     }))
   }
 
-  async run(name: string, rawInput: unknown, ctx: ToolContext): Promise<ToolRunResult> {
-    const tool = this.tools.get(name)
-    if (!tool) {
-      return errorResult(
-        `Unknown tool "${name}". Available tools: ${[...this.tools.keys()].join(", ")}`,
-      )
+  async run(calledName: string, calledInput: unknown, ctx: ToolContext): Promise<ToolRunResult> {
+    const notes: string[] = []
+    let name = calledName
+    if (!this.tools.has(name)) {
+      const resolved = resolveToolName(name, this.tools.keys())
+      if (resolved === undefined) {
+        return errorResult(
+          `Unknown tool "${name}". Available tools: ${[...this.tools.keys()].join(", ")}`,
+        )
+      }
+      notes.push(`called as "${calledName}" — the tool is named "${resolved}"`)
+      name = resolved
     }
+    const tool = this.tools.get(name)
+    if (!tool) return errorResult(`Unknown tool "${name}".`)
+
+    const repaired = repairToolInput(calledInput)
+    if (repaired.note) notes.push(repaired.note)
+    const rawInput = repaired.input
+    const withNotes = (result: ToolRunResult): ToolRunResult =>
+      notes.length === 0
+        ? result
+        : { ...result, output: `${result.output}\n[harness note: ${notes.join("; ")}]` }
 
     const parsed = tool.inputSchema.safeParse(rawInput)
+    return withNotes(await this.runParsed(name, tool, parsed, ctx))
+  }
+
+  private async runParsed(
+    name: string,
+    tool: RegisteredTool,
+    parsed: ReturnType<z.ZodType["safeParse"]>,
+    ctx: ToolContext,
+  ): Promise<ToolRunResult> {
     if (!parsed.success) {
       const details = parsed.error.issues
         .map((issue) => `${issue.path.join(".") || "(input)"}: ${issue.message}`)
@@ -136,7 +162,7 @@ export class ToolRegistry {
 
     if (ctx.beforeExecute) {
       try {
-        await ctx.beforeExecute()
+        await ctx.beforeExecute(name)
       } catch {
       }
     }
