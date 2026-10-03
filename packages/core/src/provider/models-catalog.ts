@@ -37,6 +37,26 @@ export function catalogCacheStatus(
 
 export const MODELS_DEV_URL = "https://models.dev/api.json"
 
+export const BUILTIN_MODELS: Record<string, Record<string, CatalogEntry>> = {
+  sarvam: {
+    "sarvam-105b": {
+      context: 128_000,
+      output: 16_384,
+      toolCall: true,
+      imageInput: false,
+      cost: { input: 0.305, output: 0.763, cacheRead: 0.114 },
+    },
+    "sarvam-105b-conversations": {
+      context: 32_000,
+      output: 8_192,
+      toolCall: true,
+      imageInput: false,
+      cost: { input: 0.305, output: 0.763, cacheRead: 0.114 },
+    },
+    "sarvam-30b": { context: 64_000, output: 8_192, toolCall: true, imageInput: false },
+  },
+}
+
 /** Live local-model listing straight from the Ollama daemon. */
 export async function fetchOllamaModels(
   baseURL = "http://localhost:11434",
@@ -104,9 +124,12 @@ export class ModelsCatalog {
     const provider = this.data[providerId] as
       | { models?: Record<string, Record<string, unknown>> }
       | undefined
-    if (!provider?.models) return []
+    const ids = new Set([
+      ...Object.keys(provider?.models ?? {}),
+      ...Object.keys(BUILTIN_MODELS[providerId] ?? {}),
+    ])
     const models: { id: string; context: number; toolCall?: boolean }[] = []
-    for (const id of Object.keys(provider.models)) {
+    for (const id of ids) {
       const entry = this.lookup(providerId, id)
       if (entry) models.push({ id, context: entry.context, toolCall: entry.toolCall })
     }
@@ -118,7 +141,7 @@ export class ModelsCatalog {
       | { models?: Record<string, Record<string, unknown>> }
       | undefined
     const model = provider?.models?.[modelId]
-    if (!model) return undefined
+    if (!model) return BUILTIN_MODELS[providerId]?.[modelId]
     const limit = model["limit"] as { context?: number; output?: number } | undefined
     if (typeof limit?.context !== "number") return undefined
     const cost = model["cost"] as

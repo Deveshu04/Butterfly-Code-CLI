@@ -188,7 +188,12 @@ function classifyByShape(params: {
       ? { ...withRetry, kind: "rate_limit" }
       : { ...base, kind: typeKind }
   }
-  if ((status === undefined || status === 400) && messageSaysContext) {
+  // 413/422 too: Sarvam's gateway reports an overflow as 422 "… exceeds the
+  // model context window of N tokens", and some proxies use 413.
+  if (
+    (status === undefined || status === 400 || status === 413 || status === 422) &&
+    messageSaysContext
+  ) {
     return { ...base, kind: "context_length" }
   }
   if (status !== undefined && status >= 400 && status < 500) return { ...base, kind: "bad_request" }

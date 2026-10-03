@@ -508,6 +508,7 @@ interface ProviderChoice {
 }
 
 const PROVIDERS: ProviderChoice[] = [
+  { id: "sarvam", needsKey: true, example: "sarvam-105b" },
   { id: "openai", needsKey: true, example: "gpt-5-mini" },
   { id: "openrouter", needsKey: true, example: "qwen/qwen3-coder" },
   { id: "anthropic", needsKey: true, example: "claude-sonnet-4-6" },
@@ -1442,7 +1443,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
     },
     pickEffort: () => {
-      const levels = ["provider default", "none", "minimal", "low", "medium", "high"]
+      const levels = ["provider default", "none", "minimal", "low", "medium", "high", "xhigh"]
       const current = reasoning() ?? "provider default"
       setPicker({
         title: "thinking effort — ↑↓ · Enter set · Esc",

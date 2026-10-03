@@ -65,7 +65,14 @@ export interface SlashCommand {
   run(arg: string, actions: CommandActions): void | Promise<void>
 }
 
-export const REASONING_LEVELS: ReasoningEffort[] = ["none", "minimal", "low", "medium", "high"]
+export const REASONING_LEVELS: ReasoningEffort[] = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]
 
 export const COMMANDS: SlashCommand[] = [
   {
@@ -121,11 +128,18 @@ export const COMMANDS: SlashCommand[] = [
     description: "thinking effort — no arg opens the picker",
     aliases: ["reasoning", "effort"],
     keywords: ["thinking", "reason", "depth", "level", "budget-thinking", "ultrathink"],
-    run: (arg, a) => {
-      if (arg === "") {
+    run: (typed, a) => {
+      if (typed === "") {
         a.pickEffort()
         return
       }
+      // Everyday words for the ends of the dial.
+      const arg =
+        typed === "max" || typed === "ultra" || typed === "ultrathink"
+          ? "xhigh"
+          : typed === "min"
+            ? "minimal"
+            : typed
       if (arg === "off" || arg === "default") {
         a.setReasoning(undefined)
         a.info("thinking effort reset to provider default")

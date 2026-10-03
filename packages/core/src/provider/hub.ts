@@ -25,7 +25,47 @@ interface Preset {
   baseURL?: string
   envKey?: string
   headers?: Record<string, string>
+  /** Header that carries the API key in addition to `Authorization: Bearer`. */
+  keyHeader?: string
+  /** Rewrites the outgoing JSON body — vendor quirks the SDK can't express. */
+  transformBody?: (body: Record<string, unknown>) => Record<string, unknown>
 }
+
+export function normalizeSarvamBody(body: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body }
+  if ("reasoning_effort" in out) {
+    const effort = out["reasoning_effort"]
+    if (effort === "none" || effort === null) out["reasoning_effort"] = null
+    else if (effort === "minimal") out["reasoning_effort"] = "low"
+    else if (effort === "xhigh" || effort === "max") out["reasoning_effort"] = "high"
+    else if (effort !== "low" && effort !== "medium" && effort !== "high")
+      delete out["reasoning_effort"]
+  }
+  if (out["max_completion_tokens"] !== undefined && out["max_tokens"] === undefined) {
+    out["max_tokens"] = out["max_completion_tokens"]
+    delete out["max_completion_tokens"]
+  }
+  if (Array.isArray(out["messages"])) {
+    out["messages"] = (out["messages"] as Record<string, unknown>[]).map((message) => {
+      if (message?.["role"] === "developer") return { ...message, role: "system" }
+      if (
+        message?.["role"] === "tool" &&
+        (typeof message["content"] !== "string" || message["content"].trim() === "")
+      ) {
+        return { ...message, content: "(no output)" }
+      }
+      return message
+    })
+  }
+  return out
+}
+
+/**
+ * Providers that need an EXPLICIT "reasoning off" on the wire — omitting the
+ * field leaves thinking on, so the adapter forwards "none" verbatim (as a
+ * providerOptions reasoningEffort) and the preset's transformBody maps it.
+ */
+export const EXPLICIT_REASONING_OFF: ReadonlySet<string> = new Set(["sarvam"])
 
 const PRESETS: Record<string, Preset> = {
   anthropic: { kind: "anthropic", envKey: "ANTHROPIC_API_KEY" },
@@ -48,6 +88,13 @@ const PRESETS: Record<string, Preset> = {
     kind: "openai-compatible",
     baseURL: "https://api.openai.com/v1",
     envKey: "OPENAI_API_KEY",
+  },
+  sarvam: {
+    kind: "openai-compatible",
+    baseURL: "https://api.sarvam.ai/v1",
+    envKey: "SARVAM_API_KEY",
+    keyHeader: "api-subscription-key",
+    transformBody: normalizeSarvamBody,
   },
   ollama: { kind: "openai-compatible", baseURL: "http://localhost:11434/v1" },
   lmstudio: { kind: "openai-compatible", baseURL: "http://127.0.0.1:1234/v1" },
@@ -75,7 +122,12 @@ export function createModelResolver(
     const override = config.providers?.[providerId]
     const apiKey = override?.apiKey || (preset?.envKey ? env[preset.envKey] : undefined)
     const baseURL = override?.baseURL ?? preset?.baseURL
-    const headers = { ...preset?.headers, ...override?.headers }
+    const headers = {
+      ...preset?.headers,
+      ...(preset?.keyHeader && apiKey ? { [preset.keyHeader]: apiKey } : {}),
+      ...override?.headers,
+    }
+    const transformBody = preset?.transformBody
 
     const kind = preset?.kind ?? "openai-compatible"
     if (kind === "anthropic") {
@@ -99,9 +151,18 @@ export function createModelResolver(
       includeUsage: true,
       // Bun's fetch has a 300s idle timeout that races the SDK's own timeout
       // config; disable it here — the adapter's timeout settings govern.
-      fetch: ((url, init) =>
+      fetch: ((url, init) => {
+        let next = init
+        if (transformBody && typeof init?.body === "string") {
+          try {
+            next = { ...init, body: JSON.stringify(transformBody(JSON.parse(init.body))) }
+          } catch {
+            // not JSON — send untouched
+          }
+        }
         // biome-ignore lint/suspicious/noExplicitAny: Bun fetch extension
-        fetch(url as any, { ...(init as object), timeout: false } as any)) as typeof fetch,
+        return fetch(url as any, { ...(next as object), timeout: false } as any)
+      }) as typeof fetch,
     })
     return { model: provider.chatModel(modelId), providerId }
   }

@@ -5,7 +5,7 @@ import {
   describeProviderError,
   type ProviderErrorInfo,
 } from "./describe-error"
-import type { ModelResolver } from "./hub"
+import { EXPLICIT_REASONING_OFF, type ModelResolver } from "./hub"
 import type {
   ChatMessage,
   FinishReason,
@@ -91,7 +91,13 @@ export function toModelMessages(messages: ChatMessage[]): {
               type: "tool-result",
               toolCallId: message.callId,
               toolName: message.name,
-              output: { type: "text", value: message.output },
+              // Several OpenAI-compatible gateways (Sarvam among them) 400 on
+              // whitespace-only tool content, and the identical request then
+              // fails on every retry — never send an empty tool result.
+              output: {
+                type: "text",
+                value: message.output.trim() === "" ? "(no output)" : message.output,
+              },
             },
           ],
         })
@@ -153,6 +159,12 @@ export class AiSdkProvider implements ProviderPort {
       tools: toSdkTools(request.tools),
       ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
       ...(request.reasoning !== undefined ? { reasoning: request.reasoning } : {}),
+      // The SDK drops reasoning "none" from the wire (omits reasoning_effort),
+      // which some vendors read as "thinking ON" — forward it explicitly so
+      // the preset's body transform can turn it into the vendor's real "off".
+      ...(request.reasoning === "none" && EXPLICIT_REASONING_OFF.has(providerId)
+        ? { providerOptions: { [providerId]: { reasoningEffort: "none" } } }
+        : {}),
       ...(request.maxOutputTokens !== undefined
         ? { maxOutputTokens: request.maxOutputTokens }
         : {}),

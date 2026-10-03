@@ -23,7 +23,7 @@ export const ButterflyConfig = z.object({
   permissions: z.record(z.string(), z.union([Decision, z.record(z.string(), Decision)])).optional(),
   gates: z.array(z.object({ name: z.string(), command: z.string() })).optional(),
   /** Default thinking-effort dial (overridable per session with /think). */
-  reasoning: z.enum(["none", "minimal", "low", "medium", "high"]).optional(),
+  reasoning: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
   /** Hard dollar ceiling per turn (priced from models.dev). */
   maxSpendUSD: z.number().positive().optional(),
   retries: z.number().int().min(0).optional(),

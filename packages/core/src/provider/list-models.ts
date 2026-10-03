@@ -1,4 +1,4 @@
-import { fetchOllamaModels } from "./models-catalog"
+import { BUILTIN_MODELS, fetchOllamaModels } from "./models-catalog"
 
 
 export interface ProviderModel {
@@ -82,6 +82,28 @@ export async function fetchProviderModels(
         const body = (await response.json()) as { data?: { id: string }[] }
         const models = (body.data ?? []).map((m) => ({ id: m.id }))
         return providerId === "openai" ? models.filter((m) => !NON_CHAT_OPENAI.test(m.id)) : models
+      }
+      case "sarvam": {
+        const base = opts.baseURL ?? "https://api.sarvam.ai/v1"
+        try {
+          const response = await fetchFn(`${base}/models`, {
+            headers: {
+              Authorization: `Bearer ${opts.apiKey ?? ""}`,
+              "api-subscription-key": opts.apiKey ?? "",
+            },
+          })
+          if (response.ok) {
+            const body = (await response.json()) as { data?: { id: string }[] }
+            const live = (body.data ?? []).map((m) => ({ id: m.id }))
+            if (live.length > 0) return live
+          }
+        } catch {
+          // fall through to the known lineup
+        }
+        return Object.entries(BUILTIN_MODELS["sarvam"] ?? {}).map(([id, entry]) => ({
+          id,
+          context: entry.context,
+        }))
       }
       case "lmstudio": {
         // Native endpoint (0.4+) carries max_context_length; shim does not.

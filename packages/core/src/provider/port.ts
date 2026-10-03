@@ -25,7 +25,7 @@ export interface ToolSpec {
   inputSchema: Record<string, unknown>
 }
 
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high"
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
 
 export interface TurnRequest {
   model: string
