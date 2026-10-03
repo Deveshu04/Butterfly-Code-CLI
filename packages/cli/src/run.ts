@@ -19,6 +19,7 @@ import {
   createWebTool,
   decideAttention,
   describeEvolution,
+  describeVerification,
   EpisodicIndex,
   editTool,
   evolveAfterTurn,
@@ -55,6 +56,7 @@ import {
   type TaskToolOptions,
   ToolRegistry,
   todoTool,
+  verifyLatestTurn,
   withFrecencyTouch,
 } from "@butterfly/core"
 import { applyHeadlessAttention, installProgressExitClear } from "./attention-headless"
@@ -402,11 +404,13 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
       if (evolverCost) costUSD += computeCostUSD(evolved.usage, evolverCost)
     }
 
+    const verification = verifyLatestTurn(SessionJournal.replay(journal.path).events)
+    const verifyLine = describeVerification(verification)
     if (opts.json) {
-      console.log(JSON.stringify({ event: "done", ...summary, costUSD }))
+      console.log(JSON.stringify({ event: "done", ...summary, costUSD, verification }))
     } else {
       process.stdout.write(
-        `\n\n[${summary.steps} steps | in ${usage.input} out ${usage.output} cached ${usage.cacheRead}${costUSD > 0 ? ` | ${formatUSD(costUSD)}` : ""} | ${journal.path}]\n`,
+        `${verifyLine !== "" ? `\n\n[${verifyLine}]` : ""}\n\n[${summary.steps} steps | in ${usage.input} out ${usage.output} cached ${usage.cacheRead}${costUSD > 0 ? ` | ${formatUSD(costUSD)}` : ""} | ${journal.path}]\n`,
       )
     }
     return outcome.budgetExceeded ? 124 : 0

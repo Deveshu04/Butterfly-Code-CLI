@@ -4460,3 +4460,38 @@ test("Shift+Tab cycles thinking effort and the header badge follows", async () =
   expect(t.captureCharFrame()).not.toContain("\t")
   t.renderer.destroy()
 }, 30_000)
+
+test("a turn that edits without running a check ends with an 'unverified' line", async () => {
+  const cwd = tempDir("bfly-tui-")
+  await gitFixture(cwd)
+  const server = startFakeSequenceServer([
+    toolCallStreamBody(
+      "edit",
+      { file_path: "notes.txt", old_string: "", new_string: "hello\n" },
+      "call_1",
+    ),
+    textStreamBody("all done"),
+  ])
+  try {
+    const t = await testRender(
+      () => (
+        <App
+          cwd={cwd}
+          config={{ model: "fake/mock-verify", providers: { fake: { baseURL: server.baseURL } } }}
+          home={tempDir("bfly-home-")}
+        />
+      ),
+      { width: 140, height: 34 },
+    )
+    await t.renderOnce()
+    t.mockInput.typeText("write the note")
+    t.mockInput.pressEnter()
+    await waitForFrameSlow(t, (f) => f.includes("approve?"))
+    t.mockInput.pressKey("y")
+    const settled = await waitForFrameSlow(t, (f) => f.includes("verify:"))
+    expect(settled).toContain("verify: 1 file edited - no test/build/lint ran after the last edit")
+    t.renderer.destroy()
+  } finally {
+    server.stop()
+  }
+}, 30_000)

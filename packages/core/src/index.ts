@@ -322,6 +322,7 @@ export {
   type SessionSummary,
 } from "./session/sessions"
 export { createSnapshot, listUntracked, restoreSnapshot } from "./session/snapshot"
+export { describeVerification, type TurnVerification, verifyLatestTurn } from "./session/verify"
 // Tools
 export {
   BG_LOG_CAP_BYTES,

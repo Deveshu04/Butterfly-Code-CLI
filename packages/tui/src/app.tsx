@@ -29,6 +29,7 @@ import {
   describeGitFailure,
   describeProviderError,
   describeReviewScope,
+  describeVerification,
   discardWorktree,
   doctor,
   EpisodicIndex,
@@ -115,6 +116,7 @@ import {
   todoTool,
   touchFrecency,
   type Usage,
+  verifyLatestTurn,
   WorkQueue,
   withFrecencyTouch,
   worktreeStatus,
@@ -2680,6 +2682,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         const marker = turnMarker(outcome.usage, outcome.steps, Date.now() - (start ?? Date.now()))
         setStatus(marker)
         setLastTurnMarker(marker)
+        const verification = describeVerification(
+          verifyLatestTurn(SessionJournal.replay(session.journal.path).events),
+        )
+        if (verification !== "") push({ kind: "info", text: verification })
         void (async () => {
           try {
             episodic.indexJournal(session.journal.path)
