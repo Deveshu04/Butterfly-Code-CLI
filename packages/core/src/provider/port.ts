@@ -43,6 +43,13 @@ export type TurnEvent =
   | { type: "text-delta"; text: string }
   | { type: "reasoning-delta"; text: string }
   | { type: "tool-call"; callId: string; name: string; input: unknown }
+  /**
+   * The model STARTED writing a tool call (its arguments are still
+   * streaming). UI-only: lets a client show "preparing edit…" during a long
+   * argument stream instead of looking stuck. The matching "tool-call"
+   * (same callId) follows once the arguments are complete.
+   */
+  | { type: "tool-input-start"; callId: string; name: string }
   | { type: "finish"; reason: FinishReason; usage: Usage }
   | { type: "error"; message: string; info?: ProviderErrorInfo }
 

@@ -1284,10 +1284,19 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         if (reasoningOpen) finalizeOpenThinking()
         appendAssistant(event.text)
         break
-      case "tool-call":
+      case "tool-input-start":
         finalizeOpenThinking()
+        push({ kind: "info", text: `  preparing ${event.name}...`, progressId: event.callId })
+        break
+      case "tool-call": {
+        finalizeOpenThinking()
+        const live = messages()
+        if (live.some((m) => m.progressId === event.callId)) {
+          setMessages(live.filter((m) => m.progressId !== event.callId))
+        }
         push(toolCallMessage(event.name, event.input))
         break
+      }
       case "tool-progress": {
         const all = [...messages()]
         const line: Message = {

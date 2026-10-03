@@ -238,6 +238,9 @@ export class AiSdkProvider implements ProviderPort {
           case "reasoning-delta":
             yield { type: "reasoning-delta", text: part.text }
             break
+          case "tool-input-start":
+            yield { type: "tool-input-start", callId: part.id, name: part.toolName }
+            break
           case "tool-call":
             yield {
               type: "tool-call",
