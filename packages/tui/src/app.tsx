@@ -14,6 +14,7 @@ import {
   CodeGraph,
   clearProgressOsc,
   compactSession,
+  computeCostUSD,
   createExploreTool,
   createMcpTool,
   createMemoryTool,
@@ -768,8 +769,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   registry.register(todoTool)
 
   const [sessionCost, setSessionCost] = createSignal(0)
-  const modelCost = () => {
-    const ref = modelRef()
+  /** USD/1M pricing for any provider/model ref, from the catalog. */
+  const costForRef = (ref: string | undefined) => {
     if (!ref) return undefined
     try {
       const parsed = parseModelRef(ref)
@@ -778,6 +779,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       return undefined
     }
   }
+  const modelCost = () => costForRef(modelRef())
   const imageInputSupported = () => {
     const ref = modelRef()
     if (!ref) return false
@@ -867,6 +869,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     provider: () => freshProvider(),
     model: () => modelRef() ?? "",
     subagentModel: () => config().subagent_model ?? config().small_model,
+    costFor: (m) => costForRef(m),
     system: (m) => frozenSystem(m),
     cwd: props.cwd,
     sessionsDir: join(props.cwd, ".butterfly", "sessions"),
@@ -2588,6 +2591,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         ...(config().retries !== undefined ? { retries: config().retries } : {}),
         ...(config().autoContinue !== undefined ? { autoContinue: config().autoContinue } : {}),
         ...(config().small_model ? { smallModel: config().small_model } : {}),
+        ...(costForRef(config().small_model)
+          ? { smallModelCost: costForRef(config().small_model) }
+          : {}),
         imageInputSupported: imageInputSupported(),
         ask: (request) => askPermission(request, turnRules),
       },
@@ -2620,6 +2626,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               autoSkills: config().memory?.autoSkills !== false,
               approval: config().memory?.approval === true,
             })
+            const evolverCost = costForRef(config().small_model ?? ref)
+            if (evolverCost) setSessionCost((c) => c + computeCostUSD(evolved.usage, evolverCost))
             const line = describeEvolution(evolved)
             if (line !== "") push({ kind: "info", text: line })
           }

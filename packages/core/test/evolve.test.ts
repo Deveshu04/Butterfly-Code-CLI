@@ -240,7 +240,11 @@ test("a full memory file is consolidated (backup kept) and the new fact still la
     reply([{ op: "add", scope: "project", text: "deploys go through make ship" }]),
     [
       { type: "text-delta", text: compact },
-      { type: "finish", reason: "stop", usage: zeroUsage },
+      {
+        type: "finish",
+        reason: "stop",
+        usage: { input: 700, output: 300, cacheRead: 0, cacheWrite: 0 },
+      },
     ],
   ])
   const outcome = await evolveAfterTurn({
@@ -255,6 +259,8 @@ test("a full memory file is consolidated (backup kept) and the new fact still la
   expect(outcome.memoryAdded).toEqual(["deploys go through make ship"])
   expect(readFileSync(paths.project, "utf8")).toContain("make ship")
   expect(existsSync(`${paths.project}.bak`)).toBe(true)
+  // Review call (zeroUsage) + consolidation call: the evolver reports its spend.
+  expect(outcome.usage).toEqual({ input: 700, output: 300, cacheRead: 0, cacheWrite: 0 })
 })
 
 test("a consolidation that would wipe memory is refused", async () => {

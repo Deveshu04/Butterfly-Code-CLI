@@ -64,6 +64,8 @@ export interface RunnerDeps {
   listUntracked?: (cwd: string) => Promise<string[]>
   /** USD/1M-token pricing (models.dev) — enables cost accounting. */
   cost?: ModelCost
+  /** Pricing for `smallModel` (compaction). Absent: priced at `cost`. */
+  smallModelCost?: ModelCost
   maxSpendUSD?: number
   retries?: number
   autoContinue?: number
@@ -86,8 +88,8 @@ export interface TurnOutcome {
   usage: Usage
   steps: number
   budgetExceeded: boolean
-  /** 0 when pricing is unknown. */
   costUSD: number
+  delegatedUsage: Usage
   interrupted: boolean
 }
 
@@ -208,6 +210,21 @@ export async function runUserTurn(
   const maxSteps = deps.maxSteps ?? DEFAULT_MAX_STEPS
   const state = deps.state ?? {}
   const totals: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  /** Delegated spend (see TurnOutcome.delegatedUsage). */
+  const delegated: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  let delegatedCostUSD = 0
+  const addDelegated = (usage: Usage, costUSD: number | undefined, fallback?: ModelCost): void => {
+    delegated.input += usage.input
+    delegated.output += usage.output
+    delegated.cacheRead += usage.cacheRead
+    delegated.cacheWrite += usage.cacheWrite
+    const pricing = fallback ?? deps.cost
+    delegatedCostUSD += costUSD ?? (pricing ? computeCostUSD(usage, pricing) : 0)
+  }
+  const compactionPricing = (): ModelCost | undefined =>
+    deps.smallModel !== undefined ? (deps.smallModelCost ?? deps.cost) : deps.cost
+  const spentUSD = (): number =>
+    (deps.cost ? computeCostUSD(totals, deps.cost) : 0) + delegatedCostUSD
   let lastText = ""
   let steps = 0
   let budgetExceeded = false
@@ -386,6 +403,7 @@ export async function runUserTurn(
           journal,
           ...(deps.compactKeepTokens !== undefined ? { keepTokens: deps.compactKeepTokens } : {}),
         }).catch(() => null)
+        if (compacted) addDelegated(compacted.usage, undefined, compactionPricing())
         if (victims.length > 0 || compacted) {
           deps.onEvent?.({ type: "step-retracted", attempt })
           deps.onEvent?.({
@@ -463,14 +481,17 @@ export async function runUserTurn(
       }
     }
 
-    if (deps.budgetTokens !== undefined && totals.input + totals.output >= deps.budgetTokens) {
+    if (
+      deps.budgetTokens !== undefined &&
+      totals.input + totals.output + delegated.input + delegated.output >= deps.budgetTokens
+    ) {
       budgetExceeded = true
       abandonPendingCalls(toolCalls, "budget stop")
       break
     }
 
     if (deps.cost && deps.maxSpendUSD !== undefined) {
-      const spent = computeCostUSD(totals, deps.cost)
+      const spent = spentUSD()
       const fraction = spent / deps.maxSpendUSD
       if (fraction >= 0.75 && !warned75) {
         warned75 = true
@@ -583,6 +604,10 @@ export async function runUserTurn(
         }
         const { result, hookBlock } = raced
 
+        const spend = (result.meta as { spend?: { usage?: Usage; costUSD?: number } } | undefined)
+          ?.spend
+        if (spend?.usage) addDelegated(spend.usage, spend.costUSD)
+
         let finalResult = result
         if (deps.hooks?.length && hookBlock === undefined && seen < REPEAT_LIMIT) {
           const post = await runHooks(
@@ -630,12 +655,13 @@ export async function runUserTurn(
         journal.append({ type: "tool.pruned", callIds: victims, time: now() })
       }
       if (deps.limits && finish && needsCompaction(finish.usage, deps.limits)) {
-        await compactSession({
+        const compacted = await compactSession({
           provider: deps.provider,
           model: deps.smallModel ?? deps.model,
           journal,
           ...(deps.compactKeepTokens !== undefined ? { keepTokens: deps.compactKeepTokens } : {}),
         })
+        if (compacted) addDelegated(compacted.usage, undefined, compactionPricing())
       }
       continue
     }
@@ -666,6 +692,14 @@ export async function runUserTurn(
     )
   }
   journal.append({ type: "turn.completed", model: deps.model, usage: totals, time: now() })
-  const costUSD = deps.cost ? computeCostUSD(totals, deps.cost) : 0
-  return { text: lastText, usage: totals, steps, budgetExceeded, costUSD, interrupted }
+  const costUSD = spentUSD()
+  return {
+    text: lastText,
+    usage: totals,
+    delegatedUsage: delegated,
+    steps,
+    budgetExceeded,
+    costUSD,
+    interrupted,
+  }
 }

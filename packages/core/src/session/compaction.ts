@@ -159,12 +159,13 @@ export interface CompactionDeps {
 /** Run the summarizer and journal the session.compacted event. */
 export async function compactSession(
   deps: CompactionDeps,
-): Promise<{ summary: string; keepFromIndex: number } | null> {
+): Promise<{ summary: string; keepFromIndex: number; usage: Usage } | null> {
   const { events } = SessionJournal.replay(deps.journal.path)
   const plan = planCompaction(events, { keepTokens: deps.keepTokens })
   if (!plan) return null
 
   let summary = ""
+  let usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
   for await (const event of deps.provider.streamTurn({
     model: deps.model,
     messages: [
@@ -173,6 +174,7 @@ export async function compactSession(
     ],
   })) {
     if (event.type === "text-delta") summary += event.text
+    else if (event.type === "finish") usage = event.usage
     else if (event.type === "error")
       throw new Error(`Compaction summarizer failed: ${event.message}`)
   }
@@ -189,5 +191,5 @@ export async function compactSession(
     ...(plan.files.length > 0 ? { files: plan.files } : {}),
     time: now(),
   })
-  return { summary, keepFromIndex: plan.keepFromIndex }
+  return { summary, keepFromIndex: plan.keepFromIndex, usage }
 }

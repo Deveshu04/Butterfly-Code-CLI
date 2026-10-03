@@ -1,6 +1,6 @@
 import { copyFileSync, readFileSync, writeFileSync } from "node:fs"
 import type { ProviderPort } from "../provider/port"
-import type { SessionEvent } from "../session/events"
+import type { SessionEvent, Usage } from "../session/events"
 import { SessionJournal } from "../session/journal"
 import {
   applyMemoryOp,
@@ -52,6 +52,8 @@ export interface EvolveOutcome {
   skillsReinforced: { name: string; verified: number }[]
   skillsPromoted: string[]
   skillsUsed: string[]
+  /** Tokens the evolver's own model calls cost (review + consolidation). */
+  usage: Usage
 }
 
 export function emptyOutcome(): EvolveOutcome {
@@ -61,6 +63,7 @@ export function emptyOutcome(): EvolveOutcome {
     memoryUpdated: 0,
     rejected: 0,
     consolidated: [],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     skillsDrafted: [],
     skillsReinforced: [],
     skillsPromoted: [],
@@ -134,6 +137,7 @@ async function complete(
   model: string,
   system: string,
   user: string,
+  usage?: Usage,
 ): Promise<string | null> {
   let text = ""
   for await (const event of provider.streamTurn({
@@ -144,14 +148,23 @@ async function complete(
     ],
   })) {
     if (event.type === "text-delta") text += event.text
-    else if (event.type === "error") return null
+    else if (event.type === "finish" && usage) {
+      usage.input += event.usage.input
+      usage.output += event.usage.output
+      usage.cacheRead += event.usage.cacheRead
+      usage.cacheWrite += event.usage.cacheWrite
+    } else if (event.type === "error") return null
   }
   return text
 }
 
 const CONSOLIDATE_PROMPT = `You compact a coding agent's long-term memory file. Rewrite it as terse "- " bullet lines: merge duplicates, drop stale or low-value lines, keep every exact command and invariant. The result MUST be under the character budget given. Reply with ONLY the new file content.`
 
-async function consolidate(deps: EvolveDeps, scope: "project" | "user"): Promise<boolean> {
+async function consolidate(
+  deps: EvolveDeps,
+  scope: "project" | "user",
+  usage?: Usage,
+): Promise<boolean> {
   const path = scope === "project" ? deps.paths.project : deps.paths.user
   const cap = scope === "project" ? PROJECT_MEMORY_CAP : USER_MEMORY_CAP
   const current = readOrEmpty(path)
@@ -162,6 +175,7 @@ async function consolidate(deps: EvolveDeps, scope: "project" | "user"): Promise
     deps.model,
     CONSOLIDATE_PROMPT,
     `Character budget: ${budget}\n\n${current}`,
+    usage,
   )
   if (reply === null) return false
   const next = `${reply
@@ -221,7 +235,7 @@ export async function evolveAfterTurn(deps: EvolveDeps): Promise<EvolveOutcome> 
       `TURN:\n${rendered}`,
     ].join("\n\n")
 
-    const reply = await complete(deps.provider, deps.model, EVOLVE_PROMPT, context)
+    const reply = await complete(deps.provider, deps.model, EVOLVE_PROMPT, context, outcome.usage)
     if (reply === null) return outcome
     const items = extractJsonArray(reply)
     if (!items) return outcome
@@ -268,7 +282,7 @@ export async function evolveAfterTurn(deps: EvolveDeps): Promise<EvolveOutcome> 
     }
 
     for (const scope of full) {
-      if (await consolidate(deps, scope)) outcome.consolidated.push(scope)
+      if (await consolidate(deps, scope, outcome.usage)) outcome.consolidated.push(scope)
     }
     for (const op of retry) {
       const result = outcome.consolidated.includes(op.scope)

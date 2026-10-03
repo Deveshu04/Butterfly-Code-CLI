@@ -1,6 +1,7 @@
 import { z } from "zod"
 import { type PermissionRules, resolvePermission } from "../../permission/tree"
 import type { ProviderPort } from "../../provider/port"
+import type { ModelCost } from "../../provider/pricing"
 import type { Usage } from "../../session/events"
 import type { ToolContext, ToolDefinition, ToolOutcome } from "../registry"
 import { ToolRegistry } from "../registry"
@@ -111,6 +112,7 @@ export interface TaskToolOptions {
   provider: () => ProviderPort
   model: () => string
   subagentModel?: () => string | undefined
+  costFor?: (model: string) => ModelCost | undefined
   system: (model: string) => string
   cwd: string
   sessionsDir: string
@@ -130,6 +132,38 @@ export interface SubagentTurnResult {
   journalPath: string
   steps: number
   usage: Usage
+  /** Priced at the subagent's own model; undefined when pricing is unknown. */
+  costUSD?: number
+}
+
+export interface ToolSpend {
+  usage: Usage
+  costUSD?: number
+}
+
+function spendOf(result: SubagentTurnResult): ToolSpend {
+  return {
+    usage: result.usage,
+    ...(result.costUSD !== undefined ? { costUSD: result.costUSD } : {}),
+  }
+}
+
+/** Sum of every subtask's spend; costUSD only when all of them are priced. */
+export function sumSpend(spends: (ToolSpend | undefined)[]): ToolSpend | undefined {
+  const present = spends.filter((spend): spend is ToolSpend => spend !== undefined)
+  if (present.length === 0) return undefined
+  const usage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+  for (const spend of present) {
+    usage.input += spend.usage.input
+    usage.output += spend.usage.output
+    usage.cacheRead += spend.usage.cacheRead
+    usage.cacheWrite += spend.usage.cacheWrite
+  }
+  const priced = present.every((spend) => spend.costUSD !== undefined)
+  return {
+    usage,
+    ...(priced ? { costUSD: present.reduce((sum, spend) => sum + (spend.costUSD ?? 0), 0) } : {}),
+  }
 }
 
 export async function runSubagentTurn(
@@ -143,8 +177,10 @@ export async function runSubagentTurn(
 
   const model = opts.model()
   const journal = SessionJournal.create(opts.sessionsDir)
+  const cost = opts.costFor?.(model)
   const outcome = await runUserTurn(
     {
+      ...(cost ? { cost } : {}),
       provider: opts.provider(),
       registry: opts.makeRegistry(),
       journal,
@@ -165,6 +201,7 @@ export async function runSubagentTurn(
     journalPath: journal.path,
     steps: outcome.steps,
     usage: outcome.usage,
+    ...(cost ? { costUSD: outcome.costUSD } : {}),
   }
 }
 
@@ -272,6 +309,7 @@ async function runInWorktree(
         output: `${result.summary}\n\n[worktree isolation: no changes were left — the isolated worktree was cleaned up automatically.]${parentHeadNote}`,
         meta: {
           journal: result.journalPath,
+          spend: spendOf(result),
           worktree: { id: created.id, path: created.path, dirty: false, cleaned: true },
         },
       }
@@ -280,6 +318,7 @@ async function runInWorktree(
       output: `${result.summary}\n\n[worktree isolation: no changes were left, but automatic cleanup FAILED (${removed.error}). The worktree is STILL on disk at ${created.path} and holds one of the ${MAX_CONCURRENT_WORKTREES} isolation slots — task op=discard worktree=${created.id}]${parentHeadNote}`,
       meta: {
         journal: result.journalPath,
+        spend: spendOf(result),
         worktree: {
           id: created.id,
           path: created.path,
@@ -298,6 +337,7 @@ async function runInWorktree(
     output: `${result.summary}\n\n${report}${parentHeadNote}`,
     meta: {
       journal: result.journalPath,
+      spend: spendOf(result),
       worktree: {
         id: created.id,
         path: created.path,
@@ -349,7 +389,7 @@ async function runOne(
     return runInWorktree(tiered, created, sub.task, ctx)
   }
   const result = await runSubagentTurn(tiered, `${sub.task}${READ_ONLY_SUFFIX}`, ctx.signal)
-  return { output: result.summary, meta: { journal: result.journalPath } }
+  return { output: result.summary, meta: { journal: result.journalPath, spend: spendOf(result) } }
 }
 
 /** Bounded-concurrency map preserving order. */
@@ -407,7 +447,10 @@ async function runBatch(
   return {
     output: `${subs.length} subagents ran in parallel${failed > 0 ? ` (${failed} failed)` : ""}.\n\n${sections.join("\n\n")}`,
     isError: failed === subs.length,
-    meta: { subtasks: outcomes.map((o) => o.meta ?? null) },
+    meta: {
+      subtasks: outcomes.map((o) => o.meta ?? null),
+      spend: sumSpend(outcomes.map((o) => (o.meta as { spend?: ToolSpend } | undefined)?.spend)),
+    },
   }
 }
 

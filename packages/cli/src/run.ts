@@ -8,6 +8,7 @@ import {
   buildSkeleton,
   buildSystem,
   CodeGraph,
+  computeCostUSD,
   createExploreTool,
   createMcpTool,
   createMemoryTool,
@@ -30,6 +31,7 @@ import {
   loadConfig,
   loadMemory,
   McpHub,
+  type ModelCost,
   ModelsCatalog,
   memoryPaths,
   moduleOverview,
@@ -77,6 +79,8 @@ export function taskToolOptions(deps: {
   model: () => string
   /** Cheaper default model for subagents (subagent_model ?? small_model). */
   subagentModel?: () => string | undefined
+  /** Pricing per model id — subagent spend is priced at its own model. */
+  costFor?: (model: string) => ModelCost | undefined
   extras: (registry: ToolRegistry) => void
 }): TaskToolOptions {
   const system = (model: string) =>
@@ -89,6 +93,7 @@ export function taskToolOptions(deps: {
     provider: deps.provider,
     model: deps.model,
     ...(deps.subagentModel ? { subagentModel: deps.subagentModel } : {}),
+    ...(deps.costFor ? { costFor: deps.costFor } : {}),
     system,
     cwd: deps.cwd,
     sessionsDir: deps.sessionsDir,
@@ -205,6 +210,8 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
   const sync = await codeGraph.sync().catch(() => ({ scanned: 0, skipped: 0, removed: 0 }))
   const graph = codeGraph.db
   const graphRefresh = () => codeGraph.fresh()
+  /** Assigned once the catalog loads below; subagents only price lazily. */
+  let costFor: (model: string) => ModelCost | undefined = () => undefined
   registry.register(createExploreTool({ db: () => graph, cwd, refresh: graphRefresh }))
   registry.register(
     createTaskTool(
@@ -214,6 +221,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
         provider: () => provider,
         model: () => modelRef,
         subagentModel: () => config.subagent_model ?? config.small_model,
+        costFor: (model) => costFor(model),
         extras: (sub) => {
           sub.register(createExploreTool({ db: () => graph, cwd, refresh: graphRefresh }))
           sub.register(createWebTool({ config: () => config.web }))
@@ -248,6 +256,15 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
   }).catch(() => ModelsCatalog.empty())
   const ref = parseModelRef(modelRef)
   const entry = catalog.lookup(ref.providerId, ref.modelId)
+  costFor = (model) => {
+    try {
+      const parsed = parseModelRef(model)
+      return catalog.lookup(parsed.providerId, parsed.modelId)?.cost
+    } catch {
+      return undefined
+    }
+  }
+  const smallModelCost = config.small_model ? costFor(config.small_model) : undefined
   const system = buildSystem(modelRef, {
     cwd,
     platform: process.platform,
@@ -300,6 +317,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
               },
             }
           : {}),
+        ...(smallModelCost ? { smallModelCost } : {}),
         ...((opts.maxSpendUSD ?? config.maxSpendUSD) !== undefined
           ? { maxSpendUSD: opts.maxSpendUSD ?? config.maxSpendUSD }
           : {}),
@@ -323,6 +341,8 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     )
 
     const { usage } = outcome
+    /** Turn spend incl. subagents/compaction, plus the evolver below. */
+    let costUSD = outcome.costUSD
     const summary = {
       steps: outcome.steps,
       tokens: { input: usage.input, output: usage.output, cacheRead: usage.cacheRead },
@@ -351,13 +371,15 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
       })
       const line = describeEvolution(evolved)
       if (line !== "" && !opts.json) process.stdout.write(`\n[${line}]`)
+      const evolverCost = costFor(config.small_model ?? modelRef)
+      if (evolverCost) costUSD += computeCostUSD(evolved.usage, evolverCost)
     }
 
     if (opts.json) {
-      console.log(JSON.stringify({ event: "done", ...summary }))
+      console.log(JSON.stringify({ event: "done", ...summary, costUSD }))
     } else {
       process.stdout.write(
-        `\n\n[${summary.steps} steps | in ${usage.input} out ${usage.output} cached ${usage.cacheRead}${outcome.costUSD > 0 ? ` | ${formatUSD(outcome.costUSD)}` : ""} | ${journal.path}]\n`,
+        `\n\n[${summary.steps} steps | in ${usage.input} out ${usage.output} cached ${usage.cacheRead}${costUSD > 0 ? ` | ${formatUSD(costUSD)}` : ""} | ${journal.path}]\n`,
       )
     }
     return outcome.budgetExceeded ? 124 : 0
