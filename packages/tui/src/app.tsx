@@ -224,6 +224,8 @@ import {
 } from "./theme"
 import { renderWordmark, wordmarkMode } from "./wordmark"
 
+/** A todo card item, duck-typed off tool.result.meta (not a core import).
+ * Statuses mirror todoTool's own enum. */
 interface TodoMeta {
   text: string
   status: "pending" | "in_progress" | "completed"
@@ -247,23 +249,49 @@ interface Message {
   resultOf?: string
   /** Running command rows: the live tail of the command's output. */
   liveOutput?: string
+  /** An agent action (tool call, result, command cell, diff) rather than
+   * words to the user; rendered behind a left rail. */
   action?: boolean
   /** Tool-call rows: when the call started (live) — drives "running 12s". */
   startedAt?: number
   /** Command cells: how long the command ran. */
   durationMs?: number
+  /**
+   * Streaming channel for the message being written now. Deltas update this
+   * signal (and `text`) in place: <For> keys rows by identity, so a new object
+   * per token would rebuild the row's <markdown> every delta. Rows read
+   * `liveText(message)`.
+   */
   live?: { text: Accessor<string>; set: Setter<string> }
   /** Unified diff for edit results — rendered with the diff element. */
   diff?: string
   path?: string
+  /** Todo card, present on the todo tool's UI-only meta. */
   todos?: TodoMeta[]
+  /** Bash command cell, present on the bash tool's UI-only meta. */
   command?: string
   exitCode?: number
+  /** Pre-formatted dim output body for the command cell, computed when the
+   * message is built (the card has no access to the raw tool output). */
   commandBody?: string
+  /** Structured provider error; absent for non-provider errors, which render
+   * plain `text`. */
   errorInfo?: ProviderErrorInfo
+  /**
+   * Thinking-block timing, view-state only. Reasoning is never journaled, so
+   * these are undefined on a resumed message and the collapsed line shows
+   * "thought" with no duration. Used by both native reasoning messages and
+   * assistant messages carrying an inline <think> block.
+   */
   thinkStartedAt?: number
+  /** Set once when the block closes (first text-delta, or the </think> tag);
+   * forced closed on "finish" so a block never streams forever. */
   thinkClosedAt?: number
+  /** Set on tool-call rows only: starts a new tool group (two-tone name/args
+   * and a blank line before it). A result row continues the group with no gap. */
   isCall?: boolean
+  /** `text` is structured command output (/status, /context, /doctor, /help,
+   * /sessions), rendered as muted labels with fg values per line. */
   structured?: boolean
 }
 
@@ -275,6 +303,8 @@ function filetypeOf(path: string | undefined): string | undefined {
   return undefined
 }
 
+/** The review card, built from the journaled event so live and /resume
+ * renders match by construction. */
 function reviewMessage(event: ReviewEvent): Message {
   const size =
     event.diffChars && event.diffChars > 0
@@ -302,6 +332,9 @@ export function timelineToMessages(timeline: import("@butterfly/core").SessionEv
           : { kind: "user", text: event.text },
       )
     else if (event.type === "message.assistant") {
+      // Kept when there is an answer or an inline <think> block (inline
+      // reasoning is journaled, so it survives /resume). A pure tool-call step
+      // renders nothing.
       const split = splitThink(event.text)
       if (split.rest.trim() !== "" || split.thinking !== "") {
         restored.push({ kind: "assistant", text: event.text })
@@ -356,6 +389,8 @@ function metaDiff(meta: unknown): { diff: string; path?: string } | undefined {
 
 const TODO_STATUSES = new Set(["pending", "in_progress", "completed"])
 
+/** Duck-types the todo tool's UI-only `meta.todos`. A malformed or foreign
+ * meta degrades to "no card": every item needs string text and a known status. */
 function metaTodos(meta: unknown): { todos: TodoMeta[] } | undefined {
   if (!meta || typeof meta !== "object" || !("todos" in meta)) return undefined
   const raw = (meta as { todos: unknown }).todos
@@ -388,6 +423,8 @@ function metaBash(meta: unknown): { command: string; exitCode: number } | undefi
   return undefined
 }
 
+/** Caps a fallback JSON dump at a token boundary (comma/space/colon/brace),
+ * never mid-token, with a trailing "…" when truncated. */
 function capAtTokenBoundary(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text
   const slice = text.slice(0, maxLen)
@@ -401,6 +438,11 @@ function capAtTokenBoundary(text: string, maxLen: number): string {
   return `${cut}…`
 }
 
+/**
+ * One-line per-tool summaries for the tool-call row: read/edit show the path,
+ * grep the pattern (+glob), glob the pattern. Everything else, including bash
+ * (whose result cell shows `$ command`), uses the capped JSON fallback.
+ */
 function toolCallArgs(name: string, input: unknown): string {
   const args = input && typeof input === "object" ? (input as Record<string, unknown>) : {}
   const str = (value: unknown): string | undefined =>
@@ -424,6 +466,7 @@ function toolCallArgs(name: string, input: unknown): string {
     const command = str(args.command)
     if (command !== undefined) return capAtTokenBoundary(command.replace(/\s+/g, " "), 100)
   }
+  // Readable previews instead of raw JSON for the op-dispatched tools.
   if (name === "todo" && Array.isArray(args.items)) return `${args.items.length} items`
   if (name === "task") {
     if (Array.isArray(args.tasks)) {
@@ -454,6 +497,9 @@ function toolCallArgs(name: string, input: unknown): string {
   return capAtTokenBoundary(JSON.stringify(input), 100)
 }
 
+/** tool.call's one-line preview, shared by the live path and
+ * timelineToMessages so a resumed session renders identically. `isCall`
+ * marks it as the start of a tool group. */
 function toolCallMessage(name: string, input: unknown, callId?: string): Message {
   return {
     kind: "tool",
@@ -465,6 +511,8 @@ function toolCallMessage(name: string, input: unknown, callId?: string): Message
   }
 }
 
+/** tool.result's message, shared by the live path and timelineToMessages.
+ * Meta shapes are mutually exclusive in practice, so spreading all three is safe. */
 function toolResultMessage(output: string, isError: boolean, meta: unknown): Message {
   const bash = metaBash(meta)
   return {
@@ -483,6 +531,12 @@ function toolResultMessage(output: string, isError: boolean, meta: unknown): Mes
   }
 }
 
+/**
+ * Folds a tool result into the transcript: a routine success (read, glob,
+ * grep, plan update) becomes a one-line summary on the call's row, e.g.
+ * "read src/a.ts · 342 lines". Failures, diffs, command cells and anything
+ * without a compact form keep a full block. Shared by live and /resume.
+ */
 function applyToolResult(
   list: Message[],
   callId: string,
@@ -496,6 +550,7 @@ function applyToolResult(
   const took = durationMs ?? (row?.startedAt !== undefined ? Date.now() - row.startedAt : undefined)
   const bash = metaBash(meta)
   if (row && bash) {
+    // The call row becomes the command cell: one "$ cmd  ok · 3s" block.
     const next = [...list]
     next[at] = {
       ...row,
@@ -525,6 +580,8 @@ function applyToolResult(
     next.push(toolResultMessage(output, isError, meta))
     return next
   }
+  // A result that needs its own block goes directly under its call, not at
+  // the bottom beneath later calls of the same batch.
   next[at] = {
     ...row,
     pending: false,
@@ -551,22 +608,32 @@ function editSummary(output: string): string {
   return first.length > 48 ? `${first.slice(0, 47)}…` : first || "done"
 }
 
+/** Provider error card headline, prefixed with a plain "error:" tag. */
 function errorCardHeadline(info: ProviderErrorInfo): string {
   return `error: ${describeProviderError(info)}`
 }
 
+/** The error card's dim second line (`info.detail`), skipped when it would
+ * repeat the headline. */
 function errorCardDetail(info: ProviderErrorInfo, headline: string): string | undefined {
   const detail = info.detail
   if (detail === undefined || detail === "") return undefined
   return headline.includes(detail) ? undefined : detail
 }
 
+/** Mirrors todo.ts's MARK constants. */
 const TODO_GLYPH: Record<TodoMeta["status"], string> = {
   pending: "[ ]",
   in_progress: "[~]",
   completed: "[x]",
 }
 
+/**
+ * The thinking block, shared by native reasoning streams and inline <think>
+ * blocks. While open it shows a rolling last-3-lines preview; closed, it
+ * collapses to one line with a duration when timing is known (never for a
+ * resumed message, since reasoning is not journaled).
+ */
 /** First meaningful line of a thought, trimmed to fit one row. */
 export function thinkingGist(text: string, max = 72): string {
   const line =
@@ -588,6 +655,8 @@ function ThinkingBlock(props: {
     props.startedAt !== undefined && props.closedAt !== undefined
       ? Math.max(0, Math.round((props.closedAt - props.startedAt) / 1000))
       : undefined
+  // Thinking is always italic and dim so it never reads like the answer.
+  // Collapsed, it keeps a one-line gist.
   const gist = () => thinkingGist(props.thinkingText)
   return (
     <box flexDirection="column">
@@ -639,6 +708,13 @@ function ThinkingBlock(props: {
   )
 }
 
+/**
+ * Splits one line into label/value at the first run of 2+ spaces, the column
+ * separator used by the structured command-output builders. Returns undefined
+ * for lines with no such column (titles, hints, JSON lines).
+ * The `.*?` must stay lazy: a greedy match splits at the last run instead and
+ * puts the value on the wrong side for multi-column lines.
+ */
 export function splitLabelValue(line: string): { label: string; value: string } | undefined {
   const match = line.match(/^(\s*\S.*?)( {2,})(\S.*)$/)
   if (!match) return undefined
@@ -647,6 +723,13 @@ export function splitLabelValue(line: string): { label: string; value: string } 
   return { label: `${label}${gap}`, value }
 }
 
+/**
+ * One line of a message. Rendered per line because OpenTUI measures a
+ * `<text>`'s height from wrap breaks, not literal "\n"s, so a multi-line
+ * `<text>` under-reports its height and the scrollbox mismeasures (phantom
+ * scrollbar, first line scrolled out of view). `structured` splits each line
+ * into a muted label and fg value.
+ */
 function MessageLine(props: { line: string; tone: string | undefined; structured: boolean }) {
   const split = () => (props.structured ? splitLabelValue(props.line) : undefined)
   return (
@@ -661,6 +744,7 @@ function MessageLine(props: { line: string; tone: string | undefined; structured
   )
 }
 
+/** A full message body, one row per line (see MessageLine). */
 function MessageLines(props: { text: string; tone: string | undefined; structured?: boolean }) {
   return (
     <box flexDirection="column">
@@ -673,6 +757,16 @@ function MessageLines(props: { text: string; tone: string | undefined; structure
   )
 }
 
+/**
+ * Tool-call row: tool name in fg, args muted. `text` is always
+ * `${name} ${args}` and tool names never contain a space, so splitting on the
+ * first space is exact.
+ */
+/**
+ * A coloured run inside a <text>. opentui-solid 0.4.5 only applies span
+ * colour from `style` (a bare `fg` is ignored) and types <span> props as
+ * `{}`, so the cast is confined to this helper.
+ */
 function Tint(props: { fg: string; italic?: boolean; bold?: boolean; children: string }) {
   return (
     <span
@@ -719,6 +813,8 @@ function ToolCallRow(props: {
   const spaceIndex = () => props.text.indexOf(" ")
   const name = () => (spaceIndex() === -1 ? props.text : props.text.slice(0, spaceIndex()))
   const args = () => (spaceIndex() === -1 ? "" : props.text.slice(spaceIndex() + 1))
+  // One text node with spans: verb (coloured by tool family), args and the
+  // folded outcome wrap as one line. A shell command reads "$ npm test".
   return (
     <text>
       <Tint fg={toneColor(toolTone(name()))}>{name() === "bash" ? "$" : name()}</Tint>
@@ -739,21 +835,39 @@ function ToolCallRow(props: {
   )
 }
 
+/** Blank-line rhythm: every tool call starts a new group with a gap; its
+ * result continues the group with no gap. `info` is spaced like `user`. */
 function messageMarginTop(message: Message, previous?: Message): number {
+  // Consecutive actions (calls, results, command cells) form one group
+  // sharing one rail.
   if (message.action && previous?.action) return 0
   return message.kind === "user" || message.kind === "info" || message.isCall ? 1 : 0
 }
 
+/**
+ * True when `value` is `previous` plus one freshly typed "@" at a word
+ * boundary: the @-mention trigger. Ignores mid-word "@" (emails) and bulk
+ * draft changes (paste, /resume).
+ */
 function isMentionTrigger(previous: string, value: string): boolean {
   if (value.length !== previous.length + 1 || !value.endsWith("@")) return false
   const before = previous.at(-1)
   return before === undefined || /\s/.test(before)
 }
 
+/**
+ * Formats a picked path for insertion after the trigger `@`. Paths with
+ * spaces are quoted so they round-trip through `extractMentions`.
+ */
 function mentionToken(path: string): string {
   return /\s/.test(path) ? `"${path}"` : path
 }
 
+/**
+ * Detects a typed/pasted image path at the tail of the composer and resolves
+ * it against `cwd`. The file must exist, so prose like "see cat.png" doesn't
+ * become a chip. Size/count caps are enforced at submit time, not here.
+ */
 function detectAttachableImage(
   cwd: string,
   value: string,
@@ -770,6 +884,11 @@ function detectAttachableImage(
   return { path: abs, mediaType, remaining }
 }
 
+/**
+ * Clears the OSC 9;4 progress indicator on exit. `renderer.destroy()` can't:
+ * OpenTUI has no progress concept, so the taskbar spinner would keep running.
+ * Called from every exit path; written raw because the renderer is gone by then.
+ */
 export function clearTerminalProgress(
   stream: Pick<NodeJS.WriteStream, "isTTY" | "write"> = process.stdout,
 ): void {
@@ -781,6 +900,10 @@ export function clearTerminalProgress(
   }
 }
 
+/**
+ * The narrowed "always allow" rule the [a] key would commit, computed at ask
+ * time so the preview shown is exactly what gets written.
+ */
 interface QuickAddOffer {
   tool: string
   pattern: string
@@ -789,6 +912,8 @@ interface QuickAddOffer {
 
 interface PendingAsk {
   text: string
+  /** Absent for plain confirmations and for asks planQuickAdd refused (would
+   * widen an existing deny); either way no [a] option is offered. */
   quickAdd?: QuickAddOffer
   resolve: (decision: "allow" | "deny") => void
 }
@@ -822,6 +947,11 @@ const PROVIDERS: ProviderChoice[] = [
   { id: "lmstudio", needsKey: false, example: "qwen/qwen3-8b" },
 ]
 
+/**
+ * One line per approval prompt. `note` is the tool's disclosure of what the
+ * target alone doesn't say (e.g. third-party hosts a `web` fetch transits).
+ * Structurally typed against core's AskRequest (not re-exported).
+ */
 function describeAsk(request: { tool: string; target?: string; note?: string }): string {
   const target = request.target ? `: ${request.target}` : ""
   const note = request.note ? ` (${request.note})` : ""
@@ -836,6 +966,10 @@ const TUI_DEFAULT_RULES: PermissionRules = {
   web: "ask",
 }
 
+/**
+ * Plan mode: read-only for the workspace; mutations are denied, not asked.
+ * `web` is allowed since it changes nothing locally.
+ */
 const PLAN_RULES: PermissionRules = {
   "*": "allow",
   bash: "deny",
@@ -847,19 +981,29 @@ const PLAN_RULES: PermissionRules = {
 const PLAN_PREFIX =
   "[PLAN MODE — read-only. Investigate with read/glob/grep/explore, then produce a concrete numbered implementation plan (files to change, exact steps, risks, verification). Do NOT modify anything; edit/bash are disabled.]"
 
+/**
+ * `/loop run`'s default when butterfly.jsonc has no `permissions`. No "ask"
+ * entries: loop iterations are unattended, so an ask would fail every tool
+ * call. Mirrors cli/loop.ts's LOOP_RULES.
+ */
 const LOOP_TUI_RULES: PermissionRules = {
   "*": "allow",
   edit: { "**/.env*": "deny", ".env*": "deny" },
 }
 
+/** Same cap core's snapshot.ts uses: git can hang for minutes on some
+ * platforms. A timeout reads as "couldn't tell" and fails open (see loopRun). */
 const GIT_STATUS_TIMEOUT_MS = 15_000
 
+/** Mirrors cli/loop.ts's PLANNER_PROMPT (a single text-only call). */
 const LOOP_PLANNER_PROMPT = `You are the planning stage of an autonomous coding loop. Break the specification into 2-10 SMALL, independently verifiable tasks. Each task must be completable in one focused session and checkable by the project's test/build gates.
 
 Reply with ONLY a JSON array, no prose:
 [{"title":"short imperative title","spec":"exact, self-contained instructions","blockedBy":[0]}]
 "blockedBy" lists 0-based indexes of tasks that must finish first. Prefer independent tasks; add dependencies only when strictly required. Implement nothing yourself.`
 
+/** Same paths as cli/loop.ts, so `/loop status` and `butterfly loop status`
+ * read the same queue/handoff. */
 function loopPaths(cwd: string): { queue: string; handoff: string; sessions: string } {
   return {
     queue: join(cwd, ".butterfly", "queue.db"),
@@ -870,15 +1014,26 @@ function loopPaths(cwd: string): { queue: string; handoff: string; sessions: str
 
 export function App(props: { cwd: string; config: ButterflyConfig; home?: string }) {
   const home = props.home ?? homedir()
+  /** Shortens paths for /status and /doctor rows so they don't wrap: home
+   * becomes "~", then anything still too long is middle-ellipsized. */
   const displayPath = (path: string): string =>
     middleEllipsize(path.startsWith(home) ? `~${path.slice(home.length)}` : path, 70)
   const dimensions = useTerminalDimensions()
   const renderer = useRenderer()
 
+  // Terminal window focus (not in-app focus). Assumed focused at launch;
+  // terminals without focus tracking stay "focused", so no notifications.
   const [focused, setFocused] = createSignal(true)
   onFocus(() => setFocused(true))
   onBlur(() => setFocused(false))
 
+  /**
+   * Applies attention actions from the core decider: notify and title via
+   * OpenTUI's APIs. Progress (OSC 9;4) has no OpenTUI API, so it goes through
+   * `renderer.writeOut`, which serializes with frame flushes; a raw
+   * process.stdout.write could land mid-frame. `writeOut` is typed private,
+   * hence the cast. Best-effort: never allowed to crash a turn.
+   */
   const writeOsc = (osc: string): void => {
     ;(renderer as unknown as { writeOut: (chunk: string) => boolean }).writeOut(osc)
   }
@@ -889,12 +1044,16 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         else if (action.type === "title") renderer.setTerminalTitle(action.text)
         else writeOsc(action.osc)
       } catch {
+        // best-effort; must never interrupt a turn
       }
     }
   }
 
   const [config, setConfig] = createSignal(props.config)
 
+  // Theme resolved synchronously on mount (pinned theme, else dark) so the
+  // first render is right and each mount starts deterministic. Auto
+  // light/dark detection follows below, only when nothing is pinned.
   const customThemes = loadCustomThemes(home)
   setThemeTokens(resolveTheme(config().theme ?? "dark", customThemes))
   const applyAutoThemeMode = (mode: "dark" | "light") => {
@@ -949,6 +1108,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   /** What the center pane shows: the main conversation or the opened subagent's. */
   const displayed = () => {
     if (agentView() !== undefined) return agentMessages()
+    // The sidebar shows live agent status, so progress lines would repeat it.
     return layout().sidebar ? messages().filter((m) => m.progressId === undefined) : messages()
   }
 
@@ -1024,7 +1184,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       setChangedFiles([])
     }
   }
+  /** Ctrl+R: expands thinking text for every visible thinking block.
+   * View-state only; thinking blocks are not replayed on /resume. */
   const [thinkingExpanded, setThinkingExpanded] = createSignal(false)
+  /**
+   * Only the latest todo result renders as a card; earlier ones show their
+   * terse line. Derived from `messages()` so it can never drift.
+   */
   const latestTodoIndex = createMemo(() => {
     const list = messages()
     let last = -1
@@ -1036,19 +1202,38 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const [draft, setDraft] = createSignal("")
   const [busy, setBusy] = createSignal(false)
   const [pendingAsk, setPendingAsk] = createSignal<PendingAsk | null>(null)
+  /** Transient status-bar line: live timer, settled turn marker, copy notice. */
   const [status, setStatus] = createSignal("")
+  /**
+   * The last turn's marker only. Kept separate from `status()` so /status's
+   * `last turn` row isn't overwritten by other notices. Cleared with the turn
+   * history it describes (/new, /resume, /undo, /rewind), never fabricated on replay.
+   */
   const [lastTurnMarker, setLastTurnMarker] = createSignal("")
+  /** Clears both turn signals together. */
   const resetTurnStatus = () => {
     setStatus("")
     setLastTurnMarker("")
+    // Callers just swapped or rewound the timeline; the panels follow it.
     syncPanels()
   }
 
+  /**
+   * Mouse select-to-copy. OpenTUI enables mouse tracking and selectable text
+   * by default, and the "selection" event fires once per selection end (not
+   * per drag frame); wheel scrolling uses a separate path, so this doesn't
+   * fight the scrollboxes. One renderer-level handler covers every screen.
+   * Copies through OpenTUI's capability-aware OSC 52 API; we only apply the
+   * size cap first (see clipboard.ts).
+   */
   let osc52UnsupportedNotified = false
   useSelectionHandler((selection) => {
     const text = selection.getSelectedText()
+    // A click with no drag yields an empty selection; skip it silently.
     if (!text) return
     if (!renderer.isOsc52Supported()) {
+      // Tell the user once per session, on a real copy attempt, so they don't
+      // assume the selection reached the clipboard.
       if (!osc52UnsupportedNotified) {
         osc52UnsupportedNotified = true
         push({ kind: "info", text: COPY_UNSUPPORTED_TEXT })
@@ -1060,8 +1245,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     try {
       copied = renderer.copyToClipboardOSC52(payload)
     } catch {
+      // best-effort; a failed clipboard write must never interrupt the UI
       return
     }
+    // false means the bytes did not go out; never claim "copied" then.
     if (!copied) return
     setStatus(copyStatusText(truncated))
   })
@@ -1077,12 +1264,21 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const [setupModels, setSetupModels] = createSignal<string>("")
   const [picker, setPicker] = createSignal<{
     title: string
+    /** Optional caution under the title that qualifies the whole list (e.g.
+     * "ids came from the offline catalog"). Kept off the title so it never
+     * crowds the keybinding hints. */
     note?: string
     items: { label: string; value: string }[]
     index: number
     filter: string
     onPick: (value: string) => void
   } | null>(null)
+  /**
+   * `/provider`'s key-entry step. Its own signal rather than a SetupStage:
+   * setup replaces the transcript pane and types the model id, while
+   * /provider runs mid-session, keeps the transcript visible like other
+   * overlays, and ends on the model picker.
+   */
   const [providerKeyStep, setProviderKeyStep] = createSignal<{
     provider: string
     hasExisting: boolean
@@ -1092,13 +1288,28 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const [queued, setQueued] = createSignal<string[]>([])
   const [history, setHistory] = createSignal<string[]>([])
   let historyPos = -1
+  /** Pending image chips, consumed and cleared on the next submit(). */
   const [attachedImages, setAttachedImages] = createSignal<{ path: string; mediaType: string }[]>(
     [],
   )
+  /**
+   * Pending paste-chip payloads keyed by chip number. The draft holds only the
+   * `[Pasted #N +K lines]` label; submit() expands it and clears this map.
+   */
   const [pasteChips, setPasteChips] = createSignal<ReadonlyMap<number, string>>(new Map())
+  /** Monotonic; never reused, even after a chip is deleted. */
   let nextChipNumber = 1
+  /**
+   * The composer `<input>`, needed for the cursor position: chip-backspace
+   * only fires when the cursor is at the end of the draft, so editing earlier
+   * text never deletes a chip. `cursorOffset` is in UTF-16 code units, so it
+   * compares directly to `draft().length`.
+   */
   let composerRef: InputRenderable | undefined
 
+  // Transcript pager (Ctrl+O): full-screen modal over the raw journal export
+  // (no compaction/prune fold), so search reaches turns `messages()` no longer
+  // shows. `pagerLine` is the shared cursor for n/N and `{`/`}` navigation.
   const [pagerOpen, setPagerOpen] = createSignal(false)
   const [pagerDoc, setPagerDoc] = createSignal<PagerDoc>({ source: "", lines: [], promptLines: [] })
   const [pagerQuery, setPagerQuery] = createSignal("")
@@ -1118,12 +1329,16 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   let scroll: ScrollBoxRenderable | undefined
   let abort: AbortController | undefined
   let firstTurn = true
+  // /loop run: live card state plus its own abort handle, separate from
+  // `abort` so Ctrl+C can say "loop interrupted" vs "turn interrupted". Both
+  // are aborted on Ctrl+C; busy() guarantees they never run at once.
   const [loopCard, setLoopCard] = createSignal<LoopCardState | null>(null)
   let loopAbort: AbortController | undefined
 
   const cmdList = (): SlashCommand[] =>
     !setup() && !picker() && !busy() && !providerKeyStep() ? commandMatches(draft()) : []
 
+  // Braille spinner. Only ticks while busy, so an idle TUI does no re-render work.
   const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
   const [spin, setSpin] = createSignal(0)
   const spinTimer = setInterval(() => {
@@ -1131,6 +1346,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   }, 80)
   onCleanup(() => clearInterval(spinTimer))
 
+  /**
+   * Per-turn elapsed timer. `turnStartedAt` is set before each setBusy(true)
+   * and read at completion for the `· 1m 23s` marker; never journaled, so a
+   * replayed turn never shows a fabricated duration. `elapsedTick` only
+   * forces the live line to re-render each second while busy.
+   */
   const [turnStartedAt, setTurnStartedAt] = createSignal<number | undefined>(undefined)
   const [elapsedTick, setElapsedTick] = createSignal(0)
   const elapsedTimer = setInterval(() => {
@@ -1150,6 +1371,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const modelRef = () => config().model
 
+  // @-mention frecency store: touched on picker picks and on files the
+  // edit/read tools touch.
   const frecencyStore = frecencyStorePath(props.cwd)
 
   const registry = new ToolRegistry()
@@ -1183,6 +1406,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       return undefined
     }
   }
+  /**
+   * Model for summarization-class work (compaction, evolver, commit
+   * messages): small_model, else a cheap same-provider companion from the
+   * catalog (auto_small_model), else undefined (the main model). Never used
+   * for subagents.
+   */
   const summaryModel = (ref: string): string | undefined => {
     const explicit = config().small_model
     if (explicit) return explicit
@@ -1195,6 +1424,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       return undefined
     }
   }
+  // Only an affirmative catalog match allows sending image bytes; unknown
+  // counts as unsupported.
   const imageInputSupported = () => {
     const ref = modelRef()
     if (!ref) return false
@@ -1208,6 +1439,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const session = { journal: SessionJournal.create(join(props.cwd, ".butterfly", "sessions")) }
   const state: Record<string, unknown> = {}
+  // Background bash tasks: one registry for the session, shared by /tasks,
+  // quit()'s reap and the journal. Finished tasks post a plain info line
+  // rather than going through the turn-scoped attention module.
   const bgTasks = new BgTaskRegistry({
     cwd: props.cwd,
     logDir: join(props.cwd, ".butterfly", "bg"),
@@ -1237,6 +1471,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       const parsed = parseModelRef(ref)
       const catalogLimit = catalog.lookup(parsed.providerId, parsed.modelId)?.context
       const served = servedLimits.get(ref)
+      // The smaller wins: a server truncates at what it serves.
       setCtxLimit(
         served !== undefined && (catalogLimit === undefined || served < catalogLimit)
           ? served
@@ -1246,6 +1481,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       setCtxLimit(undefined)
     }
   }
+  /**
+   * Ollama serves models at its own context length (often 4k) and silently
+   * truncates longer requests. Probe /api/ps for the served length, use it
+   * as the limit (local models have no catalog row), and warn once if it
+   * can't hold the prefix plus a working margin.
+   */
   const probeServedContext = async (): Promise<void> => {
     const ref = modelRef()
     if (!ref || servedLimits.has(ref)) return
@@ -1278,10 +1519,15 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     })
     .catch(() => {})
 
+  // Code graph: CodeGraph owns graph.db and .butterfly/project-map.md. The
+  // first sync runs in the background; explore re-syncs incrementally
+  // (throttled) before each call so it sees recent edits. Settled turns
+  // re-sync too.
   let codeGraph: CodeGraph | undefined
   try {
     codeGraph = CodeGraph.open(props.cwd)
   } catch {
+    // unwritable .butterfly: explore stays unavailable; grep/read still work
   }
   const graphDb = (): GraphDb | undefined => (codeGraph?.ready ? codeGraph.db : undefined)
   const graphRefresh = () => codeGraph?.fresh() ?? Promise.resolve()
@@ -1296,6 +1542,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   })()
 
+  // Memory: frozen snapshots + episodic index + skills.
   const paths = memoryPaths(props.cwd, home)
   const memory = loadMemory(paths)
   const skillDirs = [
@@ -1311,10 +1558,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     sub.register(createExploreTool({ db: graphDb, cwd: props.cwd, refresh: graphRefresh }))
     sub.register(createWebTool({ config: () => config().web }))
   }
+  // Shared subagent options: the "task" tool and /review both spawn through
+  // this isolated-journal, read-only registry (runSubagentTurn).
   const taskToolOpts: TaskToolOptions = {
     provider: () => freshProvider(),
     model: () => modelRef() ?? "",
     subagentModel: () => config().subagent_model ?? config().small_model,
+    // Subagent spend is priced at its own model and folded into the turn's
+    // totals by the runner (meta.spend), so budgets see fan-outs.
     costFor: (m) => costForRef(m),
     system: (m) => frozenSystem(m),
     cwd: props.cwd,
@@ -1327,9 +1578,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       subagentExtras(sub)
       return sub
     },
+    // isolation:"worktree": the same set plus edit+bash, rooted at the
+    // subagent's disposable worktree. Without it, isolation requests are refused.
     makeMutatingRegistry: () => mutatingSubagentRegistry(subagentExtras),
   }
   registry.register(createTaskTool(taskToolOpts))
+  // /loop run: a fresh registry per iteration, the same tool set as
+  // cli/loop.ts's makeRegistry. No task/mcp tool, matching the CLI.
   const buildLoopRegistry = (): ToolRegistry => {
     const sub = new ToolRegistry()
     sub.register(bashTool)
@@ -1379,23 +1634,34 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     })
 
   const quit = () => {
+    // Reap still-running background tasks; keepAlive:true ones are left running.
     bgTasks.reap()
     try {
       renderer.destroy()
     } catch {
+      // destroy failed, so nothing else will clear the progress indicator.
       clearTerminalProgress()
       process.exit(0)
     }
   }
 
+  /**
+   * No manual scrollTo here: the transcript scrollbox is stickyScroll
+   * (bottom) and re-pins after relayout while respecting a manual scroll-up.
+   * Scrolling in the same tick as setMessages reads a stale scrollHeight and
+   * under-scrolls multi-line pushes.
+   */
   const push = (message: Message) => {
     setMessages([...messages(), message])
   }
 
+  // Single approval surface for both permission asks and harness
+  // confirmations (e.g. /commit's "stage?" question).
   const showApprovalPrompt = (text: string, quickAdd?: QuickAddOffer): Promise<"allow" | "deny"> =>
     new Promise((resolve) => {
       // Terminal bell: surfaces the prompt when the user has tabbed away.
       process.stdout.write("\x07")
+      // Desktop notification alongside the bell, which is easy to miss or mute.
       applyAttention(
         decideAttention(
           { kind: "approval.request", detail: text },
@@ -1415,6 +1681,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const askApproval = (text: string): Promise<"allow" | "deny"> => showApprovalPrompt(text)
 
+  /**
+   * A real permission-tree ask (tool/target known). Computes the quick-add
+   * rule up front against the same `rules` this turn's registry checks, so
+   * the [a] preview is exactly what gets installed. If planQuickAdd refuses,
+   * `quickAdd` is omitted and no [a] is offered.
+   */
   const askPermission = (
     request: { tool: string; target?: string; note?: string; input: unknown },
     rules: PermissionRules,
@@ -1427,6 +1699,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     return showApprovalPrompt(describeAsk(request), quickAdd)
   }
 
+  /**
+   * Commits an [a]lways-allow rule: installs it in the session's permission
+   * tree now (rules are captured per turn, so it applies from the next turn)
+   * and best-effort persists it to the project butterfly.jsonc. If the config
+   * can't be written, the session rule still applies and a manual-edit
+   * snippet is shown.
+   */
   const applyQuickAdd = (quickAdd: QuickAddOffer) => {
     setConfig({ ...config(), permissions: quickAdd.rules })
     try {
@@ -1464,6 +1743,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       return
     }
+    // Inline <think> timing uses the same fields as native thinking messages.
+    // thinkClosedAt is set once splitThink reports the block closed
+    // (including a block delivered in one delta).
     const split = splitThink(text)
     const [liveText, setLiveText] = createSignal(text)
     const created: Message = {
@@ -1474,8 +1756,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       ...(split.thinking !== "" && !split.open ? { thinkClosedAt: Date.now() } : {}),
     }
     setMessages([...all, created])
+    // No manual scrollTo; see push().
   }
 
+  // @-mention picker. Candidates come from the graph DB, falling back to a
+  // glob walk while the graph syncs; ranked by frecency. Picking inserts
+  // `@relative/path ` (quoted if it has spaces) and bumps its frecency.
   const openMentionPicker = () => {
     const candidates = listMentionCandidates(props.cwd, graph)
     const ranked = rankByFrecency(candidates, loadFrecency(frecencyStore))
@@ -1498,6 +1784,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     setPagerSearchActive(false)
     setPagerMatches([])
     setPagerLine(0)
+    // The markdown element's headings/bold/list text stay invisible until the
+    // worker-backed highlighter catches up, which on a long journal looks
+    // broken. Show a notice, cleared after a short window unless replaced.
     setPagerNotice("rendering…")
     setPagerOpen(true)
     setTimeout(() => {
@@ -1506,6 +1795,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   }
   const closePager = () => setPagerOpen(false)
 
+  /** Incremental search: recomputes matches per keystroke and jumps to the
+   * first match at or after the current position. */
   const runPagerSearch = (query: string) => {
     setPagerQuery(query)
     const matches = searchPagerLines(pagerDoc().lines, query)
@@ -1517,8 +1808,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
 
+  /** Writes the full session export to a scratch file: the first step for
+   * both `[` and `v`, and the fallback if either's best-effort part fails. */
   const writePagerExport = (): string => {
     const id = session.journal.header.sessionId.slice(0, 8)
+    // One file per session under <temp>/butterfly/pager, overwritten on each
+    // export.
     const dir = join(tmpdir(), "butterfly", "pager")
     mkdirSync(dir, { recursive: true })
     const file = join(dir, `${id}.md`)
@@ -1526,8 +1821,17 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     return file
   }
 
+  /**
+   * `[`: best-effort dump into native terminal scrollback. While suspended the
+   * terminal is back on the main screen buffer, so a raw stdout write lands in
+   * real scrollback. OpenTUI has no simpler API for this; the file written
+   * above is the fallback.
+   */
   const pagerDumpScrollback = () => {
     const file = writePagerExport()
+    // suspend() and resume() are paired in a finally: once suspended, raw mode
+    // is off and the render loop paused, so a throw in between would leave the
+    // TUI dead. `suspended` keeps a failed suspend() from being "resumed".
     let suspended = false
     try {
       renderer.suspend()
@@ -1543,11 +1847,15 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         try {
           renderer.resume()
         } catch {
+          // best-effort; nothing more to do if resume fails
         }
       }
     }
   }
 
+  /** `v`: export and hand the terminal to $EDITOR/$VISUAL (suspend, spawn
+   * with inherited stdio, resume). Without an editor, or on failure, just
+   * reports the file path. */
   const pagerExportAndEdit = async (): Promise<void> => {
     const file = writePagerExport()
     const editor = process.env.VISUAL || process.env.EDITOR
@@ -1576,14 +1884,31 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       try {
         renderer.resume()
       } catch {
+        // best-effort; nothing more to do if resume fails
       }
     }
   }
 
+  /**
+   * Set when a provider "error" event is rendered as a card. The runner emits
+   * the event before throwing, so this flips before submit()'s `.catch` runs,
+   * letting it avoid rendering the same error twice.
+   */
   let providerErrorRendered = false
 
+  /**
+   * Index into `messages()` where the current provider step's live output
+   * starts. A `step-retracted` event truncates back to here: a failed
+   * attempt's streamed text and tool-call cards were never journaled and
+   * would otherwise linger above the retry's output.
+   * Advanced only past settled output: the turn's user message, every tool
+   * result (already journaled), and every notice (so a "retrying" line
+   * survives the next retraction).
+   */
   let stepAnchor = 0
 
+  /** Appends a reasoning chunk to the current thinking block, starting a new
+   * one if the last message isn't an open thinking block. */
   const appendReasoningNow = (text: string) => {
     const all = messages()
     const last = all.at(-1)
@@ -1602,8 +1927,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         thinkStartedAt: Date.now(),
       },
     ])
+    // No manual scrollTo; see push().
   }
 
+  /**
+   * Delta coalescing: deltas collect here and flush once per frame (~16ms).
+   * Every non-delta event flushes first, so ordering matches the stream.
+   */
   let pendingDelta: { kind: "text" | "reasoning"; text: string } | undefined
   let deltaTimer: ReturnType<typeof setTimeout> | undefined
   const flushDeltas = () => {
@@ -1622,6 +1952,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     pendingDelta = pendingDelta ? { kind, text: pendingDelta.text + text } : { kind, text }
     deltaTimer ??= setTimeout(flushDeltas, flushDelayMs())
   }
+  /**
+   * The markdown element re-parses its trailing block on every update, and a
+   * long list or paragraph is one block, so cost grows with the message.
+   * Short replies flush every frame; long ones back off (up to 250ms).
+   */
   const flushDelayMs = (): number => {
     const last = messages().at(-1)
     const length = last?.live ? last.text.length : 0
@@ -1630,9 +1965,21 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
   const appendAssistant = (text: string) => queueDelta("text", text)
   const appendReasoning = (text: string) => queueDelta("reasoning", text)
 
+  /**
+   * Freezes every thinking block still open in the current turn (native or
+   * unterminated inline <think>) when it is done: answer text starts, a step
+   * ends without text, an error lands, or the turn settles. The turn's
+   * `.finally` calls this too because a Ctrl+C abort closes the stream with
+   * neither a finish nor an error.
+   * Scans backwards (stopping at this turn's user message) so blocks followed
+   * by notices or tool rows still close, without touching earlier turns.
+   * Idempotent: with nothing to close, no signal is written.
+   */
   /** A native thinking block may be open (reasoning streamed since the last close). */
   let reasoningOpen = false
   const finalizeOpenThinking = () => {
+    // Flush queued deltas before closing blocks, or a late flush could open
+    // a new thinking block after the turn settled.
     flushDeltas()
     reasoningOpen = false
     const all = [...messages()]
@@ -1660,10 +2007,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         appendReasoning(event.text)
         break
       case "text-delta":
+        // Only the first answer delta after reasoning has a block to close;
+        // finalizing per delta would flush and copy the list every token.
         if (reasoningOpen) finalizeOpenThinking()
         appendAssistant(event.text)
         break
       case "tool-input-start":
+        // The model is still streaming this call's arguments; show it so a
+        // big edit never looks like a hang.
         finalizeOpenThinking()
         push({ kind: "info", text: `  preparing ${event.name}...`, progressId: event.callId })
         break
@@ -1697,6 +2048,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         break
       }
       case "tool-progress": {
+        // Live command output: kept for the shell view, with its last lines
+        // shown under the command's row.
         if (updateFgShell(event.callId, { output: event.text })) {
           setMessages(
             messages().map((m) =>
@@ -1705,6 +2058,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           )
           break
         }
+        // One live line per running subagent call, updated in place (never
+        // journaled).
         const all = [...messages()]
         const line: Message = {
           kind: "info",
@@ -1740,6 +2095,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         upsertAgent(event.callId, event.update)
         break
       case "step-retracted": {
+        // Drop everything the failed attempt streamed (see stepAnchor).
         const settled = messages().slice(0, stepAnchor)
         if (settled.length !== messages().length) setMessages(settled)
         break
@@ -1757,7 +2113,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         setCtxUsed(event.usage.input + event.usage.output)
         break
       case "error": {
+        // Errors often land mid-reasoning and the runner throws without a
+        // finish, so close the block here or it would stream forever.
         finalizeOpenThinking()
+        // Render the structured `info` when the adapter supplied one;
+        // otherwise errorInfo stays unset and the plain `text` is shown.
         providerErrorRendered = true
         push(
           event.info
@@ -1777,27 +2137,41 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const freshProvider = () => new AiSdkProvider(createModelResolver(config()))
 
+  /**
+   * `live` says which source answered and callers must keep it:
+   * fetchProviderModels fails soft, so a 401 from a bad key looks like being
+   * offline and the catalog fallback would hide it. /provider surfaces the
+   * flag; text-only callers ignore it.
+   */
   const modelListItems = async (
     providerId: string,
     apiKey?: string,
   ): Promise<{ models: { id: string; context?: number; name?: string }[]; live: boolean }> => {
     const providerConfig = config().providers?.[providerId]
+    // Live listing from the provider...
     const live = await fetchProviderModels(providerId, {
       apiKey: apiKey ?? providerConfig?.apiKey ?? presetKeyFromEnv(providerId),
       baseURL: providerConfig?.baseURL ?? presetBaseURL(providerId),
     })
     if (live.length > 0) return { models: live, live: true }
+    // ...falling back to the offline models.dev snapshot.
     return { models: catalog.listModels(providerId), live: false }
   }
 
   const modelLabel = (m: { id: string; context?: number; name?: string }): string =>
     `${m.id}${m.context ? `  (${Math.round(m.context / 1000)}k ctx)` : ""}${m.name && m.name !== m.id ? `  — ${m.name}` : ""}`
 
+  /** Shared "nothing came back" wording for /model and /provider when both
+   * the live fetch and the catalog are empty. */
   const noModelsNote = (providerId: string): string =>
     providerId === "ollama"
       ? "no local ollama models found (is the server running? `ollama pull <model>` to add one)"
       : `no model list available for "${providerId}" (offline or bad key?) — you can still type any model id`
 
+  /**
+   * The catalog-fallback caution. A note, not a blocker: being offline with a
+   * good key is normal. Wording depends on `needsKey` (ollama/lmstudio have no key).
+   */
   const catalogFallbackNote = (providerId: string): string =>
     PROVIDERS.find((p) => p.id === providerId)?.needsKey === true
       ? "live list unavailable — showing catalog; the key was NOT validated"
@@ -1811,6 +2185,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     return `${providerId} models:\n${shown.map((m) => `  ${modelLabel(m)}`).join("\n")}${more > 0 ? `\n  … ${more} more — type any id` : ""}`
   }
 
+  /**
+   * /provider's final step: one saveGlobalConfig write with the model, plus
+   * providers.<id>.apiKey only when a new key was entered (`newKey` is
+   * undefined otherwise). saveGlobalConfig deep-merges `providers`, so other
+   * providers' keys survive.
+   */
   const applyProviderSelection = (
     provider: string,
     modelId: string,
@@ -1830,6 +2210,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       setCtxUsed(0)
       push({ kind: "info", text: `Saved to ${path}` })
       push({ kind: "info", text: `Ready on ${provider}/${modelId}` })
+      // The picker's note is gone by now, so repeat the caution: otherwise a
+      // key that just 401'd looks like one that worked.
       if (fromCatalog) {
         push({ kind: "info", text: `note: ${catalogFallbackNote(provider)}` })
       }
@@ -1847,6 +2229,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
 
+  /** /provider's model step: live listing in the shared picker. An empty list
+   * shows the same text note as /model instead of an empty picker. */
   const openProviderModelPicker = async (
     provider: string,
     newKey: string | undefined,
@@ -1858,6 +2242,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
     setPicker({
       title: `${provider} models — type to filter · ↑↓ · Enter switch · Esc`,
+      // Catalog rows look like live ones, so the note has to sit on the list.
       ...(live ? {} : { note: catalogFallbackNote(provider) }),
       items: models.map((m) => ({ label: modelLabel(m), value: m.id })),
       index: 0,
@@ -1866,6 +2251,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     })
   }
 
+  /** /provider's key step: blank keeps the saved key (undefined falls back to
+   * the stored key); any other text replaces it. */
   const handleProviderKeySubmit = (
     step: { provider: string; hasExisting: boolean },
     value: string,
@@ -1889,6 +2276,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
     }
     if (mode === "conversation" || mode === "both") {
+      // Per-call checkpoints sit after their step's whole tool.call batch;
+      // truncating there would leave a tool.call with no tool.result, which
+      // providers reject. safeRewindIndex walks back to the step's start.
       const { events: before } = SessionJournal.replay(session.journal.path)
       const toIndex = safeRewindIndex(before, checkpoint.index)
       session.journal.append({ type: "session.rewound", toIndex, time: now() })
@@ -1937,6 +2327,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
     },
     status: () => {
+      // Prompt-cache hit rate over the session, from turn.completed usage.
       const cacheLine = (): string => {
         const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
         for (const event of SessionJournal.replay(session.journal.path).events) {
@@ -1978,6 +2369,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       )
       setPicker({
         title: `${providerId} models — type to filter · ↑↓ · Enter switch · Esc`,
+        // Same disclosure as /provider: /model hits the same fallback when
+        // the stored key stops working.
         ...(live ? {} : { note: catalogFallbackNote(providerId) }),
         items: models.map((m) => ({ label: modelLabel(m), value: m.id })),
         index,
@@ -2068,6 +2461,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       else push({ kind: "error", text: `no skill named "${name}"` })
     },
     listSessionsText: () => {
+      // Every mount creates a journal, so drop never-used "(empty session)"
+      // rows, except the current one (it needs a row for "(current)").
+      // `lastListing` is this same filtered array, so /resume <n> matches.
       lastListing = listSessions(join(props.cwd, ".butterfly", "sessions")).filter(
         (s) => s.title !== "(empty session)" || s.path === session.journal.path,
       )
@@ -2393,6 +2789,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         const width = Math.round((tokens / limit) * 30)
         return `  ${"█".repeat(Math.min(30, Math.max(tokens > 0 ? 1 : 0, width)))}`
       }
+      // Abbreviate paths here rather than in renderDoctorReport, which the
+      // headless `butterfly doctor` also uses and should print in full.
       return renderDoctorReport(
         {
           ...report,
@@ -2413,6 +2811,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       const { events } = SessionJournal.replay(session.journal.path)
       const runs = events.filter((e): e is HookRunEvent => e.type === "hook.run")
       const lines = hooks.map((hook, i) => {
+        // Most recent matching run wins; the journal is append-only.
         const last = [...runs]
           .reverse()
           .find((r) => r.event === hook.event && r.command === hook.command)
@@ -2498,6 +2897,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       push({ kind: "info", text: "planning…" })
       try {
+        // Text-only: the planner returns a JSON array and uses no tools
+        // (mirrors cli/loop.ts's "plan" case).
         const planRegistry = new ToolRegistry()
         const journal = SessionJournal.create(join(props.cwd, ".butterfly", "sessions"))
         const outcome = await runUserTurn(
@@ -2561,6 +2962,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
     },
     loopRun: async (allowDirty: boolean) => {
+      // Mutating (edits files, commits), so denied in plan mode rather than
+      // asked. /loop plan stays available: it only stages queue rows.
       if (planMode()) {
         push({
           kind: "error",
@@ -2581,15 +2984,26 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         })
         return
       }
+      // A loop run holds `busy` like a chat turn: typed input queues, and
+      // once the loop stops drainQueue() runs it as ordinary turns.
       setBusy(true)
       setTurnStartedAt(Date.now())
+      // Armed before the preflight await: Ctrl+C only interrupts when
+      // `busy() && (abort || loopAbort)`, otherwise it would quit the app.
       loopAbort = new AbortController()
+      // Refuse to run on a dirty tree (same check as cli/loop.ts): every
+      // green gate ends in `git add -A && git commit`, which would sweep the
+      // user's uncommitted work into a loop commit. `--allow-dirty` opts out.
+      // setBusy(true) runs first so input typed during this await queues.
+      // Fails open: only a git that reports dirt refuses.
       const gitStatus = await runCommand("git status --porcelain", {
         cwd: props.cwd,
         timeoutMs: GIT_STATUS_TIMEOUT_MS,
       })
       const dirty =
         gitStatus.exitCode === 0 && !gitStatus.timedOut ? dirtyLoopLines(gitStatus.stdout) : []
+      // Shared exit for "the loop never started": clear busy, disarm the
+      // interrupt handle and drain anything queued during the preflight.
       const abandonBeforeStart = (): void => {
         setBusy(false)
         loopAbort = undefined
@@ -2600,6 +3014,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         abandonBeforeStart()
         return
       }
+      // Ctrl+C during the preflight already printed "(loop interrupted...)".
       if (loopAbort.signal.aborted) {
         abandonBeforeStart()
         return
@@ -2614,6 +3029,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       applyAttention(decideAttention({ kind: "turn.start" }, attentionState(), attentionConfig()))
       let loopDetail: string | undefined
       let queue: WorkQueue | undefined
+      // Loop spend: progress.usage is cumulative, so each event credits only
+      // the delta into sessionCost; the $ figure moves during the run and a
+      // loop that throws still accounts for what it spent. modelCost() is
+      // read per event so a catalog that loads mid-loop prices the rest.
       let loopCredited = 0
       const creditLoopSpend = (usage: Usage) => {
         const credit = loopSpendCredit(usage, modelCost(), loopCredited)
@@ -2622,6 +3041,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       const cap = config().maxSpendUSD
       if (cap !== undefined) push({ kind: "info", text: spendCapNotice(cap) })
+      // Unattended runs must not hit "ask" rules (see LOOP_TUI_RULES).
       const rules = config().permissions ?? LOOP_TUI_RULES
       const asks = askBearingRules(rules)
       if (asks.length > 0) push({ kind: "info", text: askRulesWarning(asks) })
@@ -2647,6 +3067,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             setLoopCard((prev) => applyLoopEvent(prev ?? INITIAL_LOOP_CARD, event))
           },
         })
+        // Delta-based, so this only adds what a dropped event missed.
         creditLoopSpend(outcome.usage)
         loopDetail = `${outcome.stopReason}: ${outcome.closed} closed, ${outcome.blocked} blocked`
         push({ kind: "info", text: loopSummaryText(outcome) })
@@ -2679,9 +3100,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       try {
         lines.push(`handoff: ${readFileSync(queuePaths.handoff, "utf8").trim()}`)
       } catch {
+        // no handoff yet; nothing has run in this repo
       }
       return lines.join("\n")
     },
+    // Theme picker. setTheme switches the live tokens and persists the pin,
+    // which also stops auto light/dark detection from overriding it.
     pickTheme: () => {
       const names = listThemeNames(home)
       const current = config().theme ?? "dark"
@@ -2719,6 +3143,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         })
       }
     },
+    // /provider picker. Row markers: (current) for the active model's provider,
+    // [key] for a stored apiKey; computed fresh from `config()` on each open.
     pickProvider: () => {
       const ref = modelRef()
       let currentProvider: string | undefined
@@ -2746,6 +3172,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         onPick: (value) => actions.selectProvider(value),
       })
     },
+    // `/provider <name>` (exact or unique prefix) and the picker land here:
+    // providers needing a key open the key step, others go to the model picker.
     selectProvider: (nameOrPrefix) => {
       const trimmed = nameOrPrefix.trim().toLowerCase()
       const exact = PROVIDERS.find((p) => p.id === trimmed)
@@ -2779,6 +3207,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       let tree = ""
       let untracked: string[] | undefined
       events.forEach((event, index) => {
+        // Only turn-start checkpoints (no callId): /undo restores the whole turn.
         if (event.type === "turn.snapshot" && event.callId === undefined) {
           snapshotIndex = index
           tree = event.tree
@@ -2866,11 +3295,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         return
       }
       push({ kind: "info", text: "reviewing…" })
+      // Busy for the duration: a review ends in a journal append, so no turn
+      // may run concurrently. submit() queues anything typed meanwhile.
       setBusy(true)
       setTurnStartedAt(Date.now())
       try {
         const diffOpts = parseReviewArg(arg)
         const result = await runReview(props.cwd, taskToolOpts, diffOpts)
+        // Refused before git and the model: a user-fixable typo.
         if (result.rejected) {
           push({ kind: "error", text: result.rejected })
           return
@@ -2883,6 +3315,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           push({ kind: "info", text: result.summary })
           return
         }
+        // The summary joins the main conversation via the journal: the model
+        // sees it next turn and /resume rebuilds the card.
         const event = journalReview(session.journal, result, describeReviewScope(diffOpts))
         if (event) push(reviewMessage(event))
       } catch (error) {
@@ -2912,6 +3346,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           model: summaryModel(ref) ?? ref,
         })
         if (result.failure) {
+          // Never offer `git add -u` in a repo git can't read.
           push({ kind: "error", text: `git failed: ${describeGitFailure(result.failure)}` })
           return
         }
@@ -2938,6 +3373,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         }
         push({ kind: "info", text: `commit message:\n\n${result.message}` })
         const path = writeCommitMessageFile(props.cwd, result.message)
+        // The commit goes through the normal bash permission flow (staging
+        // above has its own y/n), including the [a]lways quick-add.
         const commitRules = config().permissions ?? TUI_DEFAULT_RULES
         const commitResult = await registry.run(
           "bash",
@@ -2979,9 +3416,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         return
       }
       push({ kind: "info", text: "writing handoff…" })
+      // The handoff turn ends in journal appends, so no other turn may run
+      // concurrently. submit() queues anything typed meanwhile.
       setBusy(true)
       setTurnStartedAt(Date.now())
       try {
+        // The handoff turn sends the whole conversation, so meter it like a
+        // normal turn and surface the runner's budget notices here.
         const result = await runHandoffTurn({
           provider: freshProvider(),
           journal: session.journal,
@@ -3000,9 +3441,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           return
         }
         const saved = saveHandoff(props.cwd, result.doc, result.truncated, session.journal)
+        // The doc is already journaled as message.assistant; mirror it into
+        // the live view the way /resume will render it.
         push({ kind: "assistant", text: result.doc })
         push({
           kind: "info",
+          // Mentions every route that consumes it, including just restarting
+          // butterfly, which the boot-time preload covers.
           text: `handoff saved — ${saved.path} (+ archived copy)${result.truncated ? " — truncated to fit the cap" : ""}\nthe next session preloads it: /new, a fresh \`butterfly\`, or \`butterfly run --resume-handoff\` (this session won't reload it)`,
         })
       } catch (error) {
@@ -3079,16 +3524,29 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
 
+  /**
+   * `source` separates the composer's own Enter from internal callers
+   * (drainQueue, /init) that pass text the user never typed into the box.
+   * Only composer submits run the dropped-chip check below.
+   */
   const submit = (value: string, source: "composer" | "internal" = "composer") => {
     if (picker()) return
     const rawTask = value.trim()
+    // /provider's key step is the one place a blank Enter means something
+    // ("keep the saved key"), so handle it before the empty-input bail.
     const keyStep = providerKeyStep()
     if (rawTask === "" && keyStep) {
       handleProviderKeySubmit(keyStep, "")
       return
     }
     if (rawTask === "" || pendingAsk()) return
+    // Expand paste chips and newline markers now. Everything downstream
+    // (history, transcript, command parsing, the model) sees only this
+    // expanded string.
     const task = expandComposerText(rawTask, pasteChips())
+    // Chips are matched by label text, so an edited label isn't expanded.
+    // That's correct (deleting a chip must work), but say so rather than
+    // dropping it silently.
     if (source === "composer") {
       const orphans = unreferencedChips(rawTask, pasteChips())
       if (orphans.length > 0) {
@@ -3100,6 +3558,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
     }
     if (busy()) {
+      // Never swallow input typed mid-turn: queue it and run it afterwards,
+      // in order. Chips are cleared below; numbering stays monotonic.
       setQueued([...queued(), task])
       setDraft("")
       setPasteChips(new Map())
@@ -3115,15 +3575,23 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       handleSetupSubmit(stage, task)
       return
     }
+    // /provider's key step: returns before the transcript push below, so
+    // the key is never journaled or echoed.
     if (keyStep) {
       handleProviderKeySubmit(keyStep, task)
       return
     }
 
+    // Prompt history (up/down), capped at 100. Stores the expanded text,
+    // since chip payloads are cleared and a bare label would dangle.
     setHistory([...history().slice(-99), task])
     historyPos = -1
 
     let modelTask = task
+    // With the suggestion list open, Enter runs the selected command, not
+    // the half-typed prefix. A custom command typed by its exact name
+    // outranks fuzzy/synonym rows, so discovery aids never hijack a
+    // user-defined command.
     const typedToken = task.startsWith("/")
       ? (task.slice(1).split(/\s+/)[0]?.toLowerCase() ?? "")
       : ""
@@ -3168,6 +3636,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     // Sending always returns the center pane to the main conversation.
     setAgentView(undefined)
     push({ kind: "user", text: task })
+    // Sending re-engages bottom-stick even if the view was scrolled up, once
+    // layout has measured the new row.
     setTimeout(() => {
       if (scroll && !scroll.isDestroyed) scroll.scrollTo(scroll.scrollHeight)
     }, 0)
@@ -3177,6 +3647,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       return
     }
 
+    // Image chips are optimistic; size/count caps are enforced here, once,
+    // via context/media.ts.
     const pendingImages = attachedImages()
     setAttachedImages([])
     let turnImages: ImageRef[] = []
@@ -3191,12 +3663,21 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
     let taskText = planMode() ? `${PLAN_PREFIX}\n\n${modelTask}` : modelTask
 
+    // @-mentions: attach each file as capped context and boost it in the
+    // skeleton ranking like a chat file.
     const mentions = expandMentions(props.cwd, modelTask)
     const mentionBlock = renderMentionBlock(mentions)
     if (mentionBlock !== "") {
       taskText = `${mentionBlock}\n\n${taskText}`
     }
     if (firstTurn) {
+      // /handoff preload: a pending `.butterfly/handoff.md` is loaded on the
+      // first turn of a new session (including app boot, since quitting
+      // after /handoff is the normal flow), then marked consumed. The notice
+      // is pushed into the transcript so the injection is visible.
+      // `journalPath` guards against re-injecting: if this session already
+      // journaled a session.handoff, the file is the one we just wrote and is
+      // left for the next session.
       const preload = preloadHandoff(props.cwd, taskText, {
         journalPath: session.journal.path,
       })
@@ -3208,6 +3689,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           mentionedIdents: mentionedWords,
           chatFiles: mentions.map((m) => m.path),
         })
+        // Whole-repo shape first (modules and dependencies), then ranked
+        // symbols, so the model starts oriented.
         const overview = moduleOverview(graph)
         const block = [overview, skeleton].filter((part) => part !== "").join("\n\n")
         if (block !== "") {
@@ -3215,12 +3698,16 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         }
       }
     } else if (graph) {
+      // Later turns: only the symbols/files this message names, if any (zero
+      // tokens otherwise).
       const focused = focusedSkeleton(graph, task)
       if (focused !== "")
         taskText = `${taskText}\n\n[code graph — where the names above live]\n${focused}`
     }
     firstTurn = false
     setBusy(true)
+    // Wall-clock start for this turn: used by the completion marker and the
+    // live elapsed display.
     setTurnStartedAt(Date.now())
     abort = new AbortController()
     const limit = ctxLimit()
@@ -3231,8 +3718,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     const attentionConfig = () => ({ notifications: config().notifications ?? true })
     applyAttention(decideAttention({ kind: "turn.start" }, attentionState(), attentionConfig()))
     let turnDetail: string | undefined
+    // Reset per turn so a previous provider error can't suppress messages
+    // for an unrelated failure.
     providerErrorRendered = false
     const turnRules = planMode() ? PLAN_RULES : (config().permissions ?? TUI_DEFAULT_RULES)
+    // Retraction anchor (see stepAnchor): this turn's live output starts
+    // after everything on screen, including the user's message.
     stepAnchor = messages().length
     runUserTurn(
       {
@@ -3256,6 +3747,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         // Without limits the runner still sends its own explicit cap, so a
         // provider default (Sarvam's 2048) never truncates replies.
         ...(!limit && outputLimit() ? { maxOutputTokens: outputLimit() } : {}),
+        // butterfly.jsonc's `retries` (0 disables); unset uses the runner's default.
         ...(config().retries !== undefined ? { retries: config().retries } : {}),
         ...(config().autoContinue !== undefined ? { autoContinue: config().autoContinue } : {}),
         ...(config().autoApproveReadOnly === false ? { autoApproveReadOnly: false } : {}),
@@ -3282,10 +3774,14 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           cacheWrite: u.cacheWrite + outcome.delegatedUsage.cacheWrite,
         }))
         void probeServedContext()
+        // Humanized token counts, suffixed with the turn's wall-clock duration.
         const start = turnStartedAt()
         const marker = turnMarker(outcome.usage, outcome.steps, Date.now() - (start ?? Date.now()))
+        // The status bar shows the freshest line; /status reads the marker.
         setStatus(marker)
         setLastTurnMarker(marker)
+        // Claimed vs verified (session/verify.ts): did a check run after the
+        // last edit, and how did it end? Read off the journal.
         const verification = describeVerification(
           verifyLatestTurn(SessionJournal.replay(session.journal.path).events),
         )
@@ -3299,6 +3795,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
           // Keep graph.db + project-map.md in step with what this turn edited.
           await codeGraph?.sync().catch(() => {})
           graph = graphDb()
+          // Self-evolution: durable facts go to memory, recurring procedures
+          // to skills. Uses small_model if configured, else the turn's model;
+          // the evolver skips turns with nothing to learn.
           if (config().memory?.autoReview !== false) {
             const evolved = await evolveAfterTurn({
               provider: freshProvider(),
@@ -3310,6 +3809,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               autoSkills: config().memory?.autoSkills !== false,
               approval: config().memory?.approval === true,
             })
+            // Evolver calls are real spend; count them in the session $ meter.
             const evolverCost = costForRef(summaryModel(ref) ?? ref)
             if (evolverCost) setSessionCost((c) => c + computeCostUSD(evolved.usage, evolverCost))
             const line = describeEvolution(evolved)
@@ -3319,6 +3819,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       })
       .catch((error: unknown) => {
         turnDetail = error instanceof Error ? error.message : String(error)
+        // The error event already rendered a structured card for this
+        // rejection (see providerErrorRendered); don't show it twice.
         if (!providerErrorRendered) {
           push({
             kind: "error",
@@ -3327,6 +3829,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         }
       })
       .finally(() => {
+        // Backstop for abnormal ends with no in-stream close signal: Ctrl+C
+        // aborts cleanly with no finish or error, and throws outside the
+        // provider loop (hooks, assemble()) skip them too. Idempotent.
         finalizeOpenThinking()
         applyAttention(
           decideAttention(
@@ -3349,6 +3854,19 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     }
   }
 
+  /**
+   * Paste chips, primary path: OpenTUI's bracketed-paste event. Global paste
+   * listeners run before the composer's own handling, so preventDefault()
+   * keeps the raw text out of the input buffer.
+   * A pasted image path is checked first (against draft + paste) and left
+   * unprevented so the image-chip flow handles it. Otherwise, text that
+   * clears the chip threshold becomes a chip.
+   * Not gated on busy() or pendingAsk(): the composer strips newlines, so an
+   * unchipped multi-line paste would be queued with its lines fused, and
+   * during an approval the composer is still focused and would receive the
+   * paste. Gated during setup and /provider's key step (raw key text needed)
+   * and while a picker or pager has the keyboard (the composer is unfocused).
+   */
   usePaste((event) => {
     if (setup() || picker() || pagerOpen() || providerKeyStep()) return
     const text = decodePasteBytes(event.bytes)
@@ -3365,6 +3883,18 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   let interruptArmed = false
   useKeyboard((key) => {
+    /**
+     * Ctrl+C is global and handled before every modal branch, so interrupt
+     * and quit work from anywhere (pager, picker, approval).
+     * A pending approval is resolved as "deny": the runner awaits ctx.ask(),
+     * and aborting the signal alone would leave the turn parked on it.
+     * Open modals stay open; closing the pager mid-read would be unhelpful.
+     * Tests: CliRenderer has its own Ctrl+C handler unless `exitOnCtrlC: false`
+     * is passed (startTui does; testRender defaults to true).
+     * `/loop run` is interrupted here too: `loopAbort` and `abort` are both
+     * aborted, and busy() guarantees at most one is live. `loopAbort` being
+     * set picks the message wording.
+     */
     if (key.ctrl && key.name === "c") {
       key.preventDefault()
       if (busy() && (abort || loopAbort) && !interruptArmed) {
@@ -3387,23 +3917,51 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       return
     }
+    /**
+     * Modal overlays (approval prompt, pickers) own the keystroke.
+     * Global key listeners run before the focused renderable's handlers, and
+     * closing a picker refocuses the composer in time to receive the same
+     * keypress (Enter would also submit, "y"/"n" would be typed).
+     * preventDefault() stops dispatch to renderables, making overlay and
+     * composer mutually exclusive for every picker at once.
+     */
+    /**
+     * ...but the pager outranks the approval prompt. The pager's keymap
+     * consumes ordinary typing (`/` search, `n`/`N`), so while it's open no
+     * key answers an ask; otherwise a search keystroke could approve a tool
+     * or persist an [a]lways rule. The ask box stays visible below the pager
+     * and says how to reach it (Esc closes the pager).
+     */
     const ask = pendingAsk()
     if (ask && !pagerOpen()) {
       key.preventDefault()
       if (key.name === "y") ask.resolve("allow")
       if (key.name === "n" || key.name === "escape") ask.resolve("deny")
+      // Quick-add: only offered when the ask carries a computed rule. Applies
+      // the rule, then allows the current call.
       if (key.name === "a" && ask.quickAdd) {
         applyQuickAdd(ask.quickAdd)
         ask.resolve("allow")
       }
       return
     }
+    // Transcript pager (Ctrl+O): toggled from anywhere except onboarding,
+    // never stacked on another modal. Same preventDefault gate as above.
     if (key.ctrl && key.name === "o" && !setup() && !providerKeyStep()) {
       key.preventDefault()
       if (pagerOpen()) closePager()
       else if (!picker()) openPager()
       return
     }
+    /**
+     * Ctrl+R: toggles full thinking text for collapsed thinking blocks. Not
+     * during onboarding or while the pager owns the keyboard. View-state only.
+     */
+    // Multi-pane keys (no Ctrl+B, the tmux prefix). Ctrl+X is a leader: then
+    // B toggles the sidebar, A opens the next agent, 0-9 jumps to main or
+    // agent N. Alt+Left/Right walk main <-> agents; Esc returns to main;
+    // Ctrl+T toggles the pinned plan. None fire over pickers, approvals, the
+    // pager or onboarding.
     const panelKeysLive =
       !setup() && !providerKeyStep() && !pagerOpen() && !picker() && !pendingAsk()
     if (panelKeysLive && leaderUntil > Date.now()) {
@@ -3465,6 +4023,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       setShellView(undefined)
       return
     }
+    // Shift+Tab cycles thinking effort for the next turn. Gated like Ctrl+R,
+    // and not while a picker, approval or the slash-command list owns the
+    // keyboard.
     if (
       key.shift &&
       key.name === "tab" &&
@@ -3490,6 +4051,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         if (key.name === "return" || key.name === "enter") {
           setPagerSearchActive(false)
         } else if (key.name === "escape") {
+          // Cancels only the search entry; a second Escape closes the pager.
           setPagerSearchActive(false)
           runPagerSearch("")
         } else if (key.name === "backspace") {
@@ -3582,20 +4144,43 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }
       return
     }
+    /**
+     * Ctrl+V image paste: best-effort and not preventDefault()'d. Most
+     * terminals deliver text pastes as bracketed paste, so an image paste
+     * can't be told apart in advance; saveClipboardImage returns null for
+     * text, so firing on every Ctrl+V is harmless.
+     */
     if (key.ctrl && key.name === "v" && !setup() && !busy() && !providerKeyStep()) {
       void actions.pasteImage()
     }
+    /**
+     * Multiline input: OpenTUI's `<input>` maps return/linefeed to submit and
+     * its value setter strips `/[\n\r]/g`, so a real "\n" can't survive the
+     * `draft` signal. NEWLINE_MARKER stands in for line breaks and is expanded
+     * at submit (see paste.ts). Both bindings preventDefault so the input
+     * doesn't submit.
+     */
     if (!setup() && !pagerOpen() && !picker() && !pendingAsk() && !providerKeyStep()) {
+      // Ctrl+J: a bare LF parses as { name: "linefeed", sequence: "\n" } under
+      // the legacy parser, and as { name: "j", ctrl: true } under the Kitty
+      // protocol. Check both.
       if (key.sequence === "\n" || key.name === "linefeed" || (key.ctrl && key.name === "j")) {
         key.preventDefault()
         setDraft(draft() + NEWLINE_MARKER)
         return
       }
+      // `\`+Enter: Enter always arrives as "return"/"kpenter", so a trailing
+      // backslash in the draft is the signal. Shift+Enter often never reaches
+      // the app, so it isn't relied on.
       if ((key.name === "return" || key.name === "kpenter") && draft().endsWith("\\")) {
         key.preventDefault()
         setDraft(`${draft().slice(0, -1)}${NEWLINE_MARKER}`)
         return
       }
+      // Atomic chip backspace: Backspace right after a chip label removes the
+      // whole label and its payload. Only when the cursor is actually at the
+      // end of the draft (via `composerRef`; if unattached, fall back to a
+      // normal backspace). An active selection takes priority.
       if (
         key.name === "backspace" &&
         composerRef !== undefined &&
@@ -3611,6 +4196,11 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         }
       }
     }
+    // Input history recall: takes priority while browsing; otherwise only
+    // from an empty composer so it never fights the command list.
+    // History stores expanded text, so toComposerDraft converts "\n" back to
+    // markers (the composer would strip them); recall + Enter then reproduces
+    // the entry exactly.
     if (!setup() && !busy() && !providerKeyStep() && (draft() === "" || historyPos >= 0)) {
       const entries = history()
       if (key.name === "up" && entries.length > 0) {
@@ -3643,6 +4233,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       if (key.name === "tab") {
         const command = matches[Math.min(cmdIndex(), matches.length - 1)]
         if (command) {
+          // Complete to the token that matched (name or alias), e.g.
+          // `/res` -> `/resume `.
           setDraft(`/${commandMatchLabel(command, draft())} `)
           setCmdIndex(0)
         }
@@ -3653,6 +4245,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       setSetup(null)
       return
     }
+    // /provider's key step: Esc cancels the whole flow. Clears draft() too so
+    // a partial key doesn't linger (it was never journaled), and pasteChips
+    // so no stale payload triggers a "chip no longer in the message" warning
+    // on the next submit.
     if (key.name === "escape" && providerKeyStep()) {
       setProviderKeyStep(null)
       setDraft("")
@@ -3672,6 +4268,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       }),
   )
   const viewedAgent = () => agents().find((a) => a.key === agentView())
+  // A running agent's journal grows between status events, so re-read it
+  // once a second while shown. Shells: running foreground bash calls plus
+  // background tasks from the registry, polled once a second (the signal
+  // only changes when a task starts or ends).
   const [bgShells, setBgShells] = createSignal<ShellView[]>([])
   let bgShellsKey = ""
   const bgPoll = setInterval(() => {
@@ -3765,6 +4365,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
 
   const mark = renderWordmark()
   const markMode = () => wordmarkMode(dimensions().width)
+  /**
+   * Any overlay that takes the keyboard replaces the big block-pixel mark
+   * rather than drawing on top of it, same as having messages.
+   */
   const anyOverlayOpen = () =>
     Boolean(picker()) ||
     Boolean(pendingAsk()) ||
@@ -3773,10 +4377,13 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
     cmdList().length > 0
   const showBigMark = () =>
     messages().length === 0 && !setup() && !anyOverlayOpen() && markMode() !== "plain"
+  /** Below ~77 cols `markMode()` is "plain": show the centered two-tone
+   * wordmark and tagline instead of an empty screen. */
   const showPlainWelcome = () =>
     messages().length === 0 && !setup() && !anyOverlayOpen() && markMode() === "plain"
   const markRows = () => [0, 1, 2, 3, 4, 5]
 
+  /** Context gauge: `ctx <used>[/<limit>] (<pct>%)`, humanized. */
   const ctxGauge = () => {
     const limit = ctxLimit()
     const used = ctxUsed()
@@ -3816,6 +4423,7 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         </Show>
       </box>
 
+      {/* Multi-pane body: [agents] | conversation | sidebar. */}
       <box flexDirection="row" flexGrow={1} minHeight={0}>
         <Show when={layout().agentsPane && !pagerOpen()}>
           <AgentsPane width={layout().agentsWidth} agents={agents()} selectedKey={agentView()} />
@@ -3969,6 +4577,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                     </box>
                   }
                 >
+                  {/* Narrow terminals: centered text wordmark and tagline instead
+                      of the big mark. */}
                   <Show
                     when={!showPlainWelcome()}
                     fallback={
@@ -3999,6 +4609,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                       stickyScroll
                       stickyStart="bottom"
                       flexGrow={1}
+                      // Reserve a gutter so the scrollbar never draws over text,
+                      // and theme its chrome.
                       viewportOptions={{ paddingRight: 2 }}
                       verticalScrollbarOptions={{
                         trackOptions: {
@@ -4009,6 +4621,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                     >
                       <For each={displayed()}>
                         {(message, index) => {
+                          // Inline <think> split, assistant messages only.
+                          // Reactive on the live channel so a streaming row
+                          // updates in place.
                           const inlineThinkMemo =
                             message.kind === "assistant"
                               ? createMemo(() => splitThink(liveText(message)))
@@ -4027,6 +4642,10 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                         displayed()[index() - 1],
                                       )}
                                       flexDirection="column"
+                                      // Actions sit behind one left rail,
+                                      // indented; prose stays flush. (borderStyle
+                                      // alone enables a full border, so it is only
+                                      // passed to actions.)
                                       {...(message.action
                                         ? {
                                             border: ["left" as const],
@@ -4096,6 +4715,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                                   </Show>
                                                 }
                                               >
+                                                {/* Bash command cell: $ header, dim output body,
+                                                    right-aligned exit badge. */}
                                                 <box flexDirection="column">
                                                   <box flexDirection="row">
                                                     <text fg={themeTokens().accent}>{"$ "}</text>
@@ -4125,6 +4746,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                               </Show>
                                             }
                                           >
+                                            {/* Todo card: only the latest todo result renders as a
+                                                card; earlier ones use the terse line above. */}
                                             <box
                                               border
                                               borderStyle="rounded"
@@ -4153,6 +4776,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                                           </Show>
                                         }
                                       >
+                                        {/* Provider error card: kind-specific headline plus a
+                                            capped dim detail (skipped if it repeats the headline). */}
                                         {(info: Accessor<ProviderErrorInfo>) => (
                                           <box flexDirection="column">
                                             <text fg={themeTokens().error}>{message.text}</text>
@@ -4271,6 +4896,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         />
       </Show>
 
+      {/* /loop run live card: folds LoopEvents into one line (iteration,
+          queue counts, last gate, tokens). Never shown with an approval
+          prompt, since loop iterations have no `ask` callback. */}
       <Show when={loopCard()}>
         {(card: Accessor<LoopCardState>) => (
           <box
@@ -4287,6 +4915,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         )}
       </Show>
 
+      {/* Approval prompt: the question on one line, answers muted below.
+          Long targets middle-ellipsize instead of wrapping. */}
       <Show when={pendingAsk()}>
         {(ask: Accessor<PendingAsk>) => (
           <box
@@ -4301,12 +4931,17 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
               <text fg={themeTokens().accent}>approve? </text>
               <text>{middleEllipsize(ask().text, Math.max(20, dimensions().width - 14))}</text>
             </box>
+            {/* While the pager owns the keyboard, none of these keys work;
+                say so. */}
             <Show
               when={!pagerOpen()}
               fallback={<text fg={themeTokens().warn}>close the pager (Esc) to answer</text>}
             >
               <box flexDirection="row">
                 <text fg={themeTokens().muted}>[y]es · [n]o</text>
+                {/* Quick-add preview: exactly the rule [a] would write,
+                    computed at ask time. Absent for plain confirmations or
+                    when planQuickAdd refused. */}
                 <Show when={ask().quickAdd}>
                   {(qa: Accessor<QuickAddOffer>) => (
                     <text fg={themeTokens().muted}>{` · [a]lways "${qa().pattern}"`}</text>
@@ -4318,6 +4953,9 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
         )}
       </Show>
 
+      {/* /provider's key step: reuses the composer below with a
+          keep-vs-replace hint. An overlay, not a full takeover, so the
+          transcript stays visible mid-session. */}
       <Show when={providerKeyStep()}>
         {(step: Accessor<{ provider: string; hasExisting: boolean }>) => (
           <box
@@ -4411,6 +5049,8 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
             })()}
           >
             {(row) => {
+              // Label with the token that matched (name or alias), noting the
+              // primary command when it differs.
               const label = () => commandMatchLabel(row.command, draft())
               const reason = () => commandMatchReason(row.command, draft())
               return (
@@ -4473,6 +5113,12 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
                 return
               }
             }
+            // High-rate paste fallback for terminals without bracketed
+            // paste. Only runs when usePaste didn't intercept the paste, so
+            // it's safe unconditionally (see paste.ts for the rate threshold).
+            // Gated like usePaste (not on busy()/pendingAsk()). The image
+            // attach above keeps its own !busy() gate since it commits an
+            // attachment to the next turn.
             if (!setup() && !picker() && !pagerOpen() && !providerKeyStep()) {
               const inserted = insertedSpan(previous, value)
               if (inserted.length >= PASTE_RATE_HEURISTIC_CHARS && shouldChip(inserted)) {
@@ -4514,13 +5160,17 @@ export function App(props: { cwd: string; config: ButterflyConfig; home?: string
       <box flexShrink={0} height={1} paddingLeft={1} flexDirection="row">
         <text fg={busy() ? themeTokens().accent : themeTokens().muted}>
           {busy()
-            ?
+            ? // elapsedText() re-renders each second via elapsedTick(). While a
+              // command runs, say so: "thinking" over a long build reads like a hang.
               `${SPINNER[spin()]} ${runningShellCount() > 0 ? `running ${runningShellCount() === 1 ? "a command" : `${runningShellCount()} commands`}… (Ctrl+X S to watch)` : "thinking…"} ${elapsedText()}  `
             : status()
               ? `${status()}  `
-              :
+              : // idle default: model, cwd and a hint
                 `${modelRef() ?? "not configured"}  ·  ${basename(props.cwd)}  ·  /help for commands`}
         </text>
+        {/* Meters (ctx gauge, $ spend, queued count) right-align via the
+            spacer; hidden below STATUS_METERS_MIN_WIDTH so they never
+            collide with the status text. */}
         <Show when={metersFitAt(dimensions().width)}>
           <box flexGrow={1} />
           <Show when={ctxGauge() !== ""}>
