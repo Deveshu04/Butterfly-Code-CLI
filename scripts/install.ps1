@@ -1,5 +1,5 @@
 # Installs the latest butterfly binary from GitHub Releases.
-#   irm https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/master/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/main/scripts/install.ps1 | iex
 # Options (environment): $env:BUTTERFLY_VERSION = "0.1.0"; $env:BUTTERFLY_INSTALL_DIR = "C:\tools\butterfly"
 $ErrorActionPreference = "Stop"
 

@@ -32,10 +32,10 @@ Other options:
 
 ```sh
 # macOS / Linux, prebuilt binary
-curl -fsSL https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/master/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/main/scripts/install.sh | sh
 
 # Windows (PowerShell), prebuilt binary
-irm https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/master/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/main/scripts/install.ps1 | iex
 ```
 
 Binaries for Linux, macOS and Windows are also attached to every

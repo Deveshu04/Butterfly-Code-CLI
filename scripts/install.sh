@@ -1,6 +1,6 @@
 #!/bin/sh
 # Installs the latest butterfly binary from GitHub Releases.
-#   curl -fsSL https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/master/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/main/scripts/install.sh | sh
 # Options (environment): BUTTERFLY_VERSION=0.1.0  BUTTERFLY_INSTALL_DIR=$HOME/.local/bin
 set -eu
 
