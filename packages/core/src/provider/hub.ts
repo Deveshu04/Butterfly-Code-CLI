@@ -153,6 +153,11 @@ export interface ResolvedModel {
 
 export type ModelResolver = (ref: string) => ResolvedModel
 
+/**
+ * Provider presets: Anthropic and Google native; everything else — OpenRouter,
+ * NVIDIA NIM, OpenAI, Ollama, LM Studio, custom endpoints — rides one
+ * createOpenAICompatible factory. Config overrides preset fields (docs/decisions/002-provider-port.md).
+ */
 export function createModelResolver(
   config: ButterflyConfig,
   env: Record<string, string | undefined> = process.env,

@@ -1,6 +1,10 @@
 import type { Usage } from "../session/events"
 import type { ProviderErrorInfo } from "./describe-error"
 
+/**
+ * The provider seam (docs/decisions/002-provider-port.md). Core speaks only these types; the AI SDK
+ * adapter implements the port.
+ */
 
 /** User-message content parts. Image `data` is base64, loaded at send time. */
 export type ChatMessagePart =

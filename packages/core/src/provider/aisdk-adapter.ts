@@ -15,6 +15,11 @@ import type {
   TurnRequest,
 } from "./port"
 
+/**
+ * ProviderPort implementation on the AI SDK (docs/decisions/002-provider-port.md). Tools carry no
+ * execute, so each streamTurn is exactly one model step. No SDK types leak
+ * out of this file.
+ */
 
 type AiUsage = {
   inputTokens?: number
