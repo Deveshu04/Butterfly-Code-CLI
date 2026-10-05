@@ -8,24 +8,45 @@ import {
 import { now, type SessionEvent } from "./events"
 import { GIT_TIMEOUT_MS, isGitRepo } from "./snapshot"
 
+/**
+ * /review: the harness gathers the diff itself and hands it to a read-only
+ * subagent via `runSubagentTurn`. The subagent's registry excludes bash; the
+ * diff is already in the prompt.
+ */
 
 export const REVIEW_DIFF_MAX_CHARS = 20_000
 
 export interface GatherDiffOptions {
+  /**
+   * Explicit revision/range for `git diff <range>`, e.g. "HEAD~3". Reaches a
+   * shell, so it must pass `validateRevisionRange` (gatherDiff re-checks).
+   */
   range?: string
   /** Only the index (`git diff --staged`). Ignored when `range` is set. */
   staged?: boolean
+  /** Set when the argument failed the revision allowlist; nothing runs. */
   rejected?: string
 }
 
+/** Max length of a /review revision argument. */
 export const REVISION_MAX_CHARS = 200
 
+/** At most a revision pair plus a spare; `git diff A B` is the widest real form. */
 const REVISION_MAX_TOKENS = 3
 
+/**
+ * git's revision grammar minus every shell metacharacter. Suffix operators
+ * (`~`, `^`, `:`, `@{...}`) stay in; `$`, quotes, `;`, `|`, `&`, redirects,
+ * parens, globs and similar are out.
+ */
 const REVISION_TOKEN = /^[A-Za-z0-9._/:@^~{}-]+$/
 
 export type RevisionVerdict = { ok: true; range: string } | { ok: false; reason: string }
 
+/**
+ * `/review <range>` is interpolated into a shell command, so anything that is
+ * not plainly a git revision is refused before any process starts.
+ */
 export function validateRevisionRange(raw: string): RevisionVerdict {
   const range = raw.trim()
   const refuse = (why: string): RevisionVerdict => ({
@@ -41,6 +62,7 @@ export function validateRevisionRange(raw: string): RevisionVerdict {
   for (const token of tokens) {
     // A leading "-" would smuggle git-diff options (--output= writes files).
     if (token.startsWith("-")) return refuse(`"${token}" looks like an option, not a revision`)
+    // The shell expands a leading "~"; mid-token (HEAD~3) it is inert.
     if (token.startsWith("~")) return refuse(`"${token}" starts with a shell tilde expansion`)
     if (!REVISION_TOKEN.test(token)) return refuse(`"${token}" is not valid git revision syntax`)
   }
@@ -49,8 +71,10 @@ export function validateRevisionRange(raw: string): RevisionVerdict {
 
 /** A git spawn that did not succeed — never silently equal to "clean tree". */
 export interface GitFailure {
+  /** The git command that failed. A user-typed range is validated first. */
   command: string
   exitCode: number
+  /** Head of stderr, capped. */
   stderr: string
   timedOut: boolean
 }
@@ -62,7 +86,12 @@ export interface GatheredDiff {
   truncated: boolean
   /** True when there is nothing to review: no repo, or a clean tree/index. */
   empty: boolean
+  /**
+   * Set when git itself failed (bad range, broken repo, timeout). Check
+   * before `empty`: an invalid revision is not a clean tree.
+   */
   failure?: GitFailure
+  /** Set when `validateRevisionRange` refused the range; check first. */
   rejected?: string
 }
 
@@ -87,8 +116,11 @@ export function describeGitFailure(failure: GitFailure): string {
     : `\`${failure.command}\` ${reason} — ${failure.stderr}`
 }
 
+/** Detects repos via the filesystem; `git rev-parse` can hang on Windows non-repos. */
 export async function gatherDiff(cwd: string, opts: GatherDiffOptions = {}): Promise<GatheredDiff> {
+  // Refusals come first; no process may start for a rejected argument.
   if (opts.rejected) return { diff: "", truncated: false, empty: true, rejected: opts.rejected }
+  // Re-validate: gatherDiff is also called directly, bypassing parseReviewArg.
   const verdict = opts.range === undefined ? undefined : validateRevisionRange(opts.range)
   if (verdict && !verdict.ok) {
     return { diff: "", truncated: false, empty: true, rejected: verdict.reason }
@@ -113,6 +145,7 @@ export async function gatherDiff(cwd: string, opts: GatherDiffOptions = {}): Pro
       runCommand("git diff", { cwd, timeoutMs: GIT_TIMEOUT_MS }),
       runCommand("git diff --staged", { cwd, timeoutMs: GIT_TIMEOUT_MS }),
     ])
+    // If either half fails, report it rather than reviewing half a diff.
     const failure = failureOf("git diff", unstaged) ?? failureOf("git diff --staged", staged)
     if (failure) return { diff: "", truncated: false, empty: true, failure }
     const parts: string[] = []
@@ -126,6 +159,10 @@ export async function gatherDiff(cwd: string, opts: GatherDiffOptions = {}): Pro
   return { diff: settled.text, truncated: settled.truncated, empty: false }
 }
 
+/**
+ * "" = unstaged+staged; "--staged" = index only; anything else is a revision
+ * range and is refused unless it passes the allowlist.
+ */
 export function parseReviewArg(arg: string): GatherDiffOptions {
   const trimmed = arg.trim()
   if (trimmed === "") return {}
@@ -134,6 +171,10 @@ export function parseReviewArg(arg: string): GatherDiffOptions {
   return verdict.ok ? { range: verdict.range } : { rejected: verdict.reason }
 }
 
+/**
+ * Human-readable "what was reviewed". Model-visible via assembly, so `range`
+ * only arrives here through the allowlist.
+ */
 export function describeReviewScope(opts: GatherDiffOptions): string {
   if (opts.range) return `git diff ${opts.range}`
   if (opts.staged) return "staged changes"
@@ -164,6 +205,11 @@ export interface ReviewResult {
   rejected?: string
 }
 
+/**
+ * Gathers the diff and, only when there is something to review, runs the
+ * read-only subagent. Pass the same subagent options the `task` tool uses
+ * (read/glob/grep/explore, no bash).
+ */
 export async function runReview(
   cwd: string,
   subagent: SubagentTurnOptions,
@@ -180,6 +226,7 @@ export async function runReview(
     }
   }
   if (gathered.failure) {
+    // Report the real git failure; no tokens spent.
     return {
       summary: `git failed: ${describeGitFailure(gathered.failure)}`,
       diffChars: 0,
@@ -215,6 +262,11 @@ export interface ReviewJournalSink {
   append(event: SessionEvent): void
 }
 
+/**
+ * Journal a finished review into the main session so the model sees it next
+ * turn and /resume can rebuild it. Only reviews that ran a subagent are
+ * journaled; the summary is already capped by `runSubagentTurn`.
+ */
 export function journalReview(
   journal: ReviewJournalSink,
   result: ReviewResult,

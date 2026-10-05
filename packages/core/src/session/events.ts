@@ -1,5 +1,9 @@
 import { z } from "zod"
 
+/**
+ * Journal event schemas. The JSONL journal is the source of truth (SQLite
+ * indexes and UI state are derived): a header line, then one event per line.
+ */
 
 export const JOURNAL_VERSION = 1
 
@@ -34,7 +38,15 @@ export const SessionEvent = z.discriminatedUnion("type", [
     type: z.literal("message.user"),
     id: z.string(),
     text: z.string(),
+    /**
+     * Harness-authored (the auto-continue nudge). The model sees a user
+     * message; UIs show a harness note and turn-boundary logic skips it.
+     */
     synthetic: z.boolean().optional(),
+    /**
+     * Image attachments as path + sha256 (never base64). Bytes are loaded and
+     * verified at send time, and only if the current model accepts images.
+     */
     images: z
       .array(z.object({ path: z.string(), mediaType: z.string(), sha256: z.string() }))
       .optional(),
@@ -44,6 +56,11 @@ export const SessionEvent = z.discriminatedUnion("type", [
     type: z.literal("message.assistant"),
     id: z.string(),
     text: z.string(),
+    /**
+     * Reasoning text, kept only for steps that made tool calls: some
+     * OpenAI-compatible thinking models reject a tool loop whose assistant
+     * messages drop their reasoning_content.
+     */
     reasoning: z.string().optional(),
   }),
   z.object({
@@ -70,6 +87,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
     summary: z.string(),
     /** Events with index < keepFromIndex are superseded by the summary. */
     keepFromIndex: z.number(),
+    /** The todo list as it stood at the cut (harness state, not model prose). */
     todos: z
       .array(
         z.object({
@@ -82,6 +100,11 @@ export const SessionEvent = z.discriminatedUnion("type", [
     files: z.array(z.string()).optional(),
   }),
   z.object({ ...base, type: z.literal("tool.pruned"), callIds: z.array(z.string()) }),
+  /**
+   * Worktree tree hash captured before a turn (no callId) or before a
+   * mutating tool call. `untracked` lists files already untracked then, so
+   * restore deletes only files created after the snapshot.
+   */
   z.object({
     ...base,
     type: z.literal("turn.snapshot"),
@@ -94,6 +117,11 @@ export const SessionEvent = z.discriminatedUnion("type", [
   }),
   /** Conversation rewound: events with index >= toIndex leave the timeline. */
   z.object({ ...base, type: z.literal("session.rewound"), toIndex: z.number() }),
+  /**
+   * A /review result, rendered by assembly as a labelled user block.
+   * `scope` is model-visible, so it is never free user text (ranges are
+   * validated first). diffChars/truncated/journalPath are UI-only.
+   */
   z.object({
     ...base,
     type: z.literal("session.review"),
@@ -105,6 +133,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
     /** The reviewing subagent's own isolated journal — full text lives there. */
     journalPath: z.string().optional(),
   }),
+  /** One hook command's execution, for /hooks stats. Not model-visible. */
   z.object({
     ...base,
     type: z.literal("hook.run"),
@@ -119,6 +148,11 @@ export const SessionEvent = z.discriminatedUnion("type", [
     /** stdout+stderr, capped — journal/UI observability only, never model-visible. */
     outputHead: z.string(),
   }),
+  /**
+   * Nested AGENTS.md fragments for files touched this session. Appended to
+   * the transcript, not the system prefix; a path is never reconsidered once
+   * loaded or skipped.
+   */
   z.object({
     ...base,
     type: z.literal("context.fragment"),
@@ -137,6 +171,10 @@ export const SessionEvent = z.discriminatedUnion("type", [
     skipped: z.array(z.string()).optional(),
     warning: z.string().optional(),
   }),
+  /**
+   * A handoff doc was saved. Bookkeeping only; the doc text is already in
+   * that turn's message.assistant.
+   */
   z.object({
     ...base,
     type: z.literal("session.handoff"),
@@ -147,6 +185,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
     chars: z.number(),
     truncated: z.boolean(),
   }),
+  /** A `bash background:true` spawn. Bookkeeping only; `id` is the /tasks id. */
   z.object({
     ...base,
     type: z.literal("bgtask.start"),
@@ -156,6 +195,7 @@ export const SessionEvent = z.discriminatedUnion("type", [
     logPath: z.string(),
     keepAlive: z.boolean(),
   }),
+  /** Terminal state of a background task (exit, kill, or reap on session exit). */
   z.object({
     ...base,
     type: z.literal("bgtask.end"),

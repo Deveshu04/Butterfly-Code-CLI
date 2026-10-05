@@ -38,9 +38,17 @@ export type RunnerEvent =
       meta?: unknown
     }
   | { type: "notice"; text: string }
+  /**
+   * Live, UI-only progress for a long-running tool call. Never journaled;
+   * superseded by newer progress for the same callId.
+   */
   | { type: "tool-progress"; callId: string; text: string }
   /** Structured live status of a subagent spawned by tool call `callId` (UI-only). */
   | { type: "subagent"; callId: string; update: SubagentUpdate }
+  /**
+   * The streaming attempt failed and will be retried; clients should drop
+   * what it emitted (none of it was journaled). Sent before the retry notice.
+   */
   | { type: "step-retracted"; attempt: number }
 
 export interface RunnerDeps {
@@ -72,14 +80,31 @@ export interface RunnerDeps {
   reasoning?: ReasoningEffort
   /** Pre-turn / pre-tool-call worktree snapshot (git tree hash or null). */
   createSnapshot?: (cwd: string) => Promise<string | null>
+  /** Untracked files at snapshot time, so restore can delete files created
+   * after it. Without it, snapshots skip that cleanup. */
   listUntracked?: (cwd: string) => Promise<string[]>
   /** USD/1M-token pricing (models.dev) — enables cost accounting. */
   cost?: ModelCost
   /** Pricing for `smallModel` (compaction). Absent: priced at `cost`. */
   smallModelCost?: ModelCost
+  /** Hard dollar ceiling for this turn; stops between steps. */
   maxSpendUSD?: number
+  /**
+   * Max retries for a transient provider failure (rate_limit, unavailable,
+   * timeout, network). Defaults to 3. Other kinds, or exhausted retries,
+   * throw `Provider error: ...`.
+   */
   retries?: number
+  /**
+   * How many times per turn to nudge a model that stopped with this turn's
+   * todos still open. Default 2; 0 disables.
+   */
   autoContinue?: number
+  /**
+   * Output-token cap sent with every step. Defaults to `limits.output`, else
+   * DEFAULT_MAX_OUTPUT_TOKENS; provider defaults can be tiny (Sarvam's is
+   * 2048). Clamped per step to what the context window has left.
+   */
   maxOutputTokens?: number
   /** Lifecycle hooks — pre.tool hooks can BLOCK a tool call. */
   hooks?: HookConfig[]
@@ -88,6 +113,11 @@ export interface RunnerDeps {
   /** UI stream hook — deltas, tool calls, tool results. */
   onEvent?: (event: RunnerEvent) => void
   signal?: AbortSignal
+  /**
+   * Only an explicit `true` sends image bytes; otherwise images are stripped
+   * at assembly time (the journal keeps them). Recompute per turn from the
+   * currently selected model.
+   */
   imageInputSupported?: boolean
 }
 
@@ -102,23 +132,43 @@ export interface TurnOutcome {
   usage: Usage
   steps: number
   budgetExceeded: boolean
+  /** Includes delegated spend. 0 when pricing is unknown. */
   costUSD: number
+  /**
+   * Tokens spent outside the main conversation (subagents, compaction).
+   * Counted toward the budgets but not part of `usage`, which feeds
+   * turn.completed and the context gauge.
+   */
   delegatedUsage: Usage
+  /**
+   * True when `deps.signal` fired mid-turn (during a tool call or a retry
+   * backoff). Every journaled tool.call still has a paired tool.result.
+   */
   interrupted: boolean
 }
 
 export const DEFAULT_MAX_STEPS = 50
 /** Cap on a tool-calling step's journaled reasoning (see message.assistant.reasoning). */
 export const MAX_JOURNALED_REASONING = 32_000
+/** Step-level retry cap when `deps.retries` is unset. */
 export const DEFAULT_RETRIES = 3
 /** Output cap when neither RunnerDeps.maxOutputTokens nor limits.output is known. */
 export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192
 /** Floor for the context-clamped output cap — below this a reply is useless. */
 const MIN_OUTPUT_TOKENS = 1_024
+/**
+ * "Reply was cut off, continue" nudges per turn. Counted separately from
+ * todo nudges so a cut-off reply is never stranded; a continuation that
+ * produces nothing ends the chain.
+ */
 export const MAX_LENGTH_CONTINUATIONS = 4
 /** A provider error that is about the output cap we sent, whatever the vendor calls it. */
 const OUTPUT_CAP_ERROR =
   /max[_ ]?(completion[_ ]|output[_ ]|new[_ ])?tokens|maxOutputTokens|num_predict|(completion|output) tokens/i
+/**
+ * Output caps a provider rejected, per model, for the life of the process:
+ * a number to use instead, or "omit" to send none.
+ */
 const learnedOutputCaps = new Map<string, number | "omit">()
 
 /** The largest plausible cap a cap-rejection message names below what we sent. */
@@ -132,12 +182,18 @@ export function capFromError(message: string, sent: number): number | "omit" {
 export const DEFAULT_AUTO_CONTINUE = 2
 const RETRY_BASE_MS = 2_000
 
+/**
+ * Full jitter within an exponential ceiling (2s, 4s, 8s, ...); `attempt` is
+ * 1-indexed. A provider-supplied Retry-After overrides the computation.
+ */
 export function computeRetryBackoffMs(attempt: number, retryAfterSec?: number): number {
   if (retryAfterSec !== undefined) return Math.max(0, Math.round(retryAfterSec * 1000))
   const ceiling = RETRY_BASE_MS * 2 ** (attempt - 1)
   return Math.round(Math.random() * ceiling)
 }
 
+/** Short reason for the retry notice. Not `describeProviderError`, which adds
+ * its own "retry in ~Ns" and would duplicate the notice's timing. */
 function retryReasonClause(info: ProviderErrorInfo | undefined): string {
   if (!info) return "provider error"
   switch (info.kind) {
@@ -154,6 +210,7 @@ function retryReasonClause(info: ProviderErrorInfo | undefined): string {
   }
 }
 
+/** Resolves `false` after `ms`, or `true` as soon as `signal` aborts. */
 function sleepAbortable(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
   return new Promise((resolve) => {
     if (signal?.aborted) {
@@ -172,14 +229,23 @@ function sleepAbortable(ms: number, signal: AbortSignal | undefined): Promise<bo
   })
 }
 
+/** Sentinel for "the signal won the race", distinct from any resolved value. */
 const ABORTED: unique symbol = Symbol("aborted")
 
+/**
+ * Races `promise` against `signal`, arming the abort side only once `armed`
+ * resolves (just before `tool.execute()`), so a pending approval keeps its
+ * own denial. After arming, an interrupt stops waiting and the tool's
+ * eventual result is discarded.
+ */
 function raceAbortAfterArmed<T>(
   promise: Promise<T>,
   armed: Promise<void>,
   signal: AbortSignal | undefined,
 ): Promise<T | typeof ABORTED> {
   if (!signal) return promise
+  // Remove the listener once settled so they don't pile up on the turn's
+  // signal; `settled` covers the tool winning before `armed` attaches one.
   let settled = false
   let removeAbortListener = (): void => {}
   const abortedAfterArm: Promise<typeof ABORTED> = armed.then(
@@ -196,6 +262,8 @@ function raceAbortAfterArmed<T>(
       }),
   )
   const race = Promise.race([promise, abortedAfterArm])
+  // Cleanup hangs off a separate branch: chaining `.finally()` would add a
+  // resolution step and shift tool-result timing relative to interrupts.
   race.then(
     () => {
       settled = true
@@ -237,6 +305,7 @@ export async function runUserTurn(
   opts?: RunUserTurnOptions,
 ): Promise<TurnOutcome> {
   const { journal, registry } = deps
+  // Every hook that runs is journaled so /hooks can show last-run stats.
   const journalHookRun = (run: HookRunRecord): void => {
     journal.append({ type: "hook.run", ...run, time: now() })
   }
@@ -264,6 +333,7 @@ export async function runUserTurn(
   let interrupted = false
   let warned75 = false
   let warned90 = false
+  /** Auto-continue bookkeeping (see planContinuation). */
   let continuations = 0
   let lengthContinuations = 0
   /** Prompt size of the previous step (provider-reported) — clamps the output cap. */
@@ -272,6 +342,7 @@ export async function runUserTurn(
   let overflowRecovered = false
   let lastNudgeTodos: string | undefined
   let todoTouched = false
+  /** Per-turn stuck detection: count identical (tool, args) calls. */
   const callFingerprints = new Map<string, number>()
   const REPEAT_LIMIT = 3
 
@@ -286,6 +357,7 @@ export async function runUserTurn(
       // snapshots are best-effort — never block a turn
     }
   }
+  // Images are journaled regardless of model; assemble() strips them per step.
   const attachedImages = opts?.images ?? []
   journal.append({
     type: "message.user",
@@ -294,6 +366,8 @@ export async function runUserTurn(
     ...(attachedImages.length > 0 ? { images: attachedImages } : {}),
     time: now(),
   })
+  // Notify only for this turn's attachments; assemble() handles the
+  // model-visible stand-in for all stripped images.
   if (attachedImages.length > 0 && deps.imageInputSupported !== true) {
     deps.onEvent?.({
       type: "notice",
@@ -305,6 +379,7 @@ export async function runUserTurn(
       () => {},
     )
   }
+  // The todo list follows the journal, not the shared state bag.
   {
     const { events } = SessionJournal.replay(journal.path)
     const todos = todosFromTimeline(foldTimeline(events).entries.map((entry) => entry.event))
@@ -332,6 +407,8 @@ export async function runUserTurn(
     cutToolCall: boolean,
   ): { text: string; notice: string; kind: "length" | "todo" } | null => {
     if (reason === "length") {
+      // A cut-off reply is not a deliberate stop: resume while each step
+      // produces something. Independent of autoContinue.
       if (lengthContinuations >= MAX_LENGTH_CONTINUATIONS || !produced) return null
       return {
         kind: "length",
@@ -348,6 +425,7 @@ export async function runUserTurn(
     const open = todos.filter((item) => item.status !== "completed")
     if (open.length === 0) return null
     const fingerprint = JSON.stringify(todos)
+    // No progress since the last nudge: the model likely has a reason to stop.
     if (fingerprint === lastNudgeTodos) return null
     lastNudgeTodos = fingerprint
     const list = open
@@ -365,6 +443,7 @@ export async function runUserTurn(
 
     const { header, events } = SessionJournal.replay(journal.path)
 
+    // Reconcile nested AGENTS.md files against the touched files every step.
     let timelineEvents: SessionEvent[] = events
     const agentsMd = reconcileAgentsMd(events, deps.cwd)
     if (agentsMd.fragments.length > 0 || agentsMd.skipped.length > 0) {
@@ -403,6 +482,8 @@ export async function runUserTurn(
     const toolCalls: ToolCallPart[] = []
     let finish: { reason: FinishReason; usage: Usage } | undefined
 
+    // Step-level retry. Nothing is journaled until the step succeeds, so a
+    // failed attempt can be re-run from scratch.
     const maxRetries = deps.retries ?? DEFAULT_RETRIES
     let abortedInBackoff = false
     let attempt = 0
@@ -424,6 +505,7 @@ export async function runUserTurn(
         signal: deps.signal,
       })) {
         if (event.type === "error") {
+          // Held back: retries get a notice; only the final failure is emitted.
           failure = event
           continue
         }
@@ -450,6 +532,9 @@ export async function runUserTurn(
 
       const kind = failure.info?.kind
 
+      // Context overflow (a huge tool result, a misreported window, a local
+      // server with a smaller num_ctx): prune + compact once per turn and
+      // re-run the step on the smaller transcript.
       if (kind === "context_length" && !overflowRecovered && !deps.signal?.aborted) {
         overflowRecovered = true
         const { events: current } = SessionJournal.replay(journal.path)
@@ -468,6 +553,7 @@ export async function runUserTurn(
         }).catch(() => null)
         if (compacted) addDelegated(compacted.usage, undefined, compactionPricing())
         if (victims.length > 0 || compacted) {
+          // Nothing to shrink: fall through to the final failure below.
           deps.onEvent?.({ type: "step-retracted", attempt })
           deps.onEvent?.({
             type: "notice",
@@ -480,6 +566,8 @@ export async function runUserTurn(
       }
 
       const retryable = kind !== undefined && RETRYABLE_ERROR_KINDS.has(kind)
+      // A provider refusing our output cap must not fail the turn: learn the
+      // ceiling it names (or send none) and re-run.
       const capMessage = `${failure.info?.message ?? ""} ${failure.info?.detail ?? ""} ${failure.message}`
       if (
         !retryable &&
@@ -500,10 +588,12 @@ export async function runUserTurn(
         continue
       }
       if (!retryable || attempt > maxRetries) {
+        // Final failure: keep the partial output; the error goes under it.
         deps.onEvent?.(failure)
         throw new Error(`Provider error: ${failure.message}`)
       }
 
+      // Tell the UI to drop this attempt's streamed output before the notice.
       deps.onEvent?.({ type: "step-retracted", attempt })
 
       const waitMs = computeRetryBackoffMs(attempt, failure.info?.retryAfterSec)
@@ -512,6 +602,7 @@ export async function runUserTurn(
         text: `retrying (${attempt}/${maxRetries}) in ${Math.round(waitMs / 1000)}s — ${retryReasonClause(failure.info)}`,
       })
       if (await sleepAbortable(waitMs, deps.signal)) {
+        // An abort during backoff is an interrupt, not a provider failure.
         interrupted = true
         abortedInBackoff = true
         break
@@ -532,6 +623,8 @@ export async function runUserTurn(
       type: "message.assistant",
       id: crypto.randomUUID(),
       text: stepText,
+      // Reasoning is journaled (capped) only for tool-calling steps, where
+      // providers need it back.
       ...(toolCalls.length > 0 && stepReasoning.trim() !== ""
         ? { reasoning: stepReasoning.slice(0, MAX_JOURNALED_REASONING) }
         : {}),
@@ -547,6 +640,11 @@ export async function runUserTurn(
       })
     }
 
+    /**
+     * Invariant: every journaled tool.call gets a tool.result, or providers
+     * reject the next request. Calls that will not run get a synthesized
+     * error result saying why.
+     */
     const abandonPendingCalls = (calls: ToolCallPart[], reason: string): void => {
       for (const call of calls) {
         const output = `[not executed — ${reason}]`
@@ -612,6 +710,7 @@ export async function runUserTurn(
     if (runCalls) {
       if (toolCalls.some((call) => isTodoCall(call.name))) todoTouched = true
       for (const call of toolCalls) {
+        // After an interrupt, abandon the rest of the batch without running it.
         if (interrupted || deps.signal?.aborted) {
           interrupted = true
           abandonPendingCalls([call], "interrupted")
@@ -622,6 +721,7 @@ export async function runUserTurn(
         const seen = (callFingerprints.get(fingerprint) ?? 0) + 1
         callFingerprints.set(fingerprint, seen)
 
+        // Resolved in beforeExecute, after any approval wait.
         let armExecuteRace: () => void = () => {}
         const armed = new Promise<void>((resolve) => {
           armExecuteRace = resolve
@@ -713,6 +813,7 @@ export async function runUserTurn(
             { onRun: journalHookRun },
           ).catch(() => ({ blocked: false as const, ran: 0 }))
           if ("feedback" in post && post.feedback) {
+            // Failing checks go back to the model inside the tool result.
             finalResult = {
               ...result,
               output: `${result.output}\n\n${post.feedback}\nFix these check failures before continuing.`,
@@ -740,9 +841,11 @@ export async function runUserTurn(
       }
 
       if (interrupted) {
+        // Settle immediately; skip prune/compaction so an interrupt resolves fast.
         break
       }
 
+      // Prune first, then compact only if this step neared the context ceiling.
       const { events: currentEvents } = SessionJournal.replay(journal.path)
       const victims = planPrune(currentEvents, {
         ...(deps.pruneWindowTokens !== undefined ? { windowTokens: deps.pruneWindowTokens } : {}),
@@ -762,6 +865,8 @@ export async function runUserTurn(
       }
       continue
     }
+    // Tool calls with a non-"tool-calls" finish still need results. The AI SDK
+    // ends aborted streams cleanly, so an abort also lands here.
     if (deps.signal?.aborted) interrupted = true
     const cutToolCall = finish?.reason === "length" && toolCalls.length > 0
     abandonPendingCalls(
@@ -771,6 +876,8 @@ export async function runUserTurn(
         : "the turn ended before this call ran",
     )
 
+    // Auto-continue: the model stopped but its plan has open items, or its
+    // reply was cut off. Bounded and progress-gated.
     if (!interrupted && (toolCalls.length === 0 || cutToolCall) && steps < maxSteps) {
       const produced = stepText.trim() !== "" || stepReasoning.trim() !== "" || toolCalls.length > 0
       const nudge = planContinuation(finish?.reason, produced, cutToolCall)
@@ -787,6 +894,7 @@ export async function runUserTurn(
         deps.onEvent?.({ type: "notice", text: nudge.notice })
         continue
       }
+      // Say why the turn stopped so the user knows to type "continue".
       if (finish?.reason === "length") {
         deps.onEvent?.({
           type: "notice",

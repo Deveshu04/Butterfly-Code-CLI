@@ -1,6 +1,13 @@
 import { basename } from "node:path"
 
+/**
+ * Pure attention logic: maps a moment (turn end, approval request) plus focus
+ * state and config to actions (notify / title / progress) with exact escape
+ * sequences. TUI and headless adapters only apply the actions. Progress uses
+ * OSC 9;4 (ConEmu/Windows Terminal), written raw since OpenTUI has no API.
+ */
 
+/** Terminal window focus. Headless has no window and counts as blurred. */
 export type FocusState = "focused" | "blurred"
 
 export type AttentionEvent =
@@ -30,6 +37,8 @@ export interface NotifyAction {
 
 export interface TitleAction {
   type: "title"
+  /** "busy — repo" | "idle — repo". Sanitized like a notify title: the repo
+   * directory name is untrusted and could inject BEL/ESC into the OSC. */
   text: string
   /** OSC 0 (xterm set-title), for adapters with no setTerminalTitle API. */
   osc: string
@@ -48,6 +57,8 @@ const NOTIFY_MESSAGE_MAX = 240
 const TITLE_MAX = 80
 const DEFAULT_NOTIFY_TITLE = "butterfly code"
 
+// Strips CSI sequences only; enough for notification text, not a full strip-ansi.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the ESC (\x1b) IS the thing being matched — this strips ANSI escapes out of notify text.
 const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
 // Control chars other than the ones we already normalize (CR/LF -> space).
 // biome-ignore lint/suspicious/noControlCharactersInRegex: the control-char range IS the thing being matched — this strips them out of notify text.
@@ -85,14 +96,23 @@ function makeNotify(rawMessage: string, rawTitle: string): NotifyAction {
 }
 
 function makeTitle(state: AttentionState, busy: boolean): TitleAction {
+  // basename(cwd) is untrusted and lands in an OSC 0 payload; sanitize it.
   const text = sanitize(`${busy ? "busy" : "idle"} — ${basename(state.cwd)}`, TITLE_MAX)
   return { type: "title", text, osc: buildTitleOsc(text) }
 }
 
+/**
+ * The bare "clear progress" sequence for synchronous cleanup paths (exit
+ * hooks, crash restore). Same bytes `turn.end` emits.
+ */
 export function clearProgressOsc(): string {
   return buildProgressOsc(0)
 }
 
+/**
+ * Notifications fire only when not focused, on turn end and approval
+ * requests. `notifications: false` disables notify actions only.
+ */
 export function decideAttention(
   event: AttentionEvent,
   state: AttentionState,

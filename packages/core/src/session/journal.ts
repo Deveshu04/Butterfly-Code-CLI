@@ -7,12 +7,21 @@ export interface ReplayedJournal {
   events: SessionEvent[]
 }
 
+/**
+ * Append-only JSONL session journal: header line first, then one typed event
+ * per line. Appends are synchronous since events are small.
+ */
 export class SessionJournal {
   private constructor(
     readonly path: string,
     readonly header: JournalHeader,
   ) {}
 
+  /**
+   * Journals whose header is not on disk yet (path -> header). The file is
+   * created lazily with the first event, so sessions that never run a turn
+   * leave nothing behind; until then replay/open report an empty session.
+   */
   private static pending = new Map<string, JournalHeader>()
 
   static create(dir: string, sessionId: string = crypto.randomUUID()): SessionJournal {

@@ -4,6 +4,8 @@ import { runCommand } from "../tool/shell"
 
 export const GIT_TIMEOUT_MS = 15_000
 
+/** Filesystem-only repo detection; `git rev-parse` can hang for minutes on
+ * some Windows setups outside a repo. */
 export function isGitRepo(cwd: string): boolean {
   let dir = cwd
   for (let i = 0; i < 40; i++) {
@@ -15,6 +17,11 @@ export function isGitRepo(cwd: string): boolean {
   return false
 }
 
+/**
+ * Turn-level file snapshots for /undo: a temporary git index captures the
+ * worktree as a tree object, so the user's staging area is untouched and no
+ * commits are made. Restore checks the tree back out.
+ */
 
 function tempIndexEnv(cwd: string): Record<string, string> {
   mkdirSync(join(cwd, ".butterfly"), { recursive: true })
@@ -34,6 +41,11 @@ export async function createSnapshot(cwd: string): Promise<string | null> {
   return /^[0-9a-f]{40,64}$/.test(hash) ? hash : null
 }
 
+/**
+ * Untracked paths relative to cwd, read from the real repo index. Uses `-z`
+ * because the default format C-quotes non-ASCII and special paths, which
+ * would not match real files.
+ */
 export async function listUntracked(cwd: string): Promise<string[]> {
   if (!isGitRepo(cwd)) return []
   const status = await runCommand("git status --porcelain -z --untracked-files=all", {
@@ -48,6 +60,11 @@ export async function listUntracked(cwd: string): Promise<string[]> {
     .filter((path) => path !== "")
 }
 
+/**
+ * Restore the worktree files recorded in a snapshot tree. With
+ * `opts.untracked`, files untracked now but not in that baseline were created
+ * after the snapshot and are deleted; without it nothing is deleted.
+ */
 export async function restoreSnapshot(
   cwd: string,
   tree: string,
@@ -72,6 +89,7 @@ export async function restoreSnapshot(
       try {
         rmSync(join(cwd, path), { force: true, recursive: true })
       } catch {
+        // best-effort; never fail the restore over a stray file
       }
     }
   }

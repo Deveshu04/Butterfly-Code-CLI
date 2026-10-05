@@ -1,5 +1,9 @@
 import { runCommand } from "../tool/shell"
 
+/**
+ * Lifecycle hooks: commands from config that the harness always runs.
+ * A failing pre.tool hook blocks the tool call, with its output as the reason.
+ */
 
 export const HOOK_EVENTS = [
   "session.start",
@@ -15,7 +19,9 @@ export interface HookConfig {
   /** Wildcard on the tool name (pre.tool/post.tool only), e.g. "edit" or "*". */
   match?: string
   command: string
+  /** post.tool only: on failure, append the output to the tool result. */
   feedback?: boolean
+  /** Disabled hooks are skipped entirely (no run, no journal event). */
   enabled?: boolean
 }
 
@@ -28,6 +34,7 @@ export interface HookRunResult {
   feedback?: string
 }
 
+/** One hook command's execution, journaled as a `hook.run` event. */
 export interface HookRunRecord {
   event: HookEvent
   command: string
@@ -38,6 +45,7 @@ export interface HookRunRecord {
   outputHead: string
 }
 
+/** Cap on the journaled stdout+stderr head. */
 const HOOK_OUTPUT_HEAD_CHARS = 500
 
 function wildcard(pattern: string, value: string): boolean {

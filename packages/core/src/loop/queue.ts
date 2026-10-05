@@ -2,6 +2,10 @@ import { Database } from "bun:sqlite"
 import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 
+/**
+ * Dependency-graph work queue in SQLite: hash IDs, typed edges, and ready()
+ * = open tasks with no open blockers. The queue is the loop's memory.
+ */
 
 export type TaskStatus = "open" | "claimed" | "closed" | "blocked"
 

@@ -1,6 +1,10 @@
 import { settle } from "../tool/settle"
 import { runCommand } from "../tool/shell"
 
+/**
+ * Verification gates: commands run serially, stopping at the first failure.
+ * A green gate is the loop's definition of done and becomes a git commit.
+ */
 
 export interface Gate {
   name: string

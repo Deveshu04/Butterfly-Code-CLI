@@ -42,6 +42,10 @@ export interface CompactionPlan {
   files: string[]
 }
 
+/**
+ * Files the edit tool changed in `entries`, plus those earlier compactions
+ * recorded. Exact and cumulative, unlike the model-written file list.
+ */
 function editedFiles(entries: TimelineEntry[]): string[] {
   const files = new Set<string>()
   const pending = new Map<string, string>()
@@ -59,6 +63,10 @@ function editedFiles(entries: TimelineEntry[]): string[] {
   return [...files]
 }
 
+/**
+ * Harness-authored sections appended to the summary: exact state the
+ * summarizer cannot be trusted to carry, since it sees truncated tool inputs.
+ */
 export function harnessRecord(
   plan: Pick<CompactionPlan, "todos" | "files">,
   codeMap?: (files: string[]) => string,
@@ -69,6 +77,8 @@ export function harnessRecord(
   }
   if (plan.files.length > 0) {
     sections.push(`## Files edited so far (harness record)\n${plan.files.join("\n")}`)
+    // The code graph re-states where symbols in the edited files live, so the
+    // next step need not re-read them to re-orient.
     const map = codeMap?.(plan.files).trim() ?? ""
     if (map !== "") sections.push(`## Code map of edited files (harness record)\n${map}`)
   }
@@ -80,6 +90,7 @@ export interface ModelLimits {
   output?: number
 }
 
+/** Overflow check: trigger before the window actually fills. */
 export function needsCompaction(lastTurnUsage: Usage, limits: ModelLimits): boolean {
   const reserve =
     limits.output === undefined ? OUTPUT_RESERVE_TOKENS : Math.min(limits.output, OUTPUT_RESERVE_TOKENS)
@@ -109,6 +120,10 @@ function entryTokens(entry: TimelineEntry): number {
   return estimateTokens(JSON.stringify(entry.event))
 }
 
+/**
+ * Keep the largest verbatim tail that fits keepTokens (at least the newest
+ * user turn) and summarize the rest. Null when there is nothing to cut.
+ */
 export function planCompaction(
   events: SessionEvent[],
   opts?: { keepTokens?: number },
@@ -117,6 +132,8 @@ export function planCompaction(
   const { entries } = foldTimeline(events)
   if (entries.length === 0) return null
 
+  // Cut points include assistant steps, so one long turn can still be
+  // compacted mid-turn.
   const boundaries = entries
     .filter(
       (entry) => entry.event.type === "message.user" || entry.event.type === "message.assistant",

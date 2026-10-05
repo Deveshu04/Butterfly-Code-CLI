@@ -13,10 +13,16 @@ export interface PruneOptions {
 export const DEFAULT_PRUNE_WINDOW_TOKENS = 40_000
 export const DEFAULT_PRUNE_MIN_CHARS = 500
 
+/**
+ * Tier-1 pruning: pick tool outputs that fell out of the recency window. The
+ * caller journals one tool.pruned event and the projector redacts them; the
+ * journal keeps the full output.
+ */
 export function planPrune(events: SessionEvent[], opts?: PruneOptions): string[] {
   const windowTokens = opts?.windowTokens ?? DEFAULT_PRUNE_WINDOW_TOKENS
   const minChars = opts?.minChars ?? DEFAULT_PRUNE_MIN_CHARS
   const { entries, pruned } = foldTimeline(events)
+  // Never evict the result that defines the current todo list.
   const plan = latestTodoResultId(entries.map((entry) => entry.event))
 
   const victims: string[] = []

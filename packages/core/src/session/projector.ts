@@ -22,6 +22,12 @@ export interface TimelineEntry {
   event: SessionEvent
 }
 
+/**
+ * Fold raw journal events into the effective timeline: compaction replaces
+ * the cut prefix with its summary, a rewind re-folds the raw prefix, and
+ * tool.pruned events fill the pruned set. Outputs are not redacted here,
+ * since planners need real sizes; project() redacts for rendering.
+ */
 export function foldTimeline(events: SessionEvent[]): {
   entries: TimelineEntry[]
   pruned: Set<string>
@@ -31,6 +37,11 @@ export function foldTimeline(events: SessionEvent[]): {
 
 type Fold = { entries: TimelineEntry[]; pruned: Set<string> }
 
+/**
+ * Fold of `events[0, length)`, memoized per top-level call. Each rewind
+ * re-folds its prefix, which contains earlier rewinds, so without the cache
+ * stacked rewinds cost exponential time. Cached arrays are never mutated.
+ */
 function foldPrefix(events: SessionEvent[], length: number, cache: Map<number, Fold>): Fold {
   const cached = cache.get(length)
   if (cached) return cached
@@ -40,6 +51,8 @@ function foldPrefix(events: SessionEvent[], length: number, cache: Map<number, F
   events.slice(0, length).forEach((event, index) => {
     switch (event.type) {
       case "session.compacted": {
+        // Keep AGENTS.md fragments from the cut region: reconcile dedups on
+        // the raw journal and would never re-offer them.
         const survivingFragments = entries.filter(
           (entry) => entry.index < event.keepFromIndex && entry.event.type === "context.fragment",
         )
@@ -54,13 +67,20 @@ function foldPrefix(events: SessionEvent[], length: number, cache: Map<number, F
         for (const id of event.callIds) pruned.add(id)
         break
       case "session.rewound": {
+        // Re-fold the raw prefix rather than filtering the folded list:
+        // compaction replaces the prefix with one late-indexed summary, so a
+        // filter would drop everything. Re-folding also un-compacts when
+        // rewinding past a compaction. The cut is always before this event,
+        // so recursion terminates.
         const cut = Math.min(event.toIndex, index)
+        // AGENTS.md fragments survive, as with compaction.
         const survivingFragments = entries.filter(
           (entry) => entry.index >= cut && entry.event.type === "context.fragment",
         )
         entries = [...foldPrefix(events, cut, cache).entries, ...survivingFragments]
         break
       }
+      // Bookkeeping events, never part of the model timeline.
       case "turn.snapshot":
         break
       case "hook.run":
@@ -80,6 +100,11 @@ function foldPrefix(events: SessionEvent[], length: number, cache: Map<number, F
   return result
 }
 
+/**
+ * Safe `session.rewound` target for a checkpoint. Per-call snapshots sit
+ * after their step's tool.call batch, so rewinding there would leave calls
+ * without results; walk back to the step's message.assistant instead.
+ */
 export function safeRewindIndex(events: SessionEvent[], checkpointIndex: number): number {
   const checkpoint = events[checkpointIndex]
   if (checkpoint?.type !== "turn.snapshot" || checkpoint.callId === undefined) {

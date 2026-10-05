@@ -1,5 +1,13 @@
 export type PermissionDecision = "allow" | "ask" | "deny"
 
+/**
+ * Rules shape:
+ *   { "*": "ask", "bash": { "git *": "allow" }, "edit": { ".env*": "deny" } }
+ * A tool entry is either a blanket decision or a map of wildcard patterns
+ * ("*" any sequence, "?" one char) over the tool's target (command / path).
+ * Resolution: longest matching pattern wins; on ties deny > ask > allow;
+ * unmatched targets fall through to the root "*" default, then to "ask".
+ */
 export type PermissionRules = Record<
   string,
   PermissionDecision | Record<string, PermissionDecision>
@@ -7,6 +15,7 @@ export type PermissionRules = Record<
 
 const SEVERITY: Record<PermissionDecision, number> = { deny: 2, ask: 1, allow: 0 }
 
+/** Exported for quick-add's overlap heuristic. */
 export function wildcardToRegex(pattern: string): RegExp {
   const escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&")
@@ -23,6 +32,11 @@ export function resolvePermission(
   return resolvePermissionWithSource(rules, tool, target).decision
 }
 
+/**
+ * Like resolvePermission, plus whether the decision came from a blanket rule
+ * (plain string entry, "*" pattern, or root default). Conveniences such as
+ * read-only auto-approval may only soften blanket asks.
+ */
 export function resolvePermissionWithSource(
   rules: PermissionRules,
   tool: string,

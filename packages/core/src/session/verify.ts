@@ -1,6 +1,10 @@
 import { resolveToolName } from "../tool/repair"
 import type { SessionEvent } from "./events"
 
+/**
+ * Claimed vs verified: reports from the journal whether a check ran after the
+ * last edit and how it ended. Shown to the user only, never to the model.
+ */
 
 /** Commands that count as verification (tests, builds, type checks, linters). */
 const CHECK_COMMAND =

@@ -5,6 +5,10 @@ import { runCommand } from "../tool/shell"
 import { type GitFailure, gatherDiff } from "./review"
 import { GIT_TIMEOUT_MS, isGitRepo } from "./snapshot"
 
+/**
+ * /commit: generate a conventional commit message from the staged diff,
+ * matching the project's recent history style. One model call, no agent loop.
+ */
 
 const DEFAULT_LOG_SUBJECT_COUNT = 20
 
@@ -15,6 +19,7 @@ export interface RecentLogOptions {
   count?: number
 }
 
+/** Newest-first `git log` subjects, used as the style example. */
 export async function recentLogSubjects(
   cwd: string,
   opts: RecentLogOptions = {},
@@ -49,9 +54,14 @@ export interface GenerateCommitMessageResult {
   diffChars: number
   /** True when the index is empty — the caller should offer to stage first. */
   nothingStaged: boolean
+  /**
+   * Set when git itself failed. Check before `nothingStaged`: offering to
+   * stage in a broken repo would fail again.
+   */
   failure?: GitFailure
 }
 
+/** Makes no model call when nothing is staged. */
 export async function generateCommitMessage(
   opts: GenerateCommitMessageOptions,
 ): Promise<GenerateCommitMessageResult> {
@@ -79,12 +89,14 @@ export async function generateCommitMessage(
   return { message: message.trim(), diffChars: gathered.diff.length, nothingStaged: false }
 }
 
+/** `git add -u`: stages tracked modifications/deletions only, never untracked files. */
 export async function stageAllTracked(cwd: string): Promise<boolean> {
   if (!isGitRepo(cwd)) return false
   const result = await runCommand("git add -u", { cwd, timeoutMs: GIT_TIMEOUT_MS })
   return result.exitCode === 0 && !result.timedOut
 }
 
+/** Writes the message to a scratch file for `git commit -F`, avoiding shell quoting. */
 export function writeCommitMessageFile(cwd: string, message: string): string {
   const path = join(cwd, ".butterfly", "COMMIT_EDITMSG")
   mkdirSync(dirname(path), { recursive: true })

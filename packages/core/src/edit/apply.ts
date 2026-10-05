@@ -81,6 +81,12 @@ function findTrimmedRegion(content: string, search: string): Region | null {
   return matches.length === 1 ? (matches[0] ?? null) : null
 }
 
+/**
+ * Re-indent the replacement after a whitespace-tolerant match, so the model's
+ * wrong indentation (semantic in Python) does not reach the file. Maps model
+ * indents to file indents from the matched lines (longest prefix wins); an
+ * inconsistent mapping leaves the text unchanged.
+ */
 function reindent(searchLines: string[], matched: string[], replacement: string): string {
   const map = new Map<string, string>()
   for (let j = 0; j < searchLines.length; j++) {
@@ -108,6 +114,11 @@ function reindent(searchLines: string[], matched: string[], replacement: string)
     .join("\n")
 }
 
+/**
+ * Fallback with no consistent indent mapping, for same-shape edits only:
+ * replacement line k takes matched line k's indent when the model left that
+ * line's indent unchanged.
+ */
 function reindentByPosition(searchLines: string[], matched: string[], replacement: string): string {
   const lines = replacement.split("\n")
   if (lines.length !== searchLines.length) return replacement
@@ -148,6 +159,11 @@ const HINT_MAX_SHOWN = 12
 const HINT_MAX_LINE_CHARS = 200
 const HINT_MIN_SCORE = 0.5
 
+/**
+ * "Did you mean" for a failed search: the most similar file window, quoted
+ * with line numbers, so the model can fix the edit without re-reading the
+ * file. Skipped for huge files and long searches.
+ */
 export function closestMatchHint(content: string, search: string): string | undefined {
   const fileLines = content.split("\n")
   const searchLines = search
@@ -189,6 +205,12 @@ function isCrlf(content: string): boolean {
   return crlf === content.split("\n").length - 1
 }
 
+/**
+ * Search/replace application: exact match first, then a whitespace-tolerant
+ * line-wise fallback that re-indents the replacement. Errors are specific
+ * because they are the model's correction signal. CRLF files are edited in
+ * LF space and converted back, since models emit "\n".
+ */
 export function applyEdit(
   content: string,
   oldString: string,

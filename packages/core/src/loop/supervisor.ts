@@ -37,8 +37,12 @@ export interface LoopDeps {
   /** Where handoff.json lives (loop.jsonl sits beside it). */
   handoffPath: string
   smallModel?: string
+  /** Step-level provider retry cap per iteration; defaults to the runner's 3. */
   retries?: number
+  /** Live progress: the same events written to loop.jsonl. */
   onEvent?: (event: LoopEvent) => void
+  /** Interrupt, checked between iterations and passed to each turn. A task
+   * claimed when it fires stays claimed until the next `loop run`. */
   signal?: AbortSignal
   /** Commit hook override (tests). Defaults to git add+commit. */
   commit?: (title: string) => Promise<boolean>
@@ -52,12 +56,15 @@ export interface LoopOutcome {
   usage: Usage
 }
 
+/** Queue snapshot attached to most LoopEvents (one cheap query), so callers
+ * never fold deltas. */
 export interface LoopProgress {
   counts: Record<TaskStatus, number>
   usage: Usage
   iterations: number
 }
 
+/** Live progress events, mirroring what logEvent() writes to loop.jsonl. */
 export type LoopEvent =
   | { type: "loop.started"; model: string }
   | { type: "task.claimed"; id: string; title: string; progress: LoopProgress }
@@ -127,6 +134,12 @@ async function defaultCommit(cwd: string, title: string): Promise<boolean> {
   return result.exitCode === 0
 }
 
+/**
+ * The LLM-free supervisor: claims one ready task per iteration, runs it in a
+ * fresh context primed with handoff + task spec, gates serially, commits on
+ * green, and requeues with feedback or blocks on red. Stops on a drained
+ * queue, budget (predictive), max iterations, or no progress.
+ */
 export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
   const maxIterations = deps.maxIterations ?? DEFAULT_LOOP_ITERATIONS
   const totals: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
@@ -178,6 +191,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
     logEvent(deps.handoffPath, { type: "task.claimed", id: task.id, title: task.title })
     deps.onEvent?.({ type: "task.claimed", id: task.id, title: task.title, progress: progress() })
 
+    // Fresh context per iteration.
     const journal = SessionJournal.create(deps.sessionsDir)
     const handoff = readHandoff(deps.handoffPath)
     let turnTokens = 0
@@ -213,6 +227,7 @@ export async function runLoop(deps: LoopDeps): Promise<LoopOutcome> {
     lastIterationTokens = turnTokens
 
     if (deps.signal?.aborted) {
+      // Leave the task "claimed" so the stale-claim reset picks it up later.
       stopReason = "interrupted"
       break
     }

@@ -1,3 +1,16 @@
+/**
+ * Provably read-only shell commands, which can skip the approval prompt.
+ * A command qualifies only if all of these hold:
+ * - it tokenizes with no shell feature that can run or redirect anything:
+ *   no `$` (expansion/substitution), backticks, redirections, subshells,
+ *   braces, background `&`, backslash escapes, or newlines;
+ * - it is simple commands joined by `|`, `||`, `&&` or `;` only;
+ * - every command is on the allowlist below and passes its argument check
+ *   (no `find -exec`, `rg --pre`, `sort -o`, `git -c`, `--output=`, …);
+ * - no argument names a `.env` file (secrets stay behind an explicit ask).
+ *
+ * Anything else falls back to the normal permission decision.
+ */
 
 type Token = { kind: "word"; value: string } | { kind: "op"; value: string }
 

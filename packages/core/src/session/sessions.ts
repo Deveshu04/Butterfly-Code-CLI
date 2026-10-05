@@ -3,6 +3,7 @@ import { join } from "node:path"
 import type { SessionEvent } from "./events"
 import { SessionJournal } from "./journal"
 
+/** Session discovery and transcript export, as pure folds over journals. */
 
 export interface SessionSummary {
   id: string
@@ -46,6 +47,7 @@ export function listSessions(dir: string, limit = 20): SessionSummary[] {
   return summaries.sort((a, b) => b.modified - a.modified).slice(0, limit)
 }
 
+/** Fork a session: a new journal with a new id and identical history. */
 export function forkSession(journalPath: string, dir: string): string {
   const { header, events } = SessionJournal.replay(journalPath)
   const forked = SessionJournal.create(dir)
@@ -54,11 +56,20 @@ export function forkSession(journalPath: string, dir: string): string {
   return forked.path
 }
 
+/** Live user-prompt heading. The pager matches this prefix for prompt jumps. */
 const PROMPT_HEADING = "## ❯ "
+/**
+ * Heading for undone prompts: labels every undone turn and keeps them out of
+ * the pager's prompt-jump targets.
+ */
 const UNDONE_PROMPT_HEADING = "## (undone) ❯ "
 const UNDONE_OPEN = "> _undone — /undo rewound the following out of the conversation:_"
 const UNDONE_CLOSE = "> _end of undone_"
 
+/**
+ * Indices of events removed by a `session.rewound`: one at index R with
+ * `toIndex` T removes [T, R). Overlapping rewinds union.
+ */
 function undoneIndices(events: SessionEvent[]): Set<number> {
   const undone = new Set<number>()
   events.forEach((event, index) => {
@@ -89,6 +100,11 @@ function renderEvent(event: SessionEvent, undone: boolean): string[] {
   }
 }
 
+/**
+ * Render a journal as Markdown (for /export and the Ctrl+O pager). Uses the
+ * raw replay, not the projector fold, so search reaches pruned and compacted
+ * turns. Undone turns are kept but fenced and labelled.
+ */
 export function exportSessionMarkdown(journalPath: string): string {
   const { header, events } = SessionJournal.replay(journalPath)
   const lines: string[] = [
@@ -101,6 +117,8 @@ export function exportSessionMarkdown(journalPath: string): string {
   let inUndone = false
   events.forEach((event, index) => {
     const rendered = renderEvent(event, undone.has(index))
+    // Region markers follow what actually prints, so bookkeeping-only regions
+    // never open an empty fence.
     if (undone.has(index)) {
       if (rendered.length === 0) return
       if (!inUndone) {

@@ -5,6 +5,11 @@ export { renderTodos } from "../tool/tools/todo"
 
 import type { SessionEvent } from "./events"
 
+/**
+ * The todo list is derived from the journal so it survives resume, fork,
+ * rewind, compaction and pruning: the latest successful todo call in the
+ * folded timeline wins, and a compaction event carries the list at its cut.
+ */
 /** True for "todo" and the names the registry repairs to it ("TodoWrite"). */
 export const isTodoCall = (name: string): boolean => resolveToolName(name, ["todo"]) === "todo"
 
