@@ -14,10 +14,12 @@ export interface LanguageSpec {
   id: string
   /** Grammar wasm filename inside @vscode/tree-sitter-wasm. */
   grammar: string
+  /** Which tags query to use (some languages share). */
   tags: string
   extensions: string[]
 }
 
+/** Supported languages. Add one with a grammar wasm plus a tags query file. */
 export const LANGUAGES: LanguageSpec[] = [
   {
     id: "typescript",
@@ -56,6 +58,8 @@ export function tagsQueryPath(spec: LanguageSpec): string {
   return join(import.meta.dir, "queries", `${spec.tags}-tags.scm`)
 }
 
+// Compiled-exe embedding: `bun build --compile` only embeds files imported
+// with a string-literal specifier, so each asset gets its own literal import.
 
 type AssetImporter = () => Promise<{ default: string }>
 
@@ -88,6 +92,11 @@ const TAGS_IMPORTERS: Record<string, AssetImporter> = {
 const RUNTIME_WASM_IMPORTER: AssetImporter = () =>
   import("web-tree-sitter/web-tree-sitter.wasm", { with: { type: "file" } })
 
+/**
+ * Extracts an embedded asset to the version-keyed cache. Returns undefined
+ * (never throws) outside a compiled exe or on failure, so callers fall back
+ * to require.resolve.
+ */
 async function resolveEmbedded(
   name: string,
   importer: AssetImporter | undefined,
@@ -97,6 +106,7 @@ async function resolveEmbedded(
     const mod = await importer()
     const bytes = new Uint8Array(await Bun.file(mod.default).arrayBuffer())
     return await extractEmbeddedAsset(
+      // `size` lets the cache check replace a truncated extraction.
       { name, size: bytes.byteLength, bytes: () => bytes },
       { cacheRoot: defaultAssetCacheRoot(), version: VERSION },
     )
@@ -105,16 +115,19 @@ async function resolveEmbedded(
   }
 }
 
+/** Grammar wasm path: embedded copy in a compiled exe, else require.resolve. */
 export async function resolveGrammarWasmPath(spec: LanguageSpec): Promise<string> {
   return (
     (await resolveEmbedded(spec.grammar, GRAMMAR_IMPORTERS[spec.grammar])) ?? grammarWasmPath(spec)
   )
 }
 
+/** web-tree-sitter runtime wasm path, resolved the same way. */
 export async function resolveRuntimeWasmPath(): Promise<string> {
   return (await resolveEmbedded("web-tree-sitter.wasm", RUNTIME_WASM_IMPORTER)) ?? runtimeWasmPath()
 }
 
+/** Tags query path, resolved the same way. */
 export async function resolveTagsQueryPath(spec: LanguageSpec): Promise<string> {
   return (
     (await resolveEmbedded(`${spec.tags}-tags.scm`, TAGS_IMPORTERS[spec.tags])) ??
