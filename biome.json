@@ -1,4 +1,7 @@
 {
+  "files": {
+    "includes": ["**", "!**/dist", "!**/node_modules", "!**/THIRD_PARTY_NOTICES.md"]
+  },
   "formatter": {
     "enabled": true,
     "indentStyle": "space",
