@@ -12,7 +12,7 @@
     },
     "packages/cli": {
       "name": "@butterfly/cli",
-      "version": "0.0.1",
+      "version": "0.1.0",
       "bin": {
         "butterfly": "./src/index.ts",
       },
@@ -23,7 +23,7 @@
     },
     "packages/core": {
       "name": "@butterfly/core",
-      "version": "0.0.1",
+      "version": "0.1.0",
       "dependencies": {
         "@ai-sdk/anthropic": "4.0.27",
         "@ai-sdk/google": "4.0.31",
@@ -35,13 +35,10 @@
         "web-tree-sitter": "0.26.11",
         "zod": "^4.4.3",
       },
-      "optionalDependencies": {
-        "@vscode/ripgrep-win32-x64": "1.18.0",
-      },
     },
     "packages/tui": {
       "name": "@butterfly/tui",
-      "version": "0.0.1",
+      "version": "0.1.0",
       "dependencies": {
         "@butterfly/core": "workspace:*",
         "@opentui/core": "0.4.5",

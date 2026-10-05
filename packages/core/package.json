@@ -17,8 +17,5 @@
     "ai": "7.0.48",
     "web-tree-sitter": "0.26.11",
     "zod": "^4.4.3"
-  },
-  "optionalDependencies": {
-    "@vscode/ripgrep-win32-x64": "1.18.0"
   }
 }

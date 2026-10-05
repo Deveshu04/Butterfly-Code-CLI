@@ -11,7 +11,7 @@ declare module "*.scm" {
   export default path
 }
 
-declare module "*.exe" {
+declare module "butterfly:ripgrep" {
   const path: string
   export default path
 }

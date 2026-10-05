@@ -20,17 +20,17 @@ export const grepInput = z.object({
 
 export const GREP_MAX_MATCHES = 100
 
-const EMBEDDED_RIPGREP_IMPORTERS: Record<string, () => Promise<{ default: string }>> = {
-  "win32-x64": () => import("@vscode/ripgrep-win32-x64/bin/rg.exe", { with: { type: "file" } }),
-}
-
+/** Extracts the ripgrep binary embedded by scripts/build-exe.ts (which resolves
+ * the virtual module "butterfly:ripgrep" to the build machine's rg) to the
+ * asset cache. Undefined outside a compiled exe or when nothing was embedded. */
 async function resolveEmbeddedRipgrep(): Promise<string | undefined> {
   if (!isCompiledExecutable()) return undefined
-  const importer = EMBEDDED_RIPGREP_IMPORTERS[`${process.platform}-${process.arch}`]
-  if (!importer) return undefined
   try {
-    const mod = await importer()
+    const mod = (await import("butterfly:ripgrep", { with: { type: "file" } })) as {
+      default: string
+    }
     const bytes = new Uint8Array(await Bun.file(mod.default).arrayBuffer())
+    if (bytes.byteLength === 0) return undefined
     return await extractEmbeddedAsset(
       // `size` lets the cache check detect a truncated extraction.
       {

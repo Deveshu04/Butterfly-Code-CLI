@@ -17,10 +17,21 @@ async function main(): Promise<void> {
     default: BunPlugin
   }
 
+  // The grep tool imports the virtual module "butterfly:ripgrep"; point it at
+  // this platform's ripgrep binary so the bundler embeds it.
+  const coreRequire = createRequire(join(ROOT, "packages", "core", "package.json"))
+  const { rgPath } = (await import(coreRequire.resolve("@vscode/ripgrep"))) as { rgPath: string }
+  const ripgrepPlugin: BunPlugin = {
+    name: "butterfly-ripgrep",
+    setup(build) {
+      build.onResolve({ filter: /^butterfly:ripgrep$/ }, () => ({ path: rgPath }))
+    },
+  }
+
   const result = await Bun.build({
     entrypoints: [join(ROOT, "packages", "cli", "src", "index.ts")],
     target: "bun",
-    plugins: [solidTransformPlugin],
+    plugins: [solidTransformPlugin, ripgrepPlugin],
     compile: {
       outfile: OUT_FILE,
     },
