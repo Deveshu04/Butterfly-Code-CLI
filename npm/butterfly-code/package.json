@@ -1,0 +1,45 @@
+{
+  "name": "butterfly-code",
+  "version": "0.1.0",
+  "description": "A terminal coding agent with a token-efficient harness: works well even on mid-tier and local models.",
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "cli",
+    "tui",
+    "llm",
+    "terminal",
+    "openrouter",
+    "ollama",
+    "anthropic"
+  ],
+  "homepage": "https://github.com/Deveshu04/Butterfly-Code-CLI#readme",
+  "bugs": "https://github.com/Deveshu04/Butterfly-Code-CLI/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Deveshu04/Butterfly-Code-CLI.git"
+  },
+  "license": "Apache-2.0",
+  "author": "Deveshu Pathak",
+  "type": "commonjs",
+  "bin": {
+    "butterfly": "bin/butterfly.js"
+  },
+  "files": [
+    "bin/butterfly.js",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "butterfly-code-darwin-arm64": "0.1.0",
+    "butterfly-code-darwin-x64": "0.1.0",
+    "butterfly-code-linux-arm64": "0.1.0",
+    "butterfly-code-linux-x64": "0.1.0",
+    "butterfly-code-windows-x64": "0.1.0"
+  }
+}

@@ -1,0 +1,30 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `butterfly --version`
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: OS, terminal and model
+      placeholder: "Windows 11, Windows Terminal, openrouter/qwen/qwen3-coder"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Steps to reproduce, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Remove API keys and anything private.

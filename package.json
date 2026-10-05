@@ -1,5 +1,6 @@
 {
-  "name": "butterfly-code",
+  "name": "butterfly-code-workspace",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "workspaces": [

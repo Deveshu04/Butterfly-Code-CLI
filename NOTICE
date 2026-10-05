@@ -1,0 +1,8 @@
+Butterfly Code
+Copyright 2026 Deveshu Pathak and the Butterfly Code contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Distributed binaries bundle third-party open-source components (for example
+ripgrep, tree-sitter grammars and the OpenTUI runtime). Each remains under its
+own license; see THIRD_PARTY_NOTICES.md.
