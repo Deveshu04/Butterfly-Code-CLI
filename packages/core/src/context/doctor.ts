@@ -5,12 +5,20 @@ import { HOOK_EVENTS } from "../session/hooks"
 import { SessionJournal } from "../session/journal"
 import { estimateTokens } from "./tokens"
 
+/**
+ * /doctor: a read-only context audit with no model calls. Config lint
+ * re-reads butterfly.jsonc from disk so it still works when the live
+ * session's config failed validation.
+ */
 
 export interface DoctorPrefixBreakdown {
+  /** Frozen system prefix (family prompt, env, memory, skills). */
   systemTokens: number
   memoryTokens: number
   skillsTokens: number
   graphSkeletonTokens: number
+  /** False only when the caller knows the graph index was never built, so
+   * a never-synced repo is not mistaken for an empty one. */
   graphAvailable: boolean
 }
 
@@ -18,8 +26,11 @@ export interface DoctorJournalInfo {
   path?: string
   events: number
   bytes: number
+  /** tool.pruned events this session. */
   prunedEvents: number
+  /** Total tool results redacted across those events. */
   prunedCalls: number
+  /** session.compacted events this session. */
   compactions: number
 }
 
@@ -46,11 +57,14 @@ export interface DoctorLintIssue {
 export interface DoctorReport {
   prefix: DoctorPrefixBreakdown
   journal: DoctorJournalInfo
+  /** Connected servers, with measured eager-vs-index savings. */
   mcp: DoctorMcpServer[]
+  /** Servers in config but not connected, so nothing was measured. */
   mcpConfigured: string[]
   configLint: DoctorLintIssue[]
 }
 
+/** Structural subset of ModelsCatalog. */
 export interface DoctorCatalog {
   lookup(providerId: string, modelId: string): unknown
 }
@@ -64,19 +78,27 @@ export interface DoctorDeps {
   cwd: string
   home: string
   env?: Record<string, string | undefined>
+  /** Frozen system prefix text ("" if no model). */
   system: string
+  /** Project and user memory, concatenated. */
   memoryText: string
   skillsIndexText: string
+  /** Rendered graph skeleton; empty or undefined if the graph is not ready. */
   graphSkeletonText?: string
   /** False when the caller knows the graph index was never built. Defaults to true. */
   graphAvailable?: boolean
+  /** Current or most recent session journal, if any. */
   journalPath?: string
   catalog?: DoctorCatalog
+  /** Freshness of the on-disk models.dev cache, when known. Undefined means
+   * the catalog-miss check always runs. */
   catalogStatus?: "fresh" | "stale" | "missing"
   mcpHub?: DoctorMcpHub
+  /** Server names configured but not connected. */
   mcpConfiguredNames?: string[]
 }
 
+// Shell builtins never appear on PATH, so Bun.which cannot find them.
 const SHELL_BUILTINS = new Set([
   "cd",
   "echo",
@@ -92,8 +114,11 @@ const SHELL_BUILTINS = new Set([
   ":",
 ])
 
+// Leading `VAR=value` assignments (`CI=true npm test`) are skipped.
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 
+// Tokens starting with shell syntax (subshells, groups, negation, quotes,
+// `$VAR`) cannot be verified, so they are trusted rather than flagged.
 const UNVERIFIABLE_PREFIXES = ["(", "{", "!", "'", '"', "$", "`"]
 
 /** The actual command word a hook's shell line starts with, skipping env assignments. */
@@ -106,6 +131,7 @@ function commandWord(command: string): string | undefined {
 
 function commandResolves(token: string): boolean {
   if (SHELL_BUILTINS.has(token)) return true
+  // Path-like tokens are trusted; cross-platform executable checks misfire.
   if (token.includes("/") || token.includes("\\")) return true
   if (UNVERIFIABLE_PREFIXES.some((prefix) => token.startsWith(prefix))) return true
   try {
@@ -119,6 +145,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
+/** Raw (pre-validation) hooks array; the config may be malformed. */
 function rawHooksArray(raw: unknown): Record<string, unknown>[] {
   if (!isPlainObject(raw)) return []
   const hooks = raw.hooks
@@ -169,6 +196,7 @@ function lintConfig(deps: DoctorDeps): DoctorLintIssue[] {
     return issues
   }
 
+  // Unknown top-level keys.
   const strict = ButterflyConfig.strict().safeParse(raw)
   if (!strict.success) {
     for (const issue of strict.error.issues) {
@@ -183,9 +211,12 @@ function lintConfig(deps: DoctorDeps): DoctorLintIssue[] {
     }
   }
 
+  // Best-effort typed config for the remaining checks.
   const parsed = ButterflyConfig.safeParse(raw)
   const config: ButterflyConfig = parsed.success ? parsed.data : {}
 
+  // Dead hooks: unknown event names (checked on the raw config, since the
+  // schema is an enum) and commands that do not resolve.
   for (const rawHook of rawHooksArray(raw)) {
     const event = rawHook.event
     if (typeof event === "string" && !(HOOK_EVENTS as readonly string[]).includes(event)) {
@@ -196,6 +227,8 @@ function lintConfig(deps: DoctorDeps): DoctorLintIssue[] {
     }
   }
   for (const hook of config.hooks ?? []) {
+    // A disabled hook never runs, so its command is not checked. Unknown
+    // event names above are flagged regardless.
     if (hook.enabled === false) continue
     const word = commandWord(hook.command)
     if (word !== undefined && !commandResolves(word)) {
@@ -206,10 +239,13 @@ function lintConfig(deps: DoctorDeps): DoctorLintIssue[] {
     }
   }
 
+  // Unknown model ids and missing provider keys, for both models.
   const refs: [string, string | undefined][] = [
     ["model", config.model],
     ["small_model", config.small_model],
   ]
+  // With no catalog cache every lookup would miss, so skip them and note it
+  // once. A stale cache is still mostly accurate, so lookups run with a note.
   const catalogUsable = deps.catalogStatus !== "missing"
   let catalogNoted = false
   for (const [label, ref] of refs) {
@@ -241,6 +277,7 @@ function lintConfig(deps: DoctorDeps): DoctorLintIssue[] {
         message: `${label} "${ref}" not found in the models.dev catalog — verify the id (the local cache may be stale)`,
       })
     }
+    // Only built-in presets have a known env var to check.
     const envKey = presetEnvKey(providerId)
     if (envKey) {
       const hasOverrideKey = Boolean(config.providers?.[providerId]?.apiKey)
@@ -276,9 +313,11 @@ export function doctor(deps: DoctorDeps): DoctorReport {
 }
 
 export interface RenderDoctorOptions {
+  /** Appended after each prefix token count, e.g. a proportional bar. */
   bar?: (tokens: number) => string
 }
 
+/** Text renderer shared by the CLI and TUI. */
 export function renderDoctorReport(report: DoctorReport, opts: RenderDoctorOptions = {}): string {
   const bar = opts.bar ?? (() => "")
   const lines: string[] = [

@@ -1,3 +1,10 @@
+/**
+ * Served-context probe for local model servers. Ollama runs a model with its
+ * own context length (OLLAMA_CONTEXT_LENGTH / num_ctx, often 4096) and
+ * silently truncates the front of longer requests; local models also have no
+ * models.dev row. `/api/ps` reports the loaded context length. Any error or
+ * unknown shape returns undefined.
+ */
 
 export const OLLAMA_DEFAULT_BASE = "http://localhost:11434/v1"
 const PROBE_TIMEOUT_MS = 2_000

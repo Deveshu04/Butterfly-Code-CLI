@@ -36,6 +36,8 @@ export interface WebBackends {
 const DEFAULT_MAX_RESULTS = 5
 const DEFAULT_MAX_FETCH_CHARS = 20_000
 const SEARCH_BLOCK_CAP_CHARS = 4_000
+/** Capture limit for the UI/journal `meta` channel; much larger than the
+ * model limit but bounded, since `meta` is journaled. */
 const CAPTURE_CHARS = 200_000
 
 const SEARCH_PROVIDERS = ["tavily", "brave", "exa"] as const
@@ -57,6 +59,11 @@ function transitHosts(chain: { readonly name: string }[]): string[] {
   return chain.map((backend) => TRANSIT_HOST[backend.name] ?? backend.name).filter(Boolean)
 }
 
+/**
+ * Query keys that commonly carry a secret, plus S3/GCS/Azure presigned
+ * prefixes. Over-inclusive on purpose: a false positive only skips the
+ * third-party reader, a false negative leaks a credential.
+ */
 const SECRET_QUERY_KEYS = new Set([
   "sig",
   "signature",
@@ -85,6 +92,8 @@ const SECRET_QUERY_KEYS = new Set([
 ])
 const SECRET_QUERY_PREFIXES = ["x-amz-", "x-goog-", "x-ms-", "x-sas-"]
 
+/** Heuristic: does the URL carry its own credential (presigned link, token
+ * parameter, userinfo)? Such URLs are never sent to a third-party reader. */
 export function looksCredentialBearing(url: string): boolean {
   let parsed: URL
   try {
@@ -107,6 +116,12 @@ function effectiveFetchChain(chain: FetchBackend[], url: string): FetchBackend[]
   return chain.filter((backend) => backend.name === "raw")
 }
 
+/**
+ * Search: the pinned web.provider, else every keyed backend, then the keyless
+ * DuckDuckGo-lite fallback. Fetch always ends in `raw`. Every backend except
+ * `raw` reaches a third party, so each is opt-in (a key, or allowJina /
+ * allowDuckDuckGo).
+ */
 export function buildWebBackends(
   config: WebConfig | undefined,
   opts: { fetchFn?: typeof fetch; resolveHost?: ValidateFetchUrlOptions["resolveHost"] } = {},
@@ -146,6 +161,7 @@ export function buildWebBackends(
   if (config?.tavily?.apiKey) {
     fetchChain.push(tavilyExtractBackend({ apiKey: config.tavily.apiKey, fetchFn }))
   }
+  // A jina key opts in; an explicit allowJina:false still wins.
   const allowJina = config?.allowJina ?? config?.jinaKey !== undefined
   if (allowJina) fetchChain.push(jinaFetchBackend({ apiKey: config?.jinaKey, fetchFn }))
   fetchChain.push(rawFetchBackend({ fetchFn, resolveHost: opts.resolveHost }))
@@ -164,6 +180,7 @@ function formatSearchOutput(hits: WebHit[], backend: string): string {
 }
 
 export interface CreateWebToolOptions {
+  /** Read on every call, since config can change mid-session. */
   config: () => WebConfig | undefined
   fetchFn?: typeof fetch
   /** DNS resolver override for the SSRF guard (tests only; defaults to a real lookup). */
@@ -174,9 +191,14 @@ export interface CreateWebToolOptions {
   maxFetchChars?: number
 }
 
+/**
+ * One tool for search and fetch, dispatched on `op`. The description stays
+ * neutral; self-promoting tool descriptions degrade tool choice.
+ */
 export function createWebTool(
   opts: CreateWebToolOptions,
 ): ToolDefinition<z.infer<typeof webToolInput>> {
+  // Resolved per call: constructor option > config > default.
   const chainFor = () =>
     buildWebBackends(opts.config(), {
       ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
@@ -196,6 +218,10 @@ export function createWebTool(
         return undefined
       }
     },
+    /**
+     * Tells the approver which third-party hosts the request travels through.
+     * Display-only; `permissionTarget` stays the bare host so rules still match.
+     */
     permissionNote: (input) => {
       const { searchChain, fetchChain } = chainFor()
       if (input.op === "search") {
@@ -205,6 +231,7 @@ export function createWebTool(
       if (!input.url) return undefined
       const effective = transitHosts(effectiveFetchChain(fetchChain, input.url))
       if (effective.length > 0) return `via ${effective.join(" → ")}`
+      // Third parties were available but skipped for this URL.
       if (transitHosts(fetchChain).length > 0) return "direct only — URL looks credential-bearing"
       return undefined
     },
@@ -296,6 +323,7 @@ export function createWebTool(
               elapsedMs: Date.now() - started,
               url: target,
               title,
+              // The journal/UI keep the page; the model only sees `body`.
               text: result.markdown.slice(0, CAPTURE_CHARS),
               chars: result.markdown.length,
               truncatedForModel,
@@ -308,6 +336,7 @@ export function createWebTool(
           if (abort) return abort
         }
       }
+      // Name the opt-in so the safer default is not a silent dead end.
       const jinaHint =
         transitHosts(fetchChain).includes("r.jina.ai") || looksCredentialBearing(target)
           ? ""

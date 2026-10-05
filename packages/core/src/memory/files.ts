@@ -3,6 +3,11 @@ import { dirname, join } from "node:path"
 import { z } from "zod"
 import { applyEdit } from "../edit/apply"
 
+/**
+ * Memory files: hard-capped, frozen into the system prefix at session start,
+ * edited only via substring deltas. Overflow is an error (forces
+ * consolidation), never a silent truncation.
+ */
 
 export const PROJECT_MEMORY_CAP = 2_000
 export const USER_MEMORY_CAP = 1_000

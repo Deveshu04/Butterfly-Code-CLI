@@ -15,6 +15,7 @@ export const editInput = z.object({
   replace_all: z.boolean().optional().describe("Replace every occurrence"),
 })
 
+/** Syntactically invalid TS/JS edits are rejected before they hit disk. */
 export const SYNTAX_GATED_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
 
 function loaderFor(ext: string): "ts" | "tsx" | "js" | "jsx" {
@@ -71,6 +72,7 @@ export const editTool: ToolDefinition<z.infer<typeof editInput>> = {
     writeFileSync(path, result.content)
     const plural = result.replacements === 1 ? "" : "s"
 
+    // UI-only diff of the changed region; the model sees only the line above.
     const oldLines = input.old_string === "" ? [] : input.old_string.split("\n")
     const newLines = input.new_string === "" ? [] : input.new_string.split("\n")
     const diff = [

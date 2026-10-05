@@ -1,6 +1,7 @@
 import type { Usage } from "../session/events"
 import { SessionJournal } from "../session/journal"
 
+/** Input tokens per completed task and malformed-edit rate, read from the journal. */
 
 export interface SessionMetrics {
   usage: Usage

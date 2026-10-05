@@ -1,6 +1,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { extname, isAbsolute, resolve } from "node:path"
 
+/**
+ * Image attachments. The journal stores path + sha256, never base64.
+ * Candidates are validated and hashed at attach time; bytes are read lazily
+ * at send time, and a missing or changed file degrades to a placeholder.
+ * Whether the current model accepts images is decided in assembly.ts.
+ */
 
 const MEDIA_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -26,6 +32,7 @@ export function isImagePath(path: string): boolean {
 }
 
 export interface ImageRef {
+  /** Absolute path; the journal never stores bytes. */
   path: string
   mediaType: string
   sha256: string
@@ -33,6 +40,7 @@ export interface ImageRef {
 
 export interface PrepareImagesResult {
   images: ImageRef[]
+  /** Why candidates were dropped. */
   notices: string[]
 }
 
@@ -42,6 +50,10 @@ function sha256(bytes: Uint8Array): string {
   return hasher.digest("hex")
 }
 
+/**
+ * Validates and hashes one turn's image attachments. Over-cap, non-image,
+ * missing and unreadable files are dropped with a notice; never throws.
+ */
 export function prepareImageAttachments(paths: string[], cwd: string): PrepareImagesResult {
   const images: ImageRef[] = []
   const notices: string[] = []
@@ -89,6 +101,11 @@ export type LoadedImagePart =
   | { type: "image"; mediaType: string; data: string }
   | { type: "text"; text: string }
 
+/**
+ * Loads an attached image's bytes at send time. A missing file, or one whose
+ * sha256 no longer matches the attached image, becomes a placeholder text
+ * part so the model never silently sees different pixels.
+ */
 export function loadImagePart(image: {
   path: string
   mediaType: string
@@ -109,6 +126,10 @@ export function loadImagePart(image: {
   return { type: "image", mediaType: image.mediaType, data: bytes.toString("base64") }
 }
 
+/**
+ * Stand-in for an attachment the current model cannot accept. It names the
+ * file, since the composer removes the path from the prompt text.
+ */
 export function strippedImagePart(image: { path: string }): LoadedImagePart {
   return {
     type: "text",

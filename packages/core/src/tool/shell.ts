@@ -1,5 +1,6 @@
 import { join } from "node:path"
 
+/** Dialect of the resolved shell, for callers that generate shell syntax. */
 export type ShellFamily = "posix" | "powershell" | "cmd"
 
 export interface ShellResolution {
@@ -8,6 +9,11 @@ export interface ShellResolution {
   family: ShellFamily
 }
 
+/**
+ * On Windows: Git Bash located via which("git") (Bun.which("bash") finds the
+ * WSL launcher), then pwsh/powershell, then COMSPEC. Git Bash comes first
+ * because models emit POSIX commands. Override: BUTTERFLY_GIT_BASH_PATH.
+ */
 export function resolveShell(): ShellResolution {
   // Non-login (-c, not -lc): stateless spawns must not pay profile-sourcing
   // latency on every tool call; env comes from the parent process.
@@ -43,6 +49,8 @@ export function resolveShell(): ShellResolution {
   }
 }
 
+/** Kills the whole process tree. proc.kill() orphans grandchildren on
+ * Windows, so taskkill /T is used there. */
 export function killTree(proc: ReturnType<typeof Bun.spawn>): void {
   if (process.platform === "win32") {
     Bun.spawnSync(["taskkill", "/PID", String(proc.pid), "/T", "/F"], {
@@ -67,6 +75,10 @@ export interface RunCommandResult {
   killed?: boolean
 }
 
+/**
+ * Capture cap per stream, so `yes` or a log flood cannot exhaust memory.
+ * Head and tail are kept (errors live at both ends); the middle is elided.
+ */
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024
 
 export async function collectBounded(
@@ -134,6 +146,8 @@ export function killCommand(id: string): boolean {
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000
 export const MAX_COMMAND_TIMEOUT_MS = 600_000
 
+/** Stateless command execution (no persistent shell). Pagers and progress
+ * bars are disabled because they pollute the output. */
 export async function runCommand(
   command: string,
   opts: {
@@ -157,6 +171,8 @@ export async function runCommand(
     stdout: "pipe",
     stderr: "pipe",
     windowsHide: true,
+    // POSIX: own process group, so killTree's kill(-pid) takes the whole tree;
+    // killing only the shell leaves children holding the pipes open.
     ...(process.platform !== "win32" ? { detached: true } : {}),
     env: {
       ...process.env,

@@ -4,6 +4,11 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js"
 import { estimateTokens } from "../context/tokens"
 
+/**
+ * MCP client with lazy tool disclosure: nothing is injected eagerly. The
+ * model gets a one-line-per-tool index via the mcp tool and full schemas
+ * only on describe; eagerTokens() vs indexTokens() measures the savings.
+ */
 
 export interface McpServerConfig {
   command?: string
@@ -119,6 +124,7 @@ export class McpHub {
     return lines.join("\n")
   }
 
+  /** What eager schema injection would have cost. */
   eagerTokens(): number {
     let total = 0
     for (const entry of this.entries.values()) {

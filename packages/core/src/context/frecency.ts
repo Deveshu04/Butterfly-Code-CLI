@@ -2,6 +2,10 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, isAbsolute, join, relative } from "node:path"
 import type { ToolDefinition } from "../tool/registry"
 
+/**
+ * @-mention frecency: an NDJSON store under `.butterfly/` that ranks picker
+ * candidates by recency-weighted usage, capped at FRECENCY_CAP entries.
+ */
 
 export interface FrecencyEntry {
   path: string
@@ -17,6 +21,7 @@ export function frecencyStorePath(cwd: string): string {
   return join(cwd, ".butterfly", "frecency.ndjson")
 }
 
+/** score = freq / (1 + days since lastOpen) */
 export function frecencyScore(entry: FrecencyEntry, now: number): number {
   return entry.freq / (1 + (now - entry.lastOpen) / MS_PER_DAY)
 }
@@ -54,6 +59,10 @@ function writeFrecency(storePath: string, entries: FrecencyEntry[]): void {
   writeFileSync(storePath, entries.length > 0 ? `${body}\n` : "")
 }
 
+/**
+ * Records a pick or a read/edit touch, then rewrites the store, dropping the
+ * oldest entries beyond FRECENCY_CAP.
+ */
 export function touchFrecency(
   storePath: string,
   path: string,
@@ -75,6 +84,7 @@ export function touchFrecency(
   return capped
 }
 
+/** Ranks candidates by score, descending; unscored candidates keep their order. */
 export function rankByFrecency(
   candidates: string[],
   entries: FrecencyEntry[],
@@ -92,6 +102,7 @@ function toRelSlash(cwd: string, path: string): string {
   return rel.replaceAll("\\", "/")
 }
 
+/** Wraps a tool so a successful call also bumps frecency for its file. */
 export function withFrecencyTouch<I>(
   tool: ToolDefinition<I>,
   storePath: string,

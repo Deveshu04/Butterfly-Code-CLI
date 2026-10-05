@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs"
 import { dirname } from "node:path"
 import { SessionJournal } from "../session/journal"
 
+/** Episodic memory: SQLite FTS5 over raw journal events, zero standing tokens. */
 
 export interface EpisodicHit {
   sessionId: string

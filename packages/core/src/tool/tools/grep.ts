@@ -32,6 +32,7 @@ async function resolveEmbeddedRipgrep(): Promise<string | undefined> {
     const mod = await importer()
     const bytes = new Uint8Array(await Bun.file(mod.default).arrayBuffer())
     return await extractEmbeddedAsset(
+      // `size` lets the cache check detect a truncated extraction.
       {
         name: process.platform === "win32" ? "rg.exe" : "rg",
         size: bytes.byteLength,
@@ -44,6 +45,10 @@ async function resolveEmbeddedRipgrep(): Promise<string | undefined> {
   }
 }
 
+/**
+ * Locates ripgrep: embedded copy, then system rg, then @vscode/ripgrep. The
+ * last is required lazily because a compiled exe may not include it.
+ */
 export async function resolveRipgrep(): Promise<string> {
   const embedded = await resolveEmbeddedRipgrep()
   if (embedded) return embedded

@@ -33,6 +33,14 @@ interface Preset {
   transformBody?: (body: Record<string, unknown>) => Record<string, unknown>
 }
 
+/**
+ * Sarvam's OpenAI-compatible endpoint differs in four ways:
+ *  - `reasoning_effort` accepts only low|medium|high|null, and omitting it
+ *    leaves thinking on: minimal->low, xhigh->high, "none"->null.
+ *  - tool-message `content` must contain a non-whitespace char.
+ *  - role "developer" is rejected.
+ *  - `max_completion_tokens` is ignored; max_tokens is the field.
+ */
 export function normalizeSarvamBody(body: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { ...body }
   if ("reasoning_effort" in out) {
@@ -69,6 +77,7 @@ export function normalizeSarvamBody(body: Record<string, unknown>): Record<strin
  */
 export const EXPLICIT_REASONING_OFF: ReadonlySet<string> = new Set(["sarvam"])
 
+/** Base URLs and API key env vars per provider. */
 const PRESETS: Record<string, Preset> = {
   anthropic: { kind: "anthropic", envKey: "ANTHROPIC_API_KEY" },
   google: { kind: "google", envKey: "GOOGLE_GENERATIVE_AI_API_KEY" },
@@ -98,6 +107,8 @@ const PRESETS: Record<string, Preset> = {
     keyHeader: "api-subscription-key",
     transformBody: normalizeSarvamBody,
   },
+  // LiteLLM proxy: model ids come from the proxy's model_list; the key is the
+  // proxy's master/virtual key (optional on an open local proxy).
   litellm: {
     kind: "openai-compatible",
     baseURL: "http://localhost:4000/v1",

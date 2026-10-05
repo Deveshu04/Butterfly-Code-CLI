@@ -2,9 +2,17 @@ import { existsSync, readFileSync } from "node:fs"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { SessionEvent } from "../session/events"
 
+/**
+ * Nested AGENTS.md resolution, nearest wins. Each step walks up from every
+ * touched file to the repo root and journals newly found files as a
+ * `context.fragment` event appended after the frozen prefix. A path loaded
+ * or skipped once is never reconsidered.
+ */
 
 export const AGENTS_MD_FILENAME = "AGENTS.md"
 
+/** Per-fragment cap (chars). Oversized files are visibly truncated, not
+ * rejected, since third-party repos cannot be made to consolidate. */
 export const AGENTS_MD_FRAGMENT_CAP_CHARS = 2_000
 
 /** Total budget (chars) across every fragment loaded this session. */
@@ -37,10 +45,16 @@ function toAbsPath(cwdAbs: string, raw: string): string {
   return resolve(join(cwdAbs, raw.split("/").join(sep)))
 }
 
+/**
+ * Dedup key for a path. Lower-cased on Windows, where the filesystem is
+ * case-insensitive and models do not reliably preserve casing; exact on
+ * other platforms. Stored and returned paths keep their original casing.
+ */
 function pathKey(absPath: string): string {
   return process.platform === "win32" ? absPath.toLowerCase() : absPath
 }
 
+/** Directory depth relative to cwd. */
 function depthOf(absPath: string, cwdAbs: string): number {
   const rel = relative(cwdAbs, dirname(absPath))
   if (rel === "") return 0
@@ -71,6 +85,11 @@ export function agentsMdAncestors(fileAbsPath: string, cwdAbs: string): string[]
 
 const MENTION_PATH_LINE = /^--- @(.+?) ---$/gm
 
+/**
+ * Files read, edited or @-mentioned this session, as absolute paths in
+ * first-appearance order. Scans raw journal events so touches survive
+ * compaction.
+ */
 export function extractTouchedFiles(events: SessionEvent[], cwdAbs: string): string[] {
   const cwdReal = resolve(cwdAbs)
   const seen = new Set<string>()
@@ -101,6 +120,7 @@ export function extractTouchedFiles(events: SessionEvent[], cwdAbs: string): str
   return out
 }
 
+/** Reads and caps one AGENTS.md file. An unreadable file yields an empty fragment. */
 export function loadAgentsMdFragment(
   absPath: string,
   cwdAbs: string,
@@ -118,6 +138,11 @@ export function loadAgentsMdFragment(
   return { path: absPath, relPath, content, truncated }
 }
 
+/**
+ * Returns the fragments newly discovered given the full raw event history.
+ * Once the caller journals the result, later calls skip those paths, so it
+ * is safe to call every step.
+ */
 export function reconcileAgentsMd(
   events: SessionEvent[],
   cwdAbs: string,
@@ -127,6 +152,7 @@ export function reconcileAgentsMd(
   const fragmentCap = opts?.fragmentCapChars ?? AGENTS_MD_FRAGMENT_CAP_CHARS
   const totalBudget = opts?.totalBudgetChars ?? AGENTS_MD_TOTAL_BUDGET_CHARS
 
+  // Everything already loaded or skipped this session.
   const considered = new Set<string>()
   let priorTotal = 0
   for (const event of events) {
@@ -141,6 +167,7 @@ export function reconcileAgentsMd(
     for (const path of event.skipped ?? []) considered.add(pathKey(path))
   }
 
+  // Candidates: the repo root file plus every touched file's ancestor chain.
   const candidates = new Map<string, string>()
   const addCandidate = (path: string) => {
     const key = pathKey(path)
@@ -157,6 +184,7 @@ export function reconcileAgentsMd(
     .map(([, path]) => path)
   if (fresh.length === 0) return { fragments: [], skipped: [] }
 
+  // Under budget pressure, prefer the nearest (most specific) fragments.
   const byNearestFirst = fresh.sort((a, b) => depthOf(b, cwdReal) - depthOf(a, cwdReal))
 
   const accepted: AgentsMdFragment[] = []
@@ -172,6 +200,7 @@ export function reconcileAgentsMd(
     accepted.push(fragment)
   }
 
+  // Inject root to deep so nearer fragments come later and take precedence.
   accepted.sort((a, b) => depthOf(a.path, cwdReal) - depthOf(b.path, cwdReal))
 
   const warning =

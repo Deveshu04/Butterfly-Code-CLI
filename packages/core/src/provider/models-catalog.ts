@@ -5,6 +5,8 @@ export interface CatalogEntry {
   context: number
   output?: number
   toolCall?: boolean
+  /** From models.dev `modalities.input`. Undefined when unknown; treat it
+   * as false. */
   imageInput?: boolean
   cost?: {
     input?: number
@@ -20,11 +22,13 @@ export interface CatalogLoadOptions {
   /** Refresh the disk cache when older than this. Default 24h. */
   maxAgeMs?: number
   now?: () => number
+  /** Never fetch or write the cache; use whatever is on disk, even stale. */
   cacheOnly?: boolean
 }
 
 export type CatalogCacheStatus = "fresh" | "stale" | "missing"
 
+/** On-disk freshness probe that never fetches. */
 export function catalogCacheStatus(
   cachePath: string,
   maxAgeMs: number = DEFAULT_MAX_AGE_MS,
@@ -37,6 +41,11 @@ export function catalogCacheStatus(
 
 export const MODELS_DEV_URL = "https://models.dev/api.json"
 
+/**
+ * Offline fallback used only when the models.dev snapshot has no row.
+ * Sarvam output caps leave room under its prompt+max_tokens <= context rule;
+ * pricing is converted from published INR rates at ~96 INR/USD.
+ */
 /** Providers whose model ids belong to OTHER vendors (resolved via lookupAcross). */
 export const GATEWAY_PROVIDERS: ReadonlySet<string> = new Set(["litellm"])
 
@@ -86,10 +95,15 @@ function readCache(path: string): CacheFile | undefined {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as CacheFile
     if (typeof parsed?.fetchedAt === "number" && parsed.data) return parsed
   } catch {
+    // missing or corrupt cache
   }
   return undefined
 }
 
+/**
+ * models.dev snapshot, disk-cached with age-based refresh and stale-on-error.
+ * Supplies per-model context limits and pricing.
+ */
 export class ModelsCatalog {
   private constructor(private data: Record<string, unknown>) {}
 
@@ -143,6 +157,7 @@ export class ModelsCatalog {
     return new ModelsCatalog({})
   }
 
+  /** All known models for a provider, from the cached snapshot. */
   listModels(providerId: string): { id: string; context: number; toolCall?: boolean }[] {
     const provider = this.data[providerId] as
       | { models?: Record<string, Record<string, unknown>> }
@@ -159,6 +174,17 @@ export class ModelsCatalog {
     return models.sort((a, b) => a.id.localeCompare(b.id))
   }
 
+  /**
+   * A cheap same-provider model for summarization work (compaction, the memory
+   * evolver) when no small_model is configured. Candidates must:
+   * - share the provider, and for gateways the vendor prefix (a user's code is
+   *   never routed to a different vendor);
+   * - be tool-capable (or unknown), >= 32k context, not deprecated;
+   * - cost at most a third of the main model on input and output;
+   * - be released within ~18 months of the main model when dates are known.
+   * The most recent wins, then the pricier. Undefined when nothing qualifies.
+   * Not used for subagents.
+   */
   cheapCompanion(providerId: string, modelId: string): string | undefined {
     const main = this.lookup(providerId, modelId)
     const mainIn = main?.cost?.input

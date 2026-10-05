@@ -22,6 +22,11 @@ function sha256(text: string): string {
   return hasher.digest("hex")
 }
 
+/**
+ * Candidate source files: `git ls-files` (tracked + untracked, minus ignored)
+ * in a repo, else a glob. Repo detection is fs-only because `git rev-parse`
+ * can hang for minutes on Windows outside a repo.
+ */
 export function listSourceFiles(cwd: string): string[] {
   const keep = (rel: string) =>
     !DEFAULT_IGNORED_SEGMENTS.some((segment) => rel.split("/").includes(segment)) &&
@@ -56,6 +61,10 @@ export function listSourceFiles(cwd: string): string[] {
   return files.sort()
 }
 
+/**
+ * Incremental repo sync: unchanged mtime+size skips a file, otherwise a
+ * SHA-256 hash decides whether it re-parses. Deleted files drop out.
+ */
 export async function syncRepo(cwd: string, db: GraphDb): Promise<SyncResult> {
   const seen = new Set<string>()
   let scanned = 0
@@ -111,6 +120,7 @@ export async function syncRepo(cwd: string, db: GraphDb): Promise<SyncResult> {
     }
   }
 
+  // Persist only when the index changed; a no-op sync writes nothing.
   if (scanned > 0 || removed > 0) db.setMeta("lastSync", String(Date.now()))
   return { scanned, skipped, removed }
 }

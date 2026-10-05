@@ -13,6 +13,15 @@ import {
 import { extractJsonArray, renderLatestTurn } from "./reviewer"
 import { listSkills, PROMOTION_THRESHOLD, recordSkillUse, writeAgentSkill } from "./skills"
 
+/**
+ * Post-turn self-evolution:
+ *  1. Memory: durable facts land in PROJECT.md / USER.md through the capped,
+ *     scanned writer; a full file is consolidated (backup kept) rather than
+ *     dropping the fact.
+ *  2. Skills: a successful multi-step procedure becomes a draft skill; it is
+ *     promoted into the prefix index after 2 verified runs.
+ * A deterministic gate skips turns with nothing to learn. Never throws.
+ */
 
 export const EVOLVE_PROMPT = `You maintain the long-term memory and skill library of a coding agent. Read the transcript excerpt of the turn that just finished and decide what is worth keeping FOREVER. Most turns contain nothing — then reply [].
 
@@ -160,6 +169,11 @@ async function complete(
 
 const CONSOLIDATE_PROMPT = `You compact a coding agent's long-term memory file. Rewrite it as terse "- " bullet lines: merge duplicates, drop stale or low-value lines, keep every exact command and invariant. The result MUST be under the character budget given. Reply with ONLY the new file content.`
 
+/**
+ * Memory full: rewrite it tighter rather than drop the new fact. The rewrite
+ * must pass the injection scan, fit in 75% of the cap and keep at least a
+ * third of the old size. The previous file is kept as `<file>.bak`.
+ */
 async function consolidate(
   deps: EvolveDeps,
   scope: "project" | "user",

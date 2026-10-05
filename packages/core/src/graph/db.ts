@@ -36,6 +36,10 @@ export interface RefRow {
   count: number
 }
 
+/**
+ * Derived, rebuildable code graph: files(path, sha256) + symbols(defs) +
+ * refs(name usage per file).
+ */
 export class GraphDb {
   private constructor(private db: Database) {}
 
@@ -55,6 +59,7 @@ export class GraphDb {
     db.run("CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name)")
     db.run("CREATE INDEX IF NOT EXISTS idx_refs_file ON refs(file)")
     db.run("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    // v2: mtime/size columns let an unchanged stat skip the read and hash.
     const columns = (db.query("PRAGMA table_info(files)").all() as { name: string }[]).map(
       (c) => c.name,
     )
@@ -193,6 +198,9 @@ export class GraphDb {
   fileEdges(maxDefiners = 3): FileEdge[] {
     return this.db
       .query(
+        // Short or all-lowercase names collide with locals everywhere, so definers
+        // are restricted to specific-looking names (camel/Pascal/snake, or >= 8
+        // chars) outside test files.
         `WITH definers AS (
            SELECT name, file FROM symbols
            WHERE name IN (SELECT name FROM symbols GROUP BY name HAVING COUNT(DISTINCT file) <= ?)

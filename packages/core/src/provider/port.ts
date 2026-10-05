@@ -2,6 +2,7 @@ import type { Usage } from "../session/events"
 import type { ProviderErrorInfo } from "./describe-error"
 
 
+/** User-message content parts. Image `data` is base64, loaded at send time. */
 export type ChatMessagePart =
   | { type: "text"; text: string }
   | { type: "image"; mediaType: string; data: string }
@@ -25,6 +26,7 @@ export interface ToolSpec {
   inputSchema: Record<string, unknown>
 }
 
+/** Thinking-effort dial (the AI SDK `reasoning` option). */
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
 
 export interface TurnRequest {
@@ -51,6 +53,7 @@ export type TurnEvent =
    */
   | { type: "tool-input-start"; callId: string; name: string }
   | { type: "finish"; reason: FinishReason; usage: Usage }
+  /** `message` is a human-readable line; `info` is the classified error. */
   | { type: "error"; message: string; info?: ProviderErrorInfo }
 
 export interface ProviderPort {

@@ -1,11 +1,18 @@
 import { isIP } from "node:net"
 
+/**
+ * SSRF guard for op=fetch: refuses non-http(s) schemes and private, loopback
+ * and link-local addresses, including those a domain resolves to. Lookup
+ * failure is a refusal. Pre-flight only: DNS rebinding is not prevented.
+ * Tests must inject `resolveHost`.
+ */
 export class SsrfError extends Error {}
 
 export interface ValidateFetchUrlOptions {
   resolveHost?: (hostname: string) => Promise<string[]>
 }
 
+/** Unguarded on purpose: a lookup failure must surface as a refusal. */
 async function defaultResolveHost(hostname: string): Promise<string[]> {
   const dns = await import("node:dns/promises")
   const records = await dns.lookup(hostname, { all: true })

@@ -18,6 +18,8 @@ export function createSkillTool(opts: {
     async execute(input) {
       if (!input.name) {
         const index = skillsIndex(opts.dirs)
+        // Unverified drafts are listed here, never in the prefix. A successful
+        // turn that loads one verifies it; two verified runs promote it.
         const drafts = draftSkills(opts.dirs)
         const draftBlock =
           drafts.length === 0

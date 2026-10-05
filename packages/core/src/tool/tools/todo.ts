@@ -31,6 +31,7 @@ export const todoTool: ToolDefinition<z.infer<typeof todoInput>> = {
   inputSchema: todoInput,
   async execute(input, ctx) {
     ctx.state[TODO_STATE_KEY] = input.items
+    // UI-only meta for the todo card; assembly never forwards meta to the model.
     if (input.items.length === 0) {
       return { output: "(todo list cleared)", meta: { todos: [] } }
     }

@@ -12,6 +12,12 @@ import { basename, dirname, join, resolve } from "node:path"
 import { GIT_TIMEOUT_MS, isGitRepo } from "../session/snapshot"
 import { runCommand } from "./shell"
 
+/**
+ * Worktree isolation for mutating task subagents: a `git worktree` under
+ * `.butterfly/worktrees/<taskId>` the subagent can change freely without
+ * touching the caller's working tree. A dirty worktree is left on disk and
+ * reported, never merged automatically; a clean one is removed.
+ */
 
 export const MAX_CONCURRENT_WORKTREES = 4
 
@@ -19,6 +25,10 @@ export function worktreesRoot(cwd: string): string {
   return join(cwd, ".butterfly", "worktrees")
 }
 
+/**
+ * Worktree directories on disk, used as the concurrency counter. It survives
+ * restarts, and a dirty worktree keeps its slot until cleaned up.
+ */
 export function countActiveWorktrees(cwd: string): number {
   const root = worktreesRoot(cwd)
   if (!existsSync(root)) return 0
@@ -33,11 +43,18 @@ export type CreateWorktreeResult =
   | {
       ok: true
       path: string
+      /** HEAD at creation, to detect commits made inside. `""` if unknown,
+       * in which case worktreeStatus reports dirty-undetermined. */
       baseSha: string
+      /** True when the main tree had uncommitted changes, which the HEAD
+       * checkout does not contain. False if git could not answer. */
       mainTreeDirty: boolean
     }
   | { ok: false; error: string }
 
+/** Detached checkout of HEAD at `<root>/<taskId>`. Refuses outside a git
+ * repo and above the concurrency cap. */
+// --- automatic git setup, so worktree isolation also works outside a repo.
 
 /** What worktree isolation needs before it can run here. */
 export type WorktreeGitState = "ready" | "no-repo" | "no-commits"
@@ -113,6 +130,11 @@ export function autoGitRefusal(cwd: string, home: string = homedir()): string | 
   return undefined
 }
 
+/**
+ * Make `cwd` usable for worktree isolation: `git init` if needed, then one
+ * snapshot commit (`git worktree add HEAD` needs a commit). Uses local
+ * identity flags and skips hooks and signing.
+ */
 export async function ensureGitForWorktrees(
   cwd: string,
   opts: { home?: string } = {},
@@ -176,6 +198,8 @@ export async function createWorktree(cwd: string, taskId: string): Promise<Creat
     }
   }
 
+  // Check before adding: the new worktree dir can show up as untracked in
+  // repos that do not ignore `.butterfly/`.
   const main = await runCommand("git status --porcelain", { cwd, timeoutMs: GIT_TIMEOUT_MS })
   const mainTreeDirty =
     main.exitCode === 0 &&
@@ -185,6 +209,7 @@ export async function createWorktree(cwd: string, taskId: string): Promise<Creat
   const root = worktreesRoot(cwd)
   mkdirSync(root, { recursive: true })
   const path = join(root, taskId)
+  // Quoted because this runs through a shell and paths may contain spaces.
   const add = await runCommand(`git worktree add "${path}" HEAD`, {
     cwd,
     timeoutMs: GIT_TIMEOUT_MS,
@@ -268,6 +293,11 @@ export type MergeWorktreeResult =
   | { ok: true; files: string[]; patchPath: string; removed: boolean }
   | { ok: false; error: string; conflict?: boolean }
 
+/**
+ * Apply a worktree's commits and uncommitted edits to the main tree as
+ * unstaged changes, then remove it. `git apply --check` runs first, so a
+ * conflict changes nothing. The patch is kept as .butterfly/worktrees/<id>.patch.
+ */
 export async function mergeWorktree(cwd: string, ref: string): Promise<MergeWorktreeResult> {
   const entry = findWorktree(cwd, ref)
   if (!entry) return { ok: false, error: `no isolated worktree matches "${ref}"` }
@@ -347,9 +377,16 @@ export interface WorktreeStatus {
   dirty: boolean
   changedFiles: number
   commitsAhead: number
+  /** Why dirtiness could not be determined. `dirty` is then true, because
+   * `dirty:false` leads to a force-remove. */
   undetermined?: string
 }
 
+/**
+ * Dirty means any uncommitted change or any commit since `baseSha`. Every git
+ * failure or timeout resolves to dirty-undetermined, never clean: a timed-out
+ * `git status` has empty stdout, which would otherwise read as "no changes".
+ */
 export async function worktreeStatus(path: string, baseSha: string): Promise<WorktreeStatus> {
   const status = await runCommand("git status --porcelain", {
     cwd: path,
@@ -404,6 +441,10 @@ export async function worktreeStatus(path: string, baseSha: string): Promise<Wor
 
 export type RemoveWorktreeResult = { ok: true } | { ok: false; error: string }
 
+/**
+ * Removes a worktree and prunes stale metadata. Failure is reported: on
+ * Windows a lingering child process can hold the directory.
+ */
 export async function removeWorktree(cwd: string, path: string): Promise<RemoveWorktreeResult> {
   const remove = await runCommand(`git worktree remove "${path}" --force`, {
     cwd,

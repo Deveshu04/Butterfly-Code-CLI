@@ -4,6 +4,11 @@ import type { GraphDb } from "../graph/db"
 import { settle } from "../tool/settle"
 import { DEFAULT_IGNORED_SEGMENTS } from "../tool/tools/glob"
 
+/**
+ * @-mention expansion: reads each `@relative/path` token in the prompt into a
+ * capped attached-context block. Paths with spaces use the quoted form
+ * `@"docs/Getting Started.md"`; unquoted tokens stop at whitespace or `@`.
+ */
 
 const MENTION_TOKEN = /@(?:"([^"]+)"|([^\s@]+))/g
 
@@ -33,6 +38,10 @@ export interface ExpandedMention {
   truncated: boolean
 }
 
+/**
+ * Reads each @token that names an existing file under `cwd`, capped per
+ * file. Other tokens (typos, email addresses) are skipped silently.
+ */
 export function expandMentions(
   cwd: string,
   text: string,
@@ -64,6 +73,8 @@ export function renderMentionBlock(mentions: ExpandedMention[]): string {
   return `[attached files — mentioned with @]\n${sections.join("\n\n")}`
 }
 
+/** Candidates for the @-picker: the graph DB's file list, else a glob walk
+ * that skips ignored directories. */
 export function listMentionCandidates(cwd: string, db?: GraphDb): string[] {
   if (db) {
     const files = db.allFiles()

@@ -19,6 +19,10 @@ function countLines(raw: string): number {
   return raw.split("\n").length - (raw.endsWith("\n") ? 1 : 0)
 }
 
+/**
+ * Every tool's output passes through here before the model sees it.
+ * Head/tail elision keeps the first errors and the final summary.
+ */
 export function settle(raw: string, opts?: SettleOptions): Settled {
   const maxChars = opts?.maxChars ?? DEFAULT_MODEL_OUTPUT_CHARS
   const headRatio = opts?.headRatio ?? 0.6

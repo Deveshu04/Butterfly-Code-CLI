@@ -1,5 +1,12 @@
 import { APICallError, RetryError } from "ai"
 
+/**
+ * Provider error taxonomy. AI SDK stream errors are often a raw JSON body,
+ * so plain objects are classified too. AI SDK facts relied on: 429 shows up
+ * as `APICallError.statusCode`; `RetryError` is unwrapped to its last error;
+ * a failed fetch is an `APICallError` without `statusCode`; stream timeouts
+ * abort with a DOMException named "TimeoutError".
+ */
 
 export type ProviderErrorKind =
   | "rate_limit"
@@ -21,6 +28,7 @@ export interface ProviderErrorInfo {
   detail?: string
 }
 
+/** Transient kinds that the step-level retry may repeat; all others fail at once. */
 export const RETRYABLE_ERROR_KINDS: ReadonlySet<ProviderErrorKind> = new Set([
   "rate_limit",
   "unavailable",
@@ -32,11 +40,18 @@ export function isRetryableProviderError(kind: ProviderErrorKind): boolean {
   return RETRYABLE_ERROR_KINDS.has(kind)
 }
 
+/** Cap for the JSON fallback of an unclassifiable object. */
 const DETAIL_CAP = 300
 
+/** Context-overflow wordings across vendors. Providers usually report an
+ * overflow as a generic 400 invalid-request error, so the text is often the
+ * only signal. Anchored on token/context nouns so "You exceeded your current
+ * quota" does not match. */
 const CONTEXT_LENGTH_TEXT_RE =
   /context[ _-]?length|context window|context limit|maximum context|too many tokens|reduce the length|(?:prompt|input|message|request)s?\s+(?:is|are)\s+too long|too long:\s*\d|exceed(?:s|ed)?\s+(?:the\s+)?(?:maximum|max\b|model'?s|context\b|token)/i
 
+/** Maps a body's semantic `type`/`code` text to a kind. Lets a status-less
+ * stream error such as `overloaded_error` land on `unavailable`. */
 function classifyByTypeText(
   type: string | undefined,
   code: string | undefined,
@@ -60,6 +75,8 @@ interface ExtractedBody {
   code?: string
 }
 
+/** Recursively pulls `message`/`type`/`code` out of nested (`{error:{...}}`)
+ * or flat (`{message}`, `{detail}`) error bodies. Never throws. */
 function extractFromBody(value: unknown, depth = 0): ExtractedBody | undefined {
   if (depth > 4 || value === null || typeof value !== "object") return undefined
   const rec = value as Record<string, unknown>
@@ -69,6 +86,7 @@ function extractFromBody(value: unknown, depth = 0): ExtractedBody | undefined {
     const inner = extractFromBody(nested, depth + 1)
     if (inner?.message !== undefined) return inner
   } else if (typeof nested === "string" && rec.message === undefined) {
+    // `{ error: "some string" }`
     return { message: nested }
   }
 
@@ -98,6 +116,8 @@ function extractStatus(value: unknown): number | undefined {
   return undefined
 }
 
+/** Parses `Retry-After` (seconds or HTTP-date) into whole seconds from now.
+ * Header names arrive lower-cased. */
 function parseRetryAfterSec(headers: Record<string, string> | undefined): number | undefined {
   const raw = headers?.["retry-after"]
   if (raw === undefined) return undefined
@@ -112,6 +132,10 @@ function capText(text: string, cap = DETAIL_CAP): string {
   return text.length > cap ? `${text.slice(0, cap)}…` : text
 }
 
+/** Secondary line under the headline: the provider's message first, then
+ * deduped type/code tags in parentheses when the message does not already
+ * state them (providers often repeat the same tag in both fields). Undefined
+ * when there are no tags, since the message is already the headline. */
 function buildDetail(message: string, type?: string, code?: string): string | undefined {
   const tags: string[] = []
   const seen = new Set<string>()
@@ -132,6 +156,8 @@ function buildDetail(message: string, type?: string, code?: string): string | un
   return capText(extra.length > 0 ? `${human} (${extra.join(" ")})` : human)
 }
 
+/** Capped JSON.stringify that never throws and never falls back to
+ * `String(value)` (which would yield `[object Object]`). */
 function safeStringifyCapped(value: unknown, cap = DETAIL_CAP): string {
   const seen = new WeakSet<object>()
   try {
@@ -171,6 +197,7 @@ function classifyByShape(params: {
   const withRetry: ProviderErrorInfo =
     retryAfterSec !== undefined ? { ...base, retryAfterSec } : base
 
+  // Numeric status is the least ambiguous signal.
   if (status === 413) return { ...base, kind: "context_length" }
   if (status === 401 || status === 403) return { ...base, kind: "auth" }
   if (status === 402) return { ...base, kind: "quota" }
@@ -180,7 +207,10 @@ function classifyByShape(params: {
     return { ...base, kind: typeKind === "context_length" ? "context_length" : "unavailable" }
   }
 
+  // No decisive status: fall back to the body's type/code text.
   if (typeKind !== undefined) {
+    // Context overflow arrives as a generic invalid-request type, so the
+    // message text wins over bad_request.
     if (typeKind === "bad_request" && messageSaysContext) {
       return { ...base, kind: "context_length" }
     }
@@ -225,6 +255,10 @@ function tryParseJson(text: string | undefined): unknown {
   }
 }
 
+/**
+ * Classifies an unknown provider error. Unclassifiable objects fall back to
+ * capped JSON, never `"[object Object]"`.
+ */
 export function classifyProviderError(error: unknown): ProviderErrorInfo {
   if (error === null || error === undefined) {
     return { kind: "unknown", message: "unknown provider error (no details)" }
@@ -241,6 +275,8 @@ export function classifyProviderError(error: unknown): ProviderErrorInfo {
 
   if (error instanceof Error) {
     if (error.name === "TimeoutError") return { kind: "timeout", message: error.message }
+    // Thrown locally by the AI SDK for a tool call without a result. Retrying
+    // a malformed request cannot help, so it is not retryable.
     if (/tool result is missing for tool call/i.test(error.message)) {
       return { kind: "bad_request", message: error.message }
     }
@@ -267,6 +303,7 @@ export function classifyProviderError(error: unknown): ProviderErrorInfo {
   return { kind: "unknown", message: safeStringifyCapped(error) }
 }
 
+/** One actionable human line per error kind. */
 export function describeProviderError(info: ProviderErrorInfo): string {
   const status = info.status !== undefined ? ` (${info.status})` : ""
   switch (info.kind) {

@@ -131,6 +131,14 @@ function renderMapOp(db: GraphDb, query: string): string {
     : `${text}\n\n(full map with dependency graph: .butterfly/${PROJECT_MAP_FILE})`
 }
 
+/**
+ * The code graph tool:
+ *  - symbol: matching definition bodies plus their callers;
+ *  - outline: a file's definitions with line ranges and imports/used-by;
+ *  - deps: file- or symbol-level dependencies and blast radius;
+ *  - map: module overview plus a query-focused ranked skeleton.
+ * `refresh` re-syncs before answering so results reflect recent edits.
+ */
 export function createExploreTool(opts: {
   db: () => GraphDb | undefined
   cwd: string

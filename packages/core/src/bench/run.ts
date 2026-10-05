@@ -9,6 +9,10 @@ import type { ToolRegistry } from "../tool/registry"
 import { runCommand } from "../tool/shell"
 import { extractSessionMetrics, type SessionMetrics } from "./metrics"
 
+/**
+ * Benchmark harness: each task gets a fresh fixture dir and one agent turn;
+ * a check command decides solved/failed, the rest is read off the journal.
+ */
 
 export interface BenchTask {
   id: string
@@ -38,6 +42,7 @@ export interface BenchDeps {
   maxSteps?: number
   budgetTokens?: number
   onEvent?: (message: string) => void
+  /** Keep each task's fixture directory after scoring (CLI --keep). */
   keepFixtures?: boolean
 }
 
@@ -92,6 +97,7 @@ export interface BenchSummary {
   total: number
   totalInputTokens: number
   totalOutputTokens: number
+  /** Input tokens per solved task. */
   inputTokensPerSolved: number | null
   malformedEditRate: number | null
 }

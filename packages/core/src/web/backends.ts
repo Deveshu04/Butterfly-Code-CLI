@@ -1,6 +1,7 @@
 import { htmlToText } from "./html"
 import { capText, withTimeout } from "./util"
 
+/** One search hit, normalized across every backend. */
 export interface WebHit {
   title: string
   url: string
@@ -40,6 +41,7 @@ export interface KeyedBackendOptions {
   timeoutMs?: number
 }
 
+/** POST api.tavily.com/search - recommended primary. */
 export function tavilySearchBackend(opts: KeyedBackendOptions): SearchBackend {
   const fetchFn = opts.fetchFn ?? fetch
   return {
@@ -182,6 +184,10 @@ function parseDdgLiteHtml(html: string): WebHit[] {
   }))
 }
 
+/**
+ * POST lite.duckduckgo.com/lite/ - keyless last-resort fallback with no SLA.
+ * One request, no retry on 202 (DuckDuckGo's rate-limit page), 8s timeout.
+ */
 export function ddgSearchBackend(opts: DdgBackendOptions = {}): SearchBackend {
   const fetchFn = opts.fetchFn ?? fetch
   return {

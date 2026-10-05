@@ -38,6 +38,9 @@ export const readTool: ToolDefinition<z.infer<typeof readInput>> = {
       }
     }
 
+    // Re-reads are billed on every later step. If an identical window of
+    // identical bytes is still in the model's view, point back to it; once
+    // pruning, compaction or rewind hides it, the full text comes back.
     if (!(ctx.state[READ_CACHE_KEY] instanceof Map)) ctx.state[READ_CACHE_KEY] = new Map()
     const cache = ctx.state[READ_CACHE_KEY] as Map<string, ReadRecord>
     const key = `${path}\0${input.offset ?? 1}\0${input.limit ?? DEFAULT_READ_LIMIT}`

@@ -1,5 +1,9 @@
 import { BUILTIN_MODELS, fetchOllamaModels } from "./models-catalog"
 
+/**
+ * Live per-provider model listing, used right after the user enters an API
+ * key. Fails soft to [] so callers fall back to the models.dev snapshot.
+ */
 
 export interface ProviderModel {
   id: string
@@ -84,6 +88,8 @@ export async function fetchProviderModels(
         return providerId === "openai" ? models.filter((m) => !NON_CHAT_OPENAI.test(m.id)) : models
       }
       case "sarvam": {
+        // Sarvam documents no model-listing route; probe the OpenAI-standard one
+        // and fall back to the known lineup.
         const base = opts.baseURL ?? "https://api.sarvam.ai/v1"
         try {
           const response = await fetchFn(`${base}/models`, {
@@ -130,6 +136,7 @@ export async function fetchProviderModels(
             if (models.length > 0) return models
           }
         } catch {
+          // older proxy without /model/info
         }
         const response = await fetchFn(`${base}/v1/models`, { headers })
         if (!response.ok) return []

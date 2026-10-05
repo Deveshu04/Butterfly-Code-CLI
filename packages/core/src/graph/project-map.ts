@@ -5,6 +5,11 @@ import type { DefRow, FileEdge, GraphDb } from "./db"
 import { languageForPath } from "./languages"
 import { rankFiles } from "./rank"
 
+/**
+ * The project map, derived from graph.db (the markdown file is only a view).
+ * `renderProjectMap` writes `.butterfly/project-map.md` for people;
+ * `moduleOverview` is a short module summary for the model's first turn.
+ */
 
 export const PROJECT_MAP_FILE = "project-map.md"
 const MAX_MODULES = 30

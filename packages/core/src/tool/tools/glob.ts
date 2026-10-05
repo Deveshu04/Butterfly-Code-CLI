@@ -9,6 +9,7 @@ export const globInput = z.object({
 
 export const GLOB_RESULT_CAP = 200
 
+/** Paths never surfaced to the model: large, low-value token sinks. */
 export const DEFAULT_IGNORED_SEGMENTS = ["node_modules", ".git", "dist", ".butterfly"]
 
 export const globTool: ToolDefinition<z.infer<typeof globInput>> = {

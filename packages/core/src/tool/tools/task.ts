@@ -67,6 +67,7 @@ type Tier = "small" | "main"
 export const TASK_SUMMARY_CAP = 2_000
 export const TASK_MAX_STEPS = 15
 
+/** Subagents are read-only by default. */
 export const TASK_RULES: PermissionRules = {
   "*": "allow",
   edit: "deny",
@@ -74,11 +75,22 @@ export const TASK_RULES: PermissionRules = {
   memory: "deny",
 }
 
+/**
+ * Baseline rules for an isolation:"worktree" subagent: the worktree is the
+ * sandbox, but secret files stay protected. mergeWorktreeRules layers the
+ * session's denies on top.
+ */
 export const WORKTREE_RULES: PermissionRules = {
   "*": "allow",
   edit: { "*": "allow", "**/.env*": "deny", ".env*": "deny" },
 }
 
+/**
+ * WORKTREE_RULES plus every deny the session configured. Session denies
+ * always win, since bash in a worktree is not path-jailed. Session allow/ask
+ * entries and the root "*" are not inherited: the subagent has no approver,
+ * so the user is asked once at isolation entry instead.
+ */
 export function mergeWorktreeRules(session: PermissionRules): PermissionRules {
   const merged: PermissionRules = {}
   for (const [tool, entry] of Object.entries(WORKTREE_RULES)) {
@@ -102,6 +114,11 @@ export function mergeWorktreeRules(session: PermissionRules): PermissionRules {
   return merged
 }
 
+/**
+ * Toolset for an isolation:"worktree" subagent: the read-only set plus edit
+ * and bash. Tools resolve paths against ctx.cwd, which is the worktree.
+ * `extras` adds caller-owned tools (explore, web).
+ */
 export function mutatingSubagentRegistry(extras?: (registry: ToolRegistry) => void): ToolRegistry {
   const registry = new ToolRegistry()
   registry.register(readTool)
@@ -116,13 +133,22 @@ export function mutatingSubagentRegistry(extras?: (registry: ToolRegistry) => vo
 export interface TaskToolOptions {
   provider: () => ProviderPort
   model: () => string
+  /**
+   * Default subagent model (subagent_model, else small_model); a subtask opts
+   * into the main model with model:"main". Undefined: subagents use `model()`.
+   */
   subagentModel?: () => string | undefined
+  /**
+   * USD/1M pricing for a model id, so subagent spend is priced at its own
+   * model's rate. Absent or unknown: priced at the parent's rate.
+   */
   costFor?: (model: string) => ModelCost | undefined
   system: (model: string) => string
   cwd: string
   sessionsDir: string
   /** Registry for the subagent — must NOT contain the task tool (no recursion). */
   makeRegistry: () => ToolRegistry
+  /** Mutating registry for isolation:"worktree" tasks; isolation is refused without it. */
   makeMutatingRegistry?: () => ToolRegistry
   rules?: PermissionRules
   maxSteps?: number
@@ -141,6 +167,10 @@ export interface SubagentTurnResult {
   costUSD?: number
 }
 
+/**
+ * Model spend a tool incurred on the caller's behalf, carried in UI-only
+ * `meta.spend`. The runner folds it into the turn's totals and budgets.
+ */
 export interface ToolSpend {
   usage: Usage
   costUSD?: number
@@ -171,6 +201,10 @@ export function sumSpend(spends: (ToolSpend | undefined)[]): ToolSpend | undefin
   }
 }
 
+/**
+ * Runs one isolated subagent turn: own journal, caller-restricted registry,
+ * capped summary. Used by the task tool and by /review.
+ */
 /** What a subagent run reports as it goes (see SubagentUpdate). */
 export type StepCallback = (
   activity: string,
@@ -219,6 +253,7 @@ export async function runSubagentTurn(
   }
 }
 
+/** One-line ASCII status from a subagent's runner events, for live progress. */
 function stepReporter(onStep: StepCallback): (event: { type: string }) => void {
   let steps = 0
   let writing = false
@@ -240,6 +275,13 @@ function stepReporter(onStep: StepCallback): (event: { type: string }) => void {
   }
 }
 
+/**
+ * Worktree isolation: the subagent runs with a mutating toolset in a git
+ * worktree under .butterfly/worktrees/<taskId>; the parent then merges or
+ * discards it. Refused when the caller's rules deny edit or bash outright
+ * (as plan mode does). When they only ask, the user is asked once up front
+ * for the whole run or batch; with no approver the ask fails closed.
+ */
 async function gateWorktree(
   opts: TaskToolOptions,
   input: unknown,
@@ -336,6 +378,8 @@ async function runInWorktree(
   ctx: ToolContext,
   onStep?: StepCallback,
 ): Promise<ToolOutcome> {
+  // HEAD-only checkout: uncommitted main-tree work is not in the worktree,
+  // so warn the subagent and the parent.
   const subagentHeadNote = created.mainTreeDirty
     ? " NOTE: the main working tree currently has UNCOMMITTED changes that are NOT present here — this is a checkout of the last commit (HEAD) only, so some files may look older than what the user sees."
     : ""
@@ -540,6 +584,10 @@ async function mapLimit<T, R>(
   return out
 }
 
+/**
+ * Parallel fan-out. Worktrees are created sequentially because the
+ * concurrency cap is a filesystem count; the subagents then run concurrently.
+ */
 async function runBatch(
   opts: TaskToolOptions,
   input: TaskInput,
@@ -664,6 +712,11 @@ async function mergeOp(
   }
 }
 
+/**
+ * Spawn isolated subagents (own journal, restricted tools); only a capped
+ * summary returns to the parent. Ops: run one or many in parallel, and
+ * list / merge / discard worktrees.
+ */
 export function createTaskTool(opts: TaskToolOptions): ToolDefinition<TaskInput> {
   return {
     name: "task",

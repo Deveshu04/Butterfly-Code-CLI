@@ -4,6 +4,13 @@ import { GraphDb } from "./db"
 import { PROJECT_MAP_FILE, writeProjectMap } from "./project-map"
 import { type SyncResult, syncRepo } from "./sync"
 
+/**
+ * Owns the code graph for one working directory: the SQLite index
+ * (`.butterfly/graph.db`), the project map (`.butterfly/project-map.md`),
+ * and re-sync timing. `sync()` is serialized and incremental; `fresh()` is
+ * the throttled form tools call before answering. The map is rewritten only
+ * when files changed or it is missing.
+ */
 export class CodeGraph {
   private inflight: Promise<SyncResult> | undefined
   private lastSyncAt = 0

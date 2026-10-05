@@ -57,6 +57,10 @@ export function extractJsonArray(text: string): unknown[] | null {
   }
 }
 
+/**
+ * Post-turn review: asks the small model for memory deltas on the latest turn
+ * and applies them through the capped writer. Never throws.
+ */
 export async function reviewTurn(deps: ReviewDeps): Promise<ReviewOutcome> {
   const outcome: ReviewOutcome = { proposed: 0, applied: 0, rejected: 0 }
   try {

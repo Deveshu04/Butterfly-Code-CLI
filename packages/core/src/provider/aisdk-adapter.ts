@@ -79,7 +79,7 @@ export function toModelMessages(
               : message.content.map((part) =>
                   part.type === "text"
                     ? { type: "text" as const, text: part.text }
-                    :
+                    : // ImagePart is deprecated in the AI SDK; use FilePart.
                       { type: "file" as const, mediaType: part.mediaType, data: part.data },
                 ),
         })
@@ -136,6 +136,13 @@ export function toModelMessages(
   return { system, model }
 }
 
+/**
+ * Rolling Anthropic cache breakpoints. Anthropic reads from cache only up to
+ * an explicit breakpoint, so the last message is marked to cache the
+ * transcript so far, plus the previous user-side message in case the newest
+ * one moves past the lookback window. System + 2 stays within Anthropic's
+ * limit of 4. Other providers cache prefixes implicitly.
+ */
 export function withAnthropicCacheBreakpoints(messages: ModelMessage[]): ModelMessage[] {
   const marked = [...messages]
   const mark = (index: number) => {
@@ -179,6 +186,8 @@ function toSdkTools(specs: ToolSpec[] | undefined) {
   )
 }
 
+/** Classifies and describes a provider error, filling in `providerId` when
+ * classification did not find one. */
 export function buildErrorEvent(
   error: unknown,
   providerId: string,
@@ -205,6 +214,8 @@ export class AiSdkProvider implements ProviderPort {
     const messages =
       providerId === "anthropic" ? withAnthropicCacheBreakpoints(converted.model) : converted.model
 
+    // Anthropic allows at most 4 cache breakpoints per request; spend one on
+    // the system prefix, the largest stable block.
     const instructions =
       system === undefined
         ? undefined
@@ -233,11 +244,14 @@ export class AiSdkProvider implements ProviderPort {
         ? { maxOutputTokens: request.maxOutputTokens }
         : {}),
       ...(request.signal ? { abortSignal: request.signal } : {}),
+      // The runner owns retry (visible, classified, configurable). SDK
+      // retries would add a silent second layer underneath it.
       maxRetries: 0,
       // Local models (Ollama/LM Studio) cold-start into RAM on first request,
       // and CPU-only prompt eval can take minutes. Generous per-chunk, no
       // total cap; BUTTERFLY_STREAM_TIMEOUT_MS overrides for slow machines.
       timeout: { firstChunkMs: STREAM_TIMEOUT_MS, chunkMs: STREAM_TIMEOUT_MS },
+      // Errors arrive as stream "error" parts; the default would also log them.
       onError: () => {},
     })
 
@@ -299,6 +313,9 @@ export class AiSdkProvider implements ProviderPort {
       return
     }
 
+    // A stream that ends with no provider finish, no error and no abort is a
+    // dropped connection: report a retryable network failure rather than a
+    // clean stop on a partial answer. An abort still ends cleanly.
     if ((!sawFinish || truncated) && request.signal?.aborted !== true) {
       const info: ProviderErrorInfo = {
         kind: "network",

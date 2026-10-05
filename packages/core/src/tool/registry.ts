@@ -4,6 +4,11 @@ import type { ToolSpec } from "../provider/port"
 import { repairToolInput, resolveToolName } from "./repair"
 import { type SettleOptions, settle } from "./settle"
 
+/**
+ * A denial the user did not choose (timeout, disconnect, malformed reply).
+ * Reported differently from "User denied" so the model does not blame a user
+ * who never saw the prompt.
+ */
 export interface AskDenial {
   decision: "deny"
   /** Lower-case fragment, e.g. "permission request timed out after 120000ms". */
@@ -15,10 +20,16 @@ export type AskDecision = "allow" | "deny" | AskDenial
 export interface AskRequest {
   tool: string
   target?: string
+  /** Disclosure shown next to the target, e.g. "via r.jina.ai". Never used
+   * for rule matching. */
   note?: string
   input: unknown
 }
 
+/**
+ * UI-only live status of one spawned subagent. Each update carries its full
+ * current state (`id` is stable within one tool call).
+ */
 export interface SubagentUpdate {
   id: string
   index: number
@@ -45,9 +56,15 @@ export interface ToolContext {
   state: Record<string, unknown>
   settle?: SettleOptions
   signal?: AbortSignal
+  /** Runs after the permission gate allows the call, right before execute
+   * (used for per-call snapshots). Errors are ignored. */
   beforeExecute?: (toolName: string) => Promise<void>
   /** Provider call id of the call being executed (runner-supplied). */
   callId?: string
+  /**
+   * Whether an earlier call's result is still visible to the model (not
+   * pruned, not an error). Absent: assume nothing earlier is visible.
+   */
   isResultVisible?: (callId: string) => boolean
   /** Honor tools' autoAllow for blanket asks (default true). */
   autoApproveReadOnly?: boolean
@@ -60,6 +77,7 @@ export interface ToolContext {
 export interface ToolOutcome {
   output: string
   isError?: boolean
+  /** UI-only metadata (diffs, paths). Never shown to the model. */
   meta?: unknown
 }
 
@@ -102,6 +120,8 @@ function errorResult(output: string): ToolRunResult {
   return { output, isError: true, truncated: false }
 }
 
+/** Model-visible sentence for a refused call, distinguishing a user "deny"
+ * from a harness AskDenial. */
 export function describeDenial(
   name: string,
   target: string | undefined,
@@ -128,6 +148,7 @@ export class ToolRegistry {
   }
 
   async run(calledName: string, calledInput: unknown, ctx: ToolContext): Promise<ToolRunResult> {
+    // Repair mis-named tools and malformed arguments; the note is appended below.
     const notes: string[] = []
     let name = calledName
     if (!this.tools.has(name)) {
@@ -205,6 +226,7 @@ export class ToolRegistry {
       try {
         await ctx.beforeExecute(name)
       } catch {
+        // never block the call over a checkpoint failure
       }
     }
 

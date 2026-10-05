@@ -32,6 +32,8 @@ export const bashInput = z.object({
     ),
 })
 
+/** The session's BgTaskRegistry from ctx.state, created without a journal
+ * if the caller did not seed one. */
 function bgRegistry(ctx: { cwd: string; state: Record<string, unknown> }): BgTaskRegistry {
   const existing = ctx.state[BG_TASKS_STATE_KEY]
   if (existing instanceof BgTaskRegistry) return existing
@@ -52,6 +54,7 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
   async execute(input, ctx) {
     if (input.background === true) {
       const registry = bgRegistry(ctx)
+      // A shell that cannot host a detached task fails the tool call, not the turn.
       let record: ReturnType<BgTaskRegistry["spawn"]>
       try {
         record = registry.spawn(input.command, { keepAlive: input.keepAlive === true })
@@ -92,6 +95,7 @@ export const bashTool: ToolDefinition<z.infer<typeof bashInput>> = {
         : {}),
     })
     if (pending) clearTimeout(pending)
+    // UI-only: the command header and exit badge. Set on every path.
     const meta = { command: input.command, exitCode: result.exitCode }
 
     const stdout = cleanCommandOutput(result.stdout)

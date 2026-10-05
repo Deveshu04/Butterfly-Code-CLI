@@ -1,3 +1,8 @@
+/**
+ * Deterministic repairs for common malformed tool calls, applied before
+ * validation. The input must still pass the tool's schema, and the result
+ * carries a one-line note so the model learns the right form.
+ */
 
 /** Common names models invent for the 12 tools (lower-cased, separators stripped). */
 const TOOL_ALIASES: Record<string, string> = {

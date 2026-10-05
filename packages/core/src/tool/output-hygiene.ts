@@ -1,3 +1,8 @@
+/**
+ * Strips terminal noise (escapes, progress frames, repeated lines) from bash
+ * output before settle(), since many tools ignore NO_COLOR. Not applied to
+ * file reads: the model must see bytes as they are on disk.
+ */
 
 // CSI (incl. SGR colors, cursor moves, erase), OSC (titles, hyperlinks —
 // BEL or ST terminated), and the lone two-byte escapes.

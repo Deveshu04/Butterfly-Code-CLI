@@ -22,11 +22,17 @@ export interface SystemEnv {
   platform: string
   /** Day granularity — the prefix must stay byte-stable within a session. */
   date: string
+  /** Frozen memory snapshots, loaded once per session. */
   projectMemory?: string
   userMemory?: string
+  /** Skills index (name - description lines). */
   skillsIndex?: string
 }
 
+/**
+ * Build the immutable system prefix (family prompt + environment block).
+ * Frozen at session start so the prompt cache stays valid.
+ */
 export function buildSystem(modelId: string, env: SystemEnv): string {
   const family = selectPromptFamily(modelId)
   const parts = [

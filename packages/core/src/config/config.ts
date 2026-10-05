@@ -9,6 +9,7 @@ const Decision = z.enum(["allow", "ask", "deny"])
 export const ButterflyConfig = z.object({
   /** "provider/model", e.g. "openrouter/deepseek/deepseek-chat-v3". */
   model: z.string().optional(),
+  /** Cheap model for summarization and titles. */
   small_model: z.string().optional(),
   /**
    * When small_model is unset, pick a cheap same-provider model from the
@@ -33,11 +34,14 @@ export const ButterflyConfig = z.object({
     )
     .optional(),
   permissions: z.record(z.string(), z.union([Decision, z.record(z.string(), Decision)])).optional(),
+  /** Verification gates run by the loop supervisor. */
   gates: z.array(z.object({ name: z.string(), command: z.string() })).optional(),
   /** Default thinking-effort dial (overridable per session with /think). */
   reasoning: z.enum(["none", "minimal", "low", "medium", "high", "xhigh"]).optional(),
   /** Hard dollar ceiling per turn (priced from models.dev). */
   maxSpendUSD: z.number().positive().optional(),
+  /** Max retries for a transient provider failure, with exponential backoff.
+   * Default 3; 0 disables retry. */
   retries: z.number().int().min(0).optional(),
   /**
    * Auto-continue nudges per turn when the model stops with todos it was
@@ -50,6 +54,7 @@ export const ButterflyConfig = z.object({
    * patterns always win. Default true; false asks for every command.
    */
   autoApproveReadOnly: z.boolean().optional(),
+  /** Post-turn self-evolution (memory/evolve.ts). */
   memory: z
     .object({
       /** Post-turn memory review. Default true. */
@@ -60,8 +65,15 @@ export const ButterflyConfig = z.object({
       approval: z.boolean().optional(),
     })
     .optional(),
+  /** Notify on turn end and approvals while the terminal is unfocused. Default true. */
   notifications: z.boolean().optional(),
+  /**
+   * Pinned theme: a built-in ("dark"/"light"/"dark-ansi"/"light-ansi") or the
+   * basename of ~/.config/butterfly/themes/*.json. Disables light-terminal
+   * auto-detection.
+   */
   theme: z.string().optional(),
+  /** MCP servers: {"name": {command, args} | {url, headers}}. */
   mcp: z
     .record(
       z.string(),
@@ -82,10 +94,12 @@ export const ButterflyConfig = z.object({
         match: z.string().optional(),
         command: z.string(),
         feedback: z.boolean().optional(),
+        /** False skips the hook. Absent means enabled. */
         enabled: z.boolean().optional(),
       }),
     )
     .optional(),
+  /** Web search/fetch backends. Keys accept "{env:VAR}". */
   web: z
     .object({
       /** Pin a search backend; otherwise the first configured key wins, then ddg. */
@@ -97,6 +111,11 @@ export const ButterflyConfig = z.object({
       searchModel: z.string().optional(),
       /** Optional r.jina.ai key; setting one also opts op=fetch into that backend. */
       jinaKey: z.string().optional(),
+      /**
+       * Route op=fetch through the r.jina.ai reader proxy. Off by default
+       * because every URL (often presigned/tokenized) is disclosed to a third
+       * party. Better extraction on JS-heavy pages.
+       */
       allowJina: z.boolean().optional(),
       /** Default results per op=search when the model does not pass maxResults. */
       maxResults: z.number().int().min(1).max(10).optional(),
@@ -220,6 +239,7 @@ function readJsoncFile(path: string): unknown {
   return parseJsonc(text)
 }
 
+/** Precedence merge plus env substitution, without schema validation. */
 function mergeSources(opts: LoadConfigOptions): unknown {
   const home = opts.home ?? process.env["USERPROFILE"] ?? process.env["HOME"] ?? ""
   const env = opts.env ?? process.env
@@ -234,14 +254,27 @@ function mergeSources(opts: LoadConfigOptions): unknown {
   return substituteEnv(merged, env)
 }
 
+/**
+ * Loads and merges configuration, later sources winning:
+ * ~/.config/butterfly/butterfly.jsonc, then project butterfly.jsonc, then
+ * project .butterfly/butterfly.jsonc. "{env:VAR}" resolves everywhere.
+ */
 export function loadConfig(opts: LoadConfigOptions): ButterflyConfig {
   return ButterflyConfig.parse(mergeSources(opts))
 }
 
+/**
+ * Like loadConfig but without schema validation or unknown-key stripping, so
+ * /doctor can report typo'd keys and malformed entries.
+ */
 export function loadRawConfig(opts: LoadConfigOptions): unknown {
   return mergeSources(opts)
 }
 
+/**
+ * Deep-merges `patch` into the global config file, written as plain JSON.
+ * Returns the file path.
+ */
 export function saveGlobalConfig(patch: Partial<ButterflyConfig>, opts: { home: string }): string {
   const path = join(opts.home, ".config", "butterfly", "butterfly.jsonc")
   const existing = readJsoncFile(path) ?? {}
@@ -251,7 +284,8 @@ export function saveGlobalConfig(patch: Partial<ButterflyConfig>, opts: { home: 
   return path
 }
 
-
+/** True when `text` has a comment outside string literals. Write-back refuses
+ * such files because re-serializing would drop the comments. */
 function containsComments(text: string): boolean {
   let inString = false
   let i = 0
@@ -285,6 +319,10 @@ export interface ConfigHooksSource {
   hooks: unknown[]
 }
 
+/**
+ * Finds the config file whose `hooks` array is in effect. Arrays replace
+ * wholesale when merged, so the most local file that defines `hooks` owns it.
+ */
 export function locateHooksSource(opts: LoadConfigOptions): ConfigHooksSource | undefined {
   const home = opts.home ?? process.env["USERPROFILE"] ?? process.env["HOME"] ?? ""
   const candidates: { path: string; scope: "global" | "project" }[] = [
@@ -305,9 +343,14 @@ export interface HookToggleResult {
   ok: boolean
   path: string
   scope: "global" | "project"
+  /** When ok is false (file has comments): the edit to apply by hand. */
   snippet?: string
 }
 
+/**
+ * Flips `hooks[index].enabled` in the file that owns the hooks array. A file
+ * with comments is left untouched and the caller gets a manual `snippet`.
+ */
 export function setHookEnabled(
   index: number,
   enabled: boolean,
@@ -340,13 +383,18 @@ export function setHookEnabled(
   return { ok: true, path: source.path, scope: source.scope }
 }
 
-
 export interface PermissionWriteResult {
   ok: boolean
   path: string
+  /** When ok is false (file has comments): the edit to apply by hand. */
   snippet?: string
 }
 
+/**
+ * Writes one narrowed allow rule into `<cwd>/butterfly.jsonc`. An existing
+ * blanket decision for `tool` survives as a "*" fallback. A file with
+ * comments is left untouched and the caller gets a manual `snippet`.
+ */
 export function setPermissionRule(
   tool: string,
   pattern: string,
@@ -369,6 +417,7 @@ export function setPermissionRule(
     ? (base["permissions"] as PermissionRules)
     : {}
   base["permissions"] = mergeAllowRule(currentPermissions, tool, pattern)
+  // Validate before writing so a malformed file is never extended silently.
   ButterflyConfig.parse(base)
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, `${JSON.stringify(base, null, 2)}\n`)

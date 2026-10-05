@@ -46,6 +46,8 @@ async function loadLanguage(spec: LanguageSpec): Promise<LoadedLanguage | null> 
     cache.set(spec.id, loaded)
     return loaded
   } catch {
+    // Queries are version-coupled to grammars; an unloadable language
+    // just contributes no tags.
     cache.set(spec.id, null)
     return null
   }
@@ -55,6 +57,10 @@ export function specForPath(path: string): LanguageSpec | undefined {
   return languageForPath(path)
 }
 
+/**
+ * Parse one file and extract def/ref tags. Returns null for unsupported
+ * languages. Trees are deleted after use (wasm memory is manual).
+ */
 export async function scanFile(path: string, source: string): Promise<Tag[] | null> {
   const spec = languageForPath(path)
   if (!spec) return null

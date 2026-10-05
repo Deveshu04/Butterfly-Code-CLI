@@ -1,3 +1,8 @@
+/**
+ * Lightweight HTML-to-text extraction for docs/API pages: strip non-content
+ * tags, decode entities, collapse whitespace. Can mis-nest on same-tag
+ * nesting (e.g. <nav><nav>), which is acceptable here.
+ */
 
 const COMMENTS = /<!--[\s\S]*?-->/g
 const REMOVE_BLOCKS =

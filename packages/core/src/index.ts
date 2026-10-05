@@ -114,8 +114,10 @@ export {
   runLoop,
   type StopReason,
 } from "./loop/supervisor"
+// MCP
 export { McpHub, type McpServerConfig, type McpToolInfo } from "./mcp/hub"
 export { createMcpTool } from "./mcp/mcp-tool"
+// Memory
 export { type EpisodicHit, EpisodicIndex } from "./memory/episodic"
 export {
   describeEvolution,
@@ -167,6 +169,7 @@ export {
   type QuickAddPlan,
 } from "./permission/quick-add"
 export { type PermissionDecision, type PermissionRules, resolvePermission } from "./permission/tree"
+// Platform (compiled-exe asset embedding)
 export {
   defaultAssetCacheRoot,
   type EmbeddedAssetSource,

@@ -1,7 +1,9 @@
 import type { DefRow, GraphDb } from "./db"
 
 export interface RankOptions {
+  /** Files currently in the conversation (x50 edge weight). */
   chatFiles?: string[]
+  /** Identifiers mentioned in the task (x10 edge weight). */
   mentionedIdents?: string[]
 }
 
@@ -12,6 +14,11 @@ function isWellNamed(name: string): boolean {
   return name.length >= 8 && /[a-zA-Z]/.test(name)
 }
 
+/**
+ * Personalized PageRank over the file graph. Edges run referencer -> definer
+ * per identifier; weights: chat x50, mentioned x10, well-named x10,
+ * _private x0.1, >5 definers x0.1, scaled by sqrt(ref count).
+ */
 export function rankFiles(db: GraphDb, opts?: RankOptions): Map<string, number> {
   const defs = db.defs()
   const refs = db.refs()

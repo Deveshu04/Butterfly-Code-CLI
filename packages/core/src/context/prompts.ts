@@ -1,3 +1,7 @@
+/**
+ * Per-model system prompt families: a shared core plus family addenda,
+ * selected by model-id substring in system.ts.
+ */
 
 const CORE = `You are Butterfly Code, an agentic coding assistant running in the user's terminal. You work directly in their repository with real tools. Your job is to complete the user's coding task correctly with the fewest wasted steps.
 

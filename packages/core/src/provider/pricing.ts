@@ -8,6 +8,11 @@ export interface ModelCost {
   cacheWrite?: number
 }
 
+/**
+ * `usage.input` is the total prompt size (AI SDK v7 inputTokens includes
+ * cache reads and writes). Only the uncached remainder bills at the input
+ * rate; cache reads/writes bill at their own rates.
+ */
 export function computeCostUSD(usage: Usage, cost: ModelCost): number {
   const fresh = Math.max(0, usage.input - usage.cacheRead - usage.cacheWrite)
   return (
@@ -25,6 +30,7 @@ export function formatUSD(amount: number): string {
   return `$${amount.toFixed(2)}`
 }
 
+/** Share of prompt tokens served from the provider's cache, 0..1; undefined with no input. */
 export function cacheHitRate(usage: Usage): number | undefined {
   if (usage.input <= 0) return undefined
   return Math.min(1, usage.cacheRead / usage.input)

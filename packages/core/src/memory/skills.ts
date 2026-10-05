@@ -2,6 +2,11 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { join } from "node:path"
 import { estimateTokens } from "../context/tokens"
 
+/**
+ * Skills with progressive disclosure: an L0 name+description index in the
+ * prefix, the L1 body on demand via the skill tool. Agent-authored skills
+ * enter the index only after 2 verified runs.
+ */
 
 export interface SkillMeta {
   name: string
@@ -127,6 +132,10 @@ export function recordSkillRun(dirs: string[], name: string, success: boolean): 
   atomicWrite(parsed.meta.path, setField(raw, "verified", String(parsed.meta.verified + 1)))
 }
 
+/**
+ * A turn loaded this skill. Usage always counts; a successful turn also
+ * counts as a verified run for agent-authored skills.
+ */
 export function recordSkillUse(dirs: string[], name: string, success: boolean): SkillMeta | null {
   const parsed = findSkill(dirs, name)
   if (!parsed) return null
@@ -153,6 +162,11 @@ export type SkillWriteResult =
   | { status: "drafted" | "reinforced" | "promoted"; meta: SkillMeta }
   | { status: "rejected"; message: string }
 
+/**
+ * Agent-authored skill write. A new name starts as a draft with verified: 1;
+ * the same name again reinforces it (verified+1, body refreshed) until it
+ * reaches PROMOTION_THRESHOLD. Human-authored skills are never overwritten.
+ */
 export function writeAgentSkill(
   dir: string,
   draft: SkillDraft,
@@ -257,6 +271,7 @@ export function isPromoted(skill: SkillMeta): boolean {
   return skill.origin === "human" || skill.verified >= PROMOTION_THRESHOLD
 }
 
+/** Unverified agent drafts, listed by the skill tool (not the prefix). */
 export function draftSkills(dirs: string[]): SkillMeta[] {
   return listSkills(dirs).filter((skill) => !isPromoted(skill))
 }

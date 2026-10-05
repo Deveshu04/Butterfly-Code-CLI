@@ -3,6 +3,7 @@ import type { DefRow, GraphDb } from "./db"
 import { type RankOptions, rankedDefinitions } from "./rank"
 
 export interface SkeletonOptions extends RankOptions {
+  /** Token budget for the rendered map. */
   budgetTokens?: number
 }
 
@@ -53,6 +54,11 @@ function looksLikeSymbol(word: string): boolean {
   return word.length >= 4 && (/[a-z][A-Z]|_|^[A-Z][a-z]+[A-Z]/.test(word) || word.length >= 8)
 }
 
+/**
+ * Later-turn graph hint: only the locations of symbols/files the message
+ * names, or nothing. Appended to the user message, never the prefix, so the
+ * prompt cache is untouched.
+ */
 export function focusedSkeleton(db: GraphDb, text: string, budgetTokens = 300): string {
   const lines: string[] = []
   const seen = new Set<string>()

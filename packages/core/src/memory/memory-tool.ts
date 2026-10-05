@@ -12,6 +12,10 @@ export const memoryToolInput = z.object({
   query: z.string().optional().describe("search: what to look for in past sessions"),
 })
 
+/**
+ * Durable memory deltas (capped, scanned, frozen until the next session)
+ * plus FTS5 search over past session journals.
+ */
 export function createMemoryTool(opts: {
   paths: MemoryPaths
   episodic: () => EpisodicIndex | undefined

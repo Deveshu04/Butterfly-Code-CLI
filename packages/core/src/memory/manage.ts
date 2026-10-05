@@ -2,6 +2,10 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { type MemoryPaths, PROJECT_MEMORY_CAP, USER_MEMORY_CAP } from "./files"
 import { isPromoted, listSkills, PROMOTION_THRESHOLD, type SkillMeta } from "./skills"
 
+/**
+ * What /memory and /skills show and edit: pure functions over the same files
+ * the agent writes, so a person can review and undo what it learned.
+ */
 
 export interface MemoryLine {
   /** 1-based, numbered across project then user — what `/memory forget <n>` takes. */
