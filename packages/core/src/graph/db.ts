@@ -157,6 +157,7 @@ export class GraphDb {
         "SELECT file, name, kind as symbolKind, row, endRow FROM symbols WHERE file = ? ORDER BY row",
       )
       .all(path) as DefRow[]
+    // One row per name+line, in case a query captures a node under two kinds.
     const seen = new Set<string>()
     return rows.filter((row) => {
       const key = `${row.name}:${row.row}`
