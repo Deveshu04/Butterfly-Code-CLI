@@ -15,6 +15,7 @@ import {
   turnMarker,
 } from "../src/format"
 
+// --- humanizeTokens ---
 
 test("humanizeTokens prints small counts as plain integers, never a '0.0k'-style suffix", () => {
   expect(humanizeTokens(0)).toBe("0")
@@ -28,6 +29,7 @@ test("humanizeTokens abbreviates thousands with one decimal", () => {
   expect(humanizeTokens(1000)).toBe("1.0k")
 })
 
+// --- middleEllipsize ---
 
 test("middleEllipsize leaves short text untouched", () => {
   expect(middleEllipsize("short", 20)).toBe("short")
@@ -62,6 +64,7 @@ test("tool results show more lines for errors than successes", () => {
   expect(err).toContain("2 more")
 })
 
+// --- formatToolResult status words ---
 
 test("formatToolResult prefixes plain 'ok'/'failed' words, never a check/cross glyph", () => {
   const ok = formatToolResult("all good", false)
@@ -74,6 +77,7 @@ test("formatToolResult prefixes plain 'ok'/'failed' words, never a check/cross g
   }
 })
 
+// --- splitThink ---
 
 test("splitThink extracts a closed think block's inner text and leaves the answer as rest", () => {
   const result = splitThink("<think>\nreasoning here\n</think>\nThe answer is 4")
@@ -107,6 +111,7 @@ test("stripThink stays byte-identical to splitThink(text).rest (regression pin)"
   }
 })
 
+// --- formatCommandBody ---
 
 test("formatCommandBody has no leading icon and no per-line indent, unlike formatToolResult", () => {
   const output = "line1\nline2"
@@ -124,6 +129,7 @@ test("formatCommandBody shows more lines for a failing command, matching formatT
   expect(body).toContain("2 more")
 })
 
+// --- formatDuration / turnMarker ---
 
 test("formatDuration prints seconds-only under a minute", () => {
   expect(formatDuration(0)).toBe("0s")
@@ -153,6 +159,7 @@ test("turnMarker omits the duration segment entirely when none is given — repl
   expect(marker).not.toMatch(/\d+s$/)
 })
 
+// --- metersFitAt ---
 
 test("metersFitAt is a pinned cutoff at STATUS_METERS_MIN_WIDTH, not a soft/organic one", () => {
   expect(metersFitAt(STATUS_METERS_MIN_WIDTH - 1)).toBe(false)
@@ -160,6 +167,7 @@ test("metersFitAt is a pinned cutoff at STATUS_METERS_MIN_WIDTH, not a soft/orga
   expect(metersFitAt(STATUS_METERS_MIN_WIDTH + 40)).toBe(true)
 })
 
+// --- copyStatusText ---
 
 test("copyStatusText: plain 'copied' for a selection under the cap", () => {
   expect(copyStatusText(false)).toBe("copied")
@@ -171,8 +179,10 @@ test("copyStatusText: truncation notice names the cap and says what happened", (
 
 test("copyStatusText: the truncation figure is the RAW size the clipboard got, derived from the one constant", () => {
   const notice = copyStatusText(true)
+  // The cap is 100KB base64-side, but only floor(cap/4)*3 raw bytes are copied.
   expect(notice).toContain(`~${Math.round(OSC52_TEXT_CAP_BYTES / 1024)}KB`)
   expect(notice).not.toContain("100KB")
+  // Derived from the constant, not hardcoded.
   expect(notice).toContain(osc52CapLabel())
 })
 

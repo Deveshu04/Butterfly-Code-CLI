@@ -25,6 +25,7 @@ test("DARK_TOKENS pins the default palette", () => {
   expect(DARK_TOKENS.accent).toBe("#c9a7ff")
   expect(DARK_TOKENS.error).toBe("#ff8080")
   expect(DARK_TOKENS.warn).toBe("#ffcc66")
+  // markdown/syntax tokens
   expect(DARK_TOKENS.fg).toBe("#e8e8e8")
   expect(DARK_TOKENS.heading).toBe("#ffffff")
   expect(DARK_TOKENS.strong).toBe("#ffffff")
@@ -38,6 +39,7 @@ test("DARK_TOKENS pins the default palette", () => {
   expect(DARK_TOKENS.func).toBe("#dcdcaa")
   expect(DARK_TOKENS.number).toBe("#b5cea8")
   expect(DARK_TOKENS.type).toBe("#4ec9b0")
+  // OpenTUI <diff> built-in defaults, so the default theme doesn't repaint diffs.
   expect(DARK_TOKENS.diffAdd).toBe("#22c55e")
   expect(DARK_TOKENS.diffDel).toBe("#ef4444")
   expect(DARK_TOKENS.diffAddBg).toBe("#1a4d1a")
@@ -56,6 +58,7 @@ test("applyOverrides resolves known keys and silently ignores unknown/malformed 
   expect(result.accent).toBe("#ff00ff")
   expect(result.warn).toBe(DARK_TOKENS.warn)
   expect((result as unknown as Record<string, unknown>).bogusTypo).toBeUndefined()
+  // base is not mutated
   expect(DARK_TOKENS.accent).toBe("#c9a7ff")
 })
 

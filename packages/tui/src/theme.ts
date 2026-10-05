@@ -3,6 +3,11 @@ import { basename, join } from "node:path"
 import { SyntaxStyle } from "@opentui/core"
 import { createSignal } from "solid-js"
 
+/**
+ * Semantic color tokens used by every TUI component; colors are never
+ * hardcoded at call sites. A theme is a builtin base plus optional overrides
+ * from `~/.config/butterfly/themes/*.json`, held in one reactive store.
+ */
 export interface ThemeTokens {
   bg: string
   fg: string
@@ -35,6 +40,10 @@ export interface ThemeTokens {
   diffLineNumberBg: string
 }
 
+/**
+ * Default theme. The diff colors match OpenTUI's `<diff>` built-in defaults,
+ * so wiring them through tokens leaves the default look unchanged.
+ */
 export const DARK_TOKENS: ThemeTokens = {
   bg: "transparent",
   fg: "#e8e8e8",
@@ -96,6 +105,10 @@ export const LIGHT_TOKENS: ThemeTokens = {
   diffLineNumberBg: "transparent",
 }
 
+/**
+ * The 16 ANSI color names OpenTUI's `parseColor` recognizes; they downsample
+ * predictably on limited-palette terminals.
+ */
 export const ANSI_COLOR_NAMES = [
   "black",
   "red",
@@ -116,6 +129,10 @@ export const ANSI_COLOR_NAMES = [
 ] as const
 export type AnsiColorName = (typeof ANSI_COLOR_NAMES)[number]
 
+/**
+ * 16-color-safe presets: every value is an ANSI_COLOR_NAME, except background
+ * tokens, which stay "transparent" since the terminal palette is unknown.
+ */
 export const DARK_ANSI_TOKENS: ThemeTokens = {
   bg: "transparent",
   fg: "white",
@@ -183,6 +200,7 @@ export const BUILTIN_THEMES: Record<string, ThemeTokens> = {
   "light-ansi": LIGHT_ANSI_TOKENS,
 }
 
+/** Background tokens; "transparent" is allowed for these under the ANSI-safe check. */
 const BACKGROUND_TOKEN_KEYS = new Set<keyof ThemeTokens>([
   "bg",
   "diffAddBg",
@@ -191,6 +209,7 @@ const BACKGROUND_TOKEN_KEYS = new Set<keyof ThemeTokens>([
   "diffLineNumberBg",
 ])
 
+/** True iff every token is an ANSI_COLOR_NAME or a transparent background. */
 export function isAnsiSafeTheme(theme: ThemeTokens): boolean {
   const names: readonly string[] = ANSI_COLOR_NAMES
   return (Object.keys(theme) as (keyof ThemeTokens)[]).every((key) => {
@@ -211,6 +230,10 @@ export interface ThemeFile {
   overrides?: Record<string, unknown>
 }
 
+/**
+ * Applies `overrides` on top of `base` without mutating it. Unknown keys and
+ * non-string values are ignored so a typo in a theme file can't break rendering.
+ */
 export function applyOverrides(
   base: ThemeTokens,
   overrides?: Record<string, unknown>,
@@ -225,6 +248,10 @@ export function applyOverrides(
   return result
 }
 
+/**
+ * Resolves a theme name against built-ins and custom files. A custom file's
+ * `base` defaults to "dark"; unknown names fall back to dark, never throw.
+ */
 export function resolveTheme(name: string, custom: Record<string, ThemeFile> = {}): ThemeTokens {
   const file = custom[name]
   if (file) {
@@ -238,6 +265,7 @@ export function themesDir(home: string): string {
   return join(home, ".config", "butterfly", "themes")
 }
 
+/** Reads every `*.json` in themesDir(home). Malformed files and a missing dir are skipped. */
 export function loadCustomThemes(home: string): Record<string, ThemeFile> {
   const dir = themesDir(home)
   let entries: string[]
@@ -262,25 +290,33 @@ export function loadCustomThemes(home: string): Record<string, ThemeFile> {
         }
       }
     } catch {
+      // malformed theme JSON: skip
     }
   }
   return result
 }
 
+/** Built-in and custom theme names, deduped and sorted, for the /theme picker. */
 export function listThemeNames(home: string): string[] {
   const names = new Set<string>(Object.keys(BUILTIN_THEMES))
   for (const name of Object.keys(loadCustomThemes(home))) names.add(name)
   return [...names].sort()
 }
 
+/** Looks up a builtin theme by name, falling back to dark. */
 export function builtinTheme(name: string): ThemeTokens {
   return BUILTIN_THEMES[name] ?? DARK_TOKENS
 }
 
 // --- Reactive store --------------------------------------------------------
 
+/**
+ * Reactive token store, seeded with DARK_TOKENS. app.tsx sets the real theme
+ * synchronously on every mount, so each App starts from a known state.
+ */
 const [themeTokensSignal, setThemeTokensSignal] = createSignal<ThemeTokens>(DARK_TOKENS)
 
+/** Current tokens. Call inside JSX (don't cache) so theme switches re-render. */
 export function themeTokens(): ThemeTokens {
   return themeTokensSignal()
 }
@@ -290,6 +326,10 @@ export function setThemeTokens(next: ThemeTokens): void {
   setThemeTokensSignal(next)
 }
 
+/**
+ * Built once at module scope: SyntaxStyle wraps a native handle, and
+ * recreating it per render leaks. Syntax colors do not follow theme switches.
+ */
 export const SYNTAX = SyntaxStyle.fromTheme([
   { scope: ["default"], style: { foreground: DARK_TOKENS.fg } },
   { scope: ["markup.heading"], style: { foreground: DARK_TOKENS.heading, bold: true } },

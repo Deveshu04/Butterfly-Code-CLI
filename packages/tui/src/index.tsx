@@ -6,6 +6,11 @@ import { installWin32ConsoleGuard } from "./terminal-win32"
 
 export { fitsWordmark, renderWordmark, wordmarkMode } from "./wordmark"
 
+/**
+ * Boot the full-screen TUI. render() resolves at mount, not exit, so this
+ * blocks on the renderer's "destroy" event. A crash restores the terminal
+ * from the alternate screen before the error prints.
+ */
 export async function startTui(opts: { cwd: string; home?: string }): Promise<void> {
   const config = loadConfig({ cwd: opts.cwd })
   const stopConsoleGuard = installWin32ConsoleGuard()
@@ -25,6 +30,8 @@ export async function startTui(opts: { cwd: string; home?: string }): Promise<vo
       // terminal may already be restored
     }
     clearTerminalProgress()
+    // A crash never reaches /quit's reap, so stop background tasks here.
+    // Synchronous, never throws; keepAlive tasks are spared.
     reapAllBackgroundTasks()
     stopConsoleGuard()
     console.error(
@@ -47,6 +54,7 @@ export async function startTui(opts: { cwd: string; home?: string }): Promise<vo
   // destroy() restored the screen but not the OSC 9;4 progress indicator a
   // mid-turn quit may have left running.
   clearTerminalProgress()
+  // Backstop for exits that skipped /quit's reap. Idempotent.
   reapAllBackgroundTasks()
   stopConsoleGuard()
 }

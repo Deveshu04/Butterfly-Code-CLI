@@ -1,6 +1,16 @@
+/**
+ * Multi-pane layout: plan, agents and usage panels that stay put while the
+ * transcript scrolls, split by terminal width. Pure, so panels.tsx only
+ * renders what these functions decide. ASCII-only glyphs so the panels read
+ * the same in Windows conhost.
+ */
 import type { SubagentUpdate } from "@butterfly/core"
 import { humanizeTokens, middleEllipsize } from "./format"
 
+/**
+ * Breakpoints keep the conversation at ~80+ columns: the sidebar docks at 120
+ * (32 cols, center ~84); the agents column joins at 180 (34 + 42 + center >= 100).
+ */
 export const SIDEBAR_MIN_WIDTH = 120
 export const AGENTS_PANE_MIN_WIDTH = 180
 /** A shown panel hides only this many columns below its threshold (no flapping while resizing). */
@@ -81,6 +91,10 @@ export function todoRows(
   return rows
 }
 
+/**
+ * A long plan, windowed around the work: finished items collapse to "+N done",
+ * then the current item and what follows, then "+M more".
+ */
 export function planWindow(
   todos: TodoItemView[],
   max: number,
@@ -204,6 +218,11 @@ export function usageLines(u: {
 
 // --- compact tool results ----------------------------------------------------
 
+/**
+ * A one-line outcome shown on a successful call's own row ("read src/a.ts ·
+ * 342 lines"). Undefined when the full result matters (task reports, unknown
+ * tools), which keep the result block.
+ */
 export function compactToolResult(name: string, output: string): string | undefined {
   const first = output.split("\n", 1)[0] ?? ""
   switch (name) {
@@ -249,6 +268,7 @@ export function compactToolResult(name: string, output: string): string | undefi
 
 // --- actions vs. words --------------------------------------------------------
 
+/** Tool family; colours the verb on an action row so reads, edits and runs differ at a glance. */
 export type ToolTone = "read" | "edit" | "shell" | "agent" | "plan" | "other"
 
 export function toolTone(name: string): ToolTone {

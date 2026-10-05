@@ -1,3 +1,7 @@
+/**
+ * ANSI Shadow logotype: "BUTTERFLY" muted grey + "CODE" bold white. Single
+ * line on wide terminals, stacked on medium, plain text on narrow.
+ */
 
 const BUTTERFLY = [
   "██████╗ ██╗   ██╗████████╗████████╗███████╗██████╗ ███████╗██╗  ██╗   ██╗",

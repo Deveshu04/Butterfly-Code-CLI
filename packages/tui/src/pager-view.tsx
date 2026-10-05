@@ -16,6 +16,11 @@ export interface PagerViewProps {
 const HELP_LINE =
   "-- PAGER --  / search · n/N next/prev · { } prompts · [ scrollback · v $EDITOR · q/Esc/^O close"
 
+/**
+ * Full-screen transcript pager (Ctrl+O). Presentation only; app.tsx owns the
+ * state and keys. Scroll-to-match uses the source line number, so it is
+ * approximate rather than pixel-exact.
+ */
 export function PagerView(props: PagerViewProps) {
   const matchIndex = () => props.matches.indexOf(props.currentLine)
   const promptIndex = () => props.doc.promptLines.indexOf(props.currentLine)
@@ -29,6 +34,7 @@ export function PagerView(props: PagerViewProps) {
         ref={props.scrollRef}
         flexGrow={1}
         minHeight={0}
+        // Same gutter and themed track as the transcript scrollbox.
         viewportOptions={{ paddingRight: 2 }}
         verticalScrollbarOptions={{
           trackOptions: {

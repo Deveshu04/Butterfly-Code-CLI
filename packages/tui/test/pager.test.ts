@@ -20,6 +20,7 @@ test("buildPagerDoc splits the export into lines and finds user-prompt headings"
   const doc = buildPagerDoc(source)
   expect(doc.source).toBe(source)
   expect(doc.lines.length).toBe(9)
+  // "## ❯ " is the heading exportSessionMarkdown emits for user messages.
   expect(doc.promptLines).toEqual([2, 6])
 })
 
@@ -29,6 +30,7 @@ test("buildPagerDoc finds no prompt lines in a doc with no user messages", () =>
 })
 
 test("{ } prompt jumps skip turns /undo rewound out of the conversation", () => {
+  // Uses a real journal export so the heading coupling is actually tested.
   const dir = mkdtempSync(join(tmpdir(), "bfly-pager-undone-"))
   const journal = SessionJournal.create(dir)
   journal.append({ type: "message.user", id: "u1", text: "kept ask", time: now() }) // 0
@@ -39,6 +41,7 @@ test("{ } prompt jumps skip turns /undo rewound out of the conversation", () => 
 
   const doc = buildPagerDoc(exportSessionMarkdown(journal.path))
   expect(doc.promptLines.map((i) => doc.lines[i])).toEqual(["## ❯ kept ask", "## ❯ live again"])
+  // Undone history is labelled and still searchable.
   expect(doc.source).toContain("undone ask")
   expect(searchPagerLines(doc.lines, "undone ask").length).toBe(1)
 })

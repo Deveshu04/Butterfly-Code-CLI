@@ -25,6 +25,7 @@ test("exact names and aliases resolve with their argument", () => {
 })
 
 test("unique prefixes resolve, ambiguous ones suggest", () => {
+  // "/com" is ambiguous between compact/commit; "/comp" is unique.
   const unique = findCommand("/comp")
   expect(unique && "command" in unique ? unique.command.name : "").toBe("compact")
 
@@ -70,14 +71,17 @@ test("help covers every command and hints narrow while typing", () => {
   expect(commandHints("plain text")).toBe("")
 })
 
+// --- /help layout ---
 
 test("help wraps every long description with a hanging indent instead of overflowing the usage column", () => {
   const help = renderHelp()
   const lines = help.split("\n")
+  // /review's description wraps; continuations must be indented, not flush left.
   const reviewIndex = lines.findIndex((line) => line.trimStart().startsWith("/review"))
   expect(reviewIndex).toBeGreaterThan(-1)
   const reviewLine = lines[reviewIndex] ?? ""
   expect(reviewLine).toContain("read-only subagent review")
+  // Continuation lines start with more leading space than the usage line.
   const usageIndent = reviewLine.match(/^\s*/)?.[0].length ?? 0
   for (let i = reviewIndex + 1; i < lines.length && !/^\s*\/\w/.test(lines[i] ?? ""); i++) {
     const line = lines[i] ?? ""
@@ -92,6 +96,7 @@ test("an oversized usage (/loop) gets its own line — never crowds or truncates
   const lines = help.split("\n")
   const loopIndex = lines.findIndex((line) => line.trimStart().startsWith("/loop"))
   expect(loopIndex).toBeGreaterThan(-1)
+  // The usage line carries only the usage.
   expect(lines[loopIndex]?.trim()).toBe("/loop plan <goal> | run [--allow-dirty] | status")
   // The description starts on the very next line, indented under it.
   const next = lines[loopIndex + 1] ?? ""
@@ -104,6 +109,7 @@ test("the keys line is one key per row, not a 3-line wall of text", () => {
   expect(help).toContain("keys:")
   expect(help).toContain("Ctrl+C interrupts, twice quits")
   expect(help).toContain("Ctrl+O opens the transcript pager")
+  // Distinct keys land on distinct lines.
   const lines = help.split("\n")
   const ctrlCLine = lines.find((line) => line.includes("Ctrl+C interrupts"))
   expect(ctrlCLine).not.toContain("Ctrl+O")
@@ -369,6 +375,7 @@ test("/provider <name> dispatches to CommandActions.selectProvider with the trim
   expect(calls).toEqual(["select:openai"])
 })
 
+// --- aliases in the `/` suggestion list ---
 
 test("commandMatches surfaces /resume for /res, and prefix rows still show", () => {
   expect(commandMatches("/res")[0]?.name).toBe("resume")
@@ -376,6 +383,7 @@ test("commandMatches surfaces /resume for /res, and prefix rows still show", () 
 })
 
 test("commandMatches never double-lists a command that matches by both name and alias", () => {
+  // "/provider" matches both its name and its "providers" alias; still one row.
   const matches = commandMatches("/provider")
   expect(matches.filter((c) => c.name === "provider").length).toBe(1)
 })

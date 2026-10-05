@@ -1,3 +1,13 @@
+/**
+ * Persistent panels of the multi-pane layout. Render-only: text comes from
+ * layout.ts and state lives in app.tsx.
+ *
+ *   Sidebar (right):  Session · Plan · Agents (when no agents column) ·
+ *                     Context & usage · Files changed
+ *   Agents (left):    one card per parallel subagent, live; the selected
+ *                     one's conversation fills the center when opened
+ *   Strip (narrow):   plan + agents in one or two lines above the composer
+ */
 import { For, Show } from "solid-js"
 import {
   type AgentEntry,
@@ -207,6 +217,7 @@ export function AgentsPane(props: { width: number; agents: AgentEntry[]; selecte
   )
 }
 
+/** Every shell the agent has: what runs, for how long, and how finished ones ended. */
 function ShellsSection(props: { shells: ShellView[]; now: number; width: number }) {
   const counts = () => shellCounts(props.shells)
   return (
@@ -237,6 +248,7 @@ function ShellsSection(props: { shells: ShellView[]; now: number; width: number 
   )
 }
 
+/** A shell's full output in the center pane, live while it runs. Ctrl+X K stops it. */
 export function ShellPane(props: {
   shell: ShellView
   ordinal: number

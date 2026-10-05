@@ -190,6 +190,7 @@ describe("toComposerDraft", () => {
   })
 
   test("carriage returns collapse into a single marker, never a stray \\r", () => {
+    // InputRenderable strips both \n and \r.
     expect(toComposerDraft("a\r\nb")).toBe(`a${NEWLINE_MARKER}b`)
   })
 
@@ -217,6 +218,7 @@ describe("removeTrailingChip", () => {
   })
 
   test("KEEPS the payload when an identical label still remains in the draft", () => {
+    // Deleting a hand-typed copy must keep the payload the original still uses.
     const payloads = new Map([[1, "PAYLOAD"]])
     const result = removeTrailingChip("[Pasted #1 +1 lines] [Pasted #1 +1 lines]", payloads)
     expect(result?.draft).toBe("[Pasted #1 +1 lines] ")
@@ -241,6 +243,7 @@ describe("unreferencedChips", () => {
 
   test("a label edited into a no-longer-matching shape orphans its payload", () => {
     const payloads = new Map([[1, "A"]])
+    // One character deleted: the label no longer matches, so the payload is orphaned.
     expect(unreferencedChips("[Pasted #1 +1 lines", payloads)).toEqual([1])
   })
 

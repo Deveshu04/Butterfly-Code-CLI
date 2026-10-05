@@ -31,18 +31,27 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))
 }
 
+/**
+ * A clean, self-contained git repo. Tests don't rely on tmpdir being outside
+ * any repo, since a stray ancestor `.git` would otherwise be detected.
+ */
 async function gitFixture(cwd: string): Promise<void> {
   await runCommand("git init -q && git config user.email t@t && git config user.name t", { cwd })
   writeFileSync(join(cwd, "app.ts"), "export const v = 1\n")
   await runCommand("git add -A && git commit -qm init", { cwd })
 }
 
+/** gitFixture plus a staged modification, so /commit has a diff to describe. */
 async function stagedGitFixture(cwd: string): Promise<void> {
   await gitFixture(cwd)
   writeFileSync(join(cwd, "app.ts"), "export const v = 2\n")
   await runCommand("git add -A", { cwd })
 }
 
+/**
+ * Minimal local OpenAI-compatible `/chat/completions` SSE server returning a
+ * canned text reply. ("mock/model" elsewhere fails fast before any reply.)
+ */
 function startFakeChatServer(
   replyText: string,
   opts: { delayMs?: number } = {},
@@ -62,6 +71,7 @@ function startFakeChatServer(
     "data: [DONE]\n\n"
   const server = Bun.serve({
     port: 0,
+    // `delayMs` gives a test time to act (e.g. open the pager) before the reply.
     fetch: async () => {
       if (opts.delayMs) await new Promise((resolve) => setTimeout(resolve, opts.delayMs))
       return new Response(body, { headers: { "content-type": "text/event-stream" } })
@@ -70,6 +80,10 @@ function startFakeChatServer(
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+/**
+ * Same wire format, but the reply is a `bash` tool call, which raises a
+ * permission ask from inside a running turn (busy, with a live AbortController).
+ */
 function startFakeToolCallServer(command: string): { baseURL: string; stop: () => void } {
   const body =
     `data: ${JSON.stringify({
@@ -105,11 +119,13 @@ function startFakeToolCallServer(command: string): { baseURL: string; stop: () =
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+// --- fixtures: reasoning deltas, inline <think>, multi-step tool sequences ---
 
 function sseChunk(obj: unknown): string {
   return `data: ${JSON.stringify(obj)}\n\n`
 }
 
+/** One tool-call step for an arbitrary tool/args/callId. */
 function toolCallStreamBody(toolName: string, args: unknown, callId: string): string {
   return (
     sseChunk({
@@ -141,6 +157,7 @@ function toolCallStreamBody(toolName: string, args: unknown, callId: string): st
   )
 }
 
+/** One plain-text final step (finish_reason "stop"). */
 function textStreamBody(replyText: string): string {
   return (
     sseChunk({
@@ -158,6 +175,10 @@ function textStreamBody(replyText: string): string {
   )
 }
 
+/**
+ * Serves SSE bodies in order, one per request (the last repeats). `delayMs`,
+ * applied before every response, lets a test observe intermediate states.
+ */
 function startFakeSequenceServer(
   bodies: string[],
   opts: { delayMs?: number } = {},
@@ -175,6 +196,11 @@ function startFakeSequenceServer(
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+/**
+ * Streams a `reasoning_content` delta, then (after `delayMs`) the answer text,
+ * then (after `holdMs`) the finish chunk. The delays make the mid-reasoning
+ * and answered-but-unsettled states observable.
+ */
 function startFakeReasoningServer(
   reasoningText: string,
   replyText: string,
@@ -229,6 +255,10 @@ function startFakeReasoningServer(
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+/**
+ * Streams a `reasoning_content` delta, then an OpenAI-compatible error chunk,
+ * so the turn is exactly reasoning -> error with no text, tool call, or finish.
+ */
 function startFakeReasoningThenErrorServer(reasoningText: string): {
   baseURL: string
   stop: () => void
@@ -255,6 +285,10 @@ function startFakeReasoningThenErrorServer(reasoningText: string): {
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+/**
+ * Streams a `reasoning_content` delta and then never finishes, parking the
+ * turn until the client aborts. Timer-free so nothing enqueues after stop().
+ */
 function startFakeReasoningHangServer(reasoningText: string): {
   baseURL: string
   stop: () => void
@@ -288,6 +322,7 @@ function startFakeReasoningHangServer(reasoningText: string): {
   return { baseURL: `http://127.0.0.1:${server.port}/v1`, stop: () => server.stop(true) }
 }
 
+/** Offline stand-in for an OpenAI-style `${baseURL}/models` listing. */
 function startFakeOpenAIModelsServer(ids: string[]): { baseURL: string; stop: () => void } {
   const server = Bun.serve({
     port: 0,
@@ -315,6 +350,11 @@ function startFakeOllamaServer(names: string[]): { baseURL: string; stop: () => 
   return { baseURL: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
 }
 
+/**
+ * `waitForFrame` gives up as soon as the renderer looks idle, even while a
+ * background async chain (e.g. a `git` subprocess) is still working. This
+ * polls with real sleeps and forced `renderOnce()` calls instead.
+ */
 async function waitForFrameSlow(
   t: { renderOnce: () => Promise<void>; captureCharFrame: () => string },
   predicate: (frame: string) => boolean,
@@ -377,10 +417,13 @@ test("the narrow empty state is not a blank screen — it renders the plain word
         home={tempDir("bfly-home-")}
       />
     ),
+    // Below ~77 cols wordmarkMode is "plain"; the body must still show the
+    // mark rather than an empty scrollbox.
     { width: 60, height: 20 },
   )
   await t.renderOnce()
   const frame = t.captureCharFrame()
+  // The body carries the mark and tagline too, not just the header row.
   const bodyLines = frame.split("\n").slice(1)
   const body = bodyLines.join("\n")
   expect(body).toContain("butterfly")
@@ -407,6 +450,7 @@ test("an open picker hides the big wordmark instead of clipping it mid-glyph", a
   t.mockInput.typeText("/theme")
   t.mockInput.pressEnter()
   await t.waitForFrame((frame: string) => frame.includes("theme —"))
+  // The picker must fully hide the big mark rather than clip it mid-glyph.
   expect(t.captureCharFrame()).not.toContain("██")
   t.renderer.destroy()
 })
@@ -523,6 +567,7 @@ test("/help lists commands in a configured session", async () => {
         home={tempDir("bfly-home-")}
       />
     ),
+    // Tall enough that the full /help output (~61 lines) never scrolls its top rows off-screen.
     { width: 100, height: 80 },
   )
   await t.renderOnce()
@@ -552,6 +597,8 @@ test("/permissions shows the full rule set — the opening line is not scrolled 
   const lines = frame.split("\n").map((line) => line.trim())
   const webIndex = lines.findIndex((line) => line.includes('"web"'))
   expect(webIndex).toBeGreaterThan(0)
+  // The opening "{" is the first line of the pushed JSON block; it must stay
+  // visible because the whole block fits the viewport.
   expect(lines.slice(0, webIndex)).toContain("{")
   t.renderer.destroy()
 })
@@ -576,6 +623,7 @@ test("the transcript scrollbar reserves a gutter — a near-full-width line is n
           home={tempDir("bfly-home-")}
         />
       ),
+      // Short, so /help overflows and the scrollbar is live when the marker line arrives.
       { width: 100, height: 20 },
     )
     await t.renderOnce()
@@ -586,6 +634,8 @@ test("the transcript scrollbar reserves a gutter — a near-full-width line is n
     t.mockInput.typeText("echo it")
     t.mockInput.pressEnter()
     const frame = await waitForFrameSlow(t, (f: string) => f.includes("done"), 25_000)
+    // The marker may wrap mid-word. The scrollbar must never overwrite content:
+    // every row with filler "a"s keeps the paddingRight:2 gutter after it.
     const lines = frame.split("\n")
     let sawFiller = false
     for (const line of lines) {
@@ -617,6 +667,7 @@ test("/sessions lists past sessions with the current one marked", async () => {
 
 test("/sessions drops dead '(empty session)' rows from past launches, keeping only the current one", async () => {
   const cwd = tempDir("bfly-tui-")
+  // Every App mount creates a journal; simulate 3 past launches that never got a first message.
   for (let i = 0; i < 3; i++) {
     const past = await testRender(
       () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
@@ -634,6 +685,8 @@ test("/sessions drops dead '(empty session)' rows from past launches, keeping on
   t.mockInput.pressEnter()
   await t.waitForFrame((frame: string) => frame.includes("sessions (newest first)"))
   const frame = t.captureCharFrame()
+  // 4 journals exist (3 dead past launches + this one). Only the current
+  // session, itself still empty, keeps a row.
   const rows = frame.split("\n").filter((line) => /^\s*\d+\s+\d{4}-\d{2}-\d{2}/.test(line))
   expect(rows.length).toBe(1)
   expect(rows[0]).toContain("(current)")
@@ -646,6 +699,8 @@ test("/hooks lists configured hooks with source and enabled state", async () => 
     { event: "post.tool" as const, match: "edit", command: "npm run lint" },
     { event: "pre.tool" as const, match: "bash", command: "check-policy", enabled: false },
   ]
+  // App seeds config() from the config prop (index.tsx loads it from disk);
+  // the file below is for write-back. Both must describe the same hooks.
   writeFileSync(join(cwd, "butterfly.jsonc"), JSON.stringify({ hooks }))
   const t = await testRender(
     () => <App cwd={cwd} config={{ model: "mock/model", hooks }} home={tempDir("bfly-home-")} />,
@@ -751,6 +806,7 @@ test("/status and /doctor ellipsize an overlong journal path instead of wrapping
   const journalIndex = statusLines.findIndex((line) => line.trim().startsWith("journal"))
   expect(journalIndex).toBeGreaterThan(-1)
   expect(statusLines[journalIndex]).toContain("…")
+  // The row after "journal" is the next field, not a wrapped path continuation.
   expect(statusLines[journalIndex + 1]?.trim().startsWith("last turn")).toBe(true)
 
   t.mockInput.typeText("/doctor")
@@ -868,6 +924,7 @@ test("the approval card is two lines — the question and the [y]es/[n]o answers
   const answerLine = lines.find((line) => line.includes("[y]es"))
   expect(questionLine).toBeDefined()
   expect(answerLine).toBeDefined()
+  // The question and the answers are on separate rows of the same card.
   expect(questionLine).not.toBe(answerLine)
   expect(questionLine).not.toContain("[y]es")
   t.mockInput.pressKey("n")
@@ -875,6 +932,7 @@ test("the approval card is two lines — the question and the [y]es/[n]o answers
   t.renderer.destroy()
 }, 30_000)
 
+// --- permission quick-add ("always allow") ---
 
 test("a plain confirmation (no tool/target) never offers [a]lways", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -907,14 +965,20 @@ test("a real permission ask (reached via a REAL staged diff + provider round-tri
         home={tempDir("bfly-home-")}
       />
     ),
+    // Wide enough that the approval line (with its absolute temp path) stays on one row.
     { width: 240, height: 30 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/commit")
   t.mockInput.pressEnter()
+  // The provider is called only with a real staged diff, so this frame proves
+  // the full path: git diff -> provider -> commit message -> bash -> ask.
+  // The preview is planQuickAdd's output for that real target.
   const frame = await waitForFrameSlow(t, (f) => f.includes("[a]lways"), 25_000)
   expect(frame).toContain("approve?")
   expect(frame).toContain("bash")
+  // Line 1 already reads "bash: <target>", so the quick-add preview on line 2
+  // is pattern-only.
   expect(frame).toContain('[a]lways "git *"')
   expect(frame).not.toContain("[a]lways bash:")
   t.mockInput.pressKey("a")
@@ -1025,6 +1089,8 @@ test("attention: progress escapes go through the renderer's output path, not a r
   )
   await t.renderOnce()
 
+  // writeOut serializes out-of-band escapes with the render thread. It is
+  // typed private, hence the cast (the app does the same).
   const routed: string[] = []
   const renderer = t.renderer as unknown as { writeOut: (chunk: string) => boolean }
   renderer.writeOut = (chunk: string) => {
@@ -1105,17 +1171,20 @@ test("Enter on a bare / runs the selected command, not the raw slash", async () 
         home={tempDir("bfly-home-")}
       />
     ),
+    // Tall enough that /help's full output keeps "commands:" on screen.
     { width: 100, height: 84 },
   )
   await t.renderOnce()
   t.mockInput.typeText("/")
   await t.waitForFrame((frame: string) => frame.includes("↑↓ select"))
   t.mockInput.pressEnter()
+  // index 0 = /help, so its output must appear
   await waitForFrameSlow(t, (frame: string) => frame.includes("commands:"))
   expect(t.captureCharFrame()).not.toContain("did you mean")
   t.renderer.destroy()
 })
 
+// --- aliases in the `/` suggestion list ---
 
 test("/res surfaces /resume first, and Enter opens the session picker", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -1241,10 +1310,12 @@ test("Tab-completing an alias-matched row completes to the alias, not the primar
   t.renderer.destroy()
 })
 
+// --- per-turn elapsed timer ---
 
 test("the busy line ticks a live elapsed time, and the completed turn's marker gets a final duration suffix", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
+  // Long enough for the 1s tick to fire before the turn settles.
   const server = startFakeChatServer("done", { delayMs: 1_500 })
   try {
     const t = await testRender(
@@ -1271,6 +1342,7 @@ test("the busy line ticks a live elapsed time, and the completed turn's marker g
     )
     expect(ticked).toMatch(/thinking… \d+s/)
     const settled = await waitForFrameSlow(t, (frame) => frame.includes("in 5 · out 3"), 10_000)
+    // The "in N · out N" marker gains a final duration segment.
     expect(settled).toMatch(/in 5 · out 3 · cached 0 · 1 steps · \d+s/)
     t.renderer.destroy()
   } finally {
@@ -1314,6 +1386,7 @@ test("/new clears any stale duration from the status bar — replay must never f
   }
 }, 30_000)
 
+// --- ctx gauge right-aligns to the input bar's far edge ---
 
 test("the ctx gauge right-aligns to the row's far edge, not clumped against the status text", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -1341,7 +1414,9 @@ test("the ctx gauge right-aligns to the row's far edge, not clumped against the 
         .at(-1) ?? ""
     const idx = lastLine.indexOf("ctx 8")
     expect(idx).toBeGreaterThan(-1)
+    // The gauge sits at (or within a couple of columns of) the row's right edge.
     expect(lastLine.length - (idx + "ctx 8".length)).toBeLessThanOrEqual(2)
+    // And there is real distance between the status text and the meter.
     expect(idx).toBeGreaterThan(20)
     t.renderer.destroy()
   } finally {
@@ -1387,7 +1462,13 @@ test("at narrow widths the meters drop instead of colliding with the status text
   }
 }, 30_000)
 
+// --- mouse select-to-copy (OSC 52) ---
 
+/**
+ * Stubs OpenTUI's public `renderer.copyToClipboardOSC52` and records what the
+ * app hands it. Stubbing also keeps the test hermetic: the real support check
+ * queries the terminal the tests run in.
+ */
 function stubClipboardApi(
   t: { renderer: unknown },
   opts: { supported?: boolean; ok?: boolean } = {},
@@ -1413,6 +1494,9 @@ test("dragging over transcript text auto-copies through OpenTUI's public clipboa
   await t.renderOnce()
   const copied = stubClipboardApi(t)
 
+  // Locate the idle status line on screen rather than hardcoding a row: the
+  // mock mouse drives OpenTUI's real selection pipeline, which needs a
+  // selectable renderable under the cursor.
   const lines = t.captureCharFrame().split("\n")
   const y = lines.findIndex((l) => l.includes("for commands"))
   expect(y).toBeGreaterThan(-1)
@@ -1420,6 +1504,8 @@ test("dragging over transcript text auto-copies through OpenTUI's public clipboa
   const x = line.indexOf("for commands")
   expect(x).toBeGreaterThan(-1)
 
+  // Drag to the row's right edge rather than an exact end column, so the test
+  // doesn't depend on the selection's boundary convention.
   await t.mockMouse.drag(x, y, line.length - 1, y)
   await t.renderOnce()
 
@@ -1462,6 +1548,8 @@ test("an oversized selection is trimmed to the cap BEFORE the API sees it, with 
   const renderer = t.renderer as unknown as {
     emit: (event: string, ...args: unknown[]) => boolean
   }
+  // A real drag can't select enough to hit the cap, so emit the same
+  // "selection" event the handler subscribes to, with an over-cap payload.
   renderer.emit("selection", { getSelectedText: () => "y".repeat(250_000) })
   await t.renderOnce()
 
@@ -1969,7 +2057,13 @@ test("model pick persists provider+model+key, preserves other providers' keys, a
   }
 }, 20_000)
 
+// --- /provider: catalog-fallback disclosure and key-step paste ---
 
+/**
+ * A provider that rejects the key. fetchProviderModels fails soft on !ok
+ * (returns []), so a 401 looks like being offline; that is why the catalog
+ * fallback must announce itself.
+ */
 function startFake401ModelsServer(): { baseURL: string; stop: () => void } {
   const server = Bun.serve({
     port: 0,
@@ -2006,6 +2100,8 @@ test("a 401 on the live model list falls back to the catalog WITH a visible not-
     t.mockInput.typeText("sk-expired-and-wrong")
     t.mockInput.pressEnter()
 
+    // Not a dead end: the picker opens, but says the ids came from the catalog,
+    // not a live listing.
     const picked = await waitForFrameSlow(t, (f) => f.includes("gpt-cat-1"))
     expect(picked).toContain("live list unavailable")
     expect(picked).toContain("the key was NOT validated")
@@ -2061,6 +2157,12 @@ test("a live model list carries NO catalog note — the disclosure is not blanke
   }
 }, 30_000)
 
+/**
+ * The key step is a raw-text prompt, so a paste there must never become a
+ * `[Pasted #N]` chip: the label would be submitted as the key and its payload
+ * would outlive the step. Chipping needs shouldChip (>800 chars or >2 lines),
+ * so this pastes a chip-worthy key.
+ */
 test("a chip-worthy paste at the /provider key step stays raw text and leaves no orphan payload", async () => {
   const t = await testRender(
     () => (
@@ -2146,6 +2248,7 @@ test("selecting a candidate whose path has a space quotes the inserted @token", 
   expect(t.captureCharFrame()).toContain("Getting Started.md")
   t.mockInput.pressEnter()
   await t.waitForFrame((frame: string) => frame.includes('@"Getting Started.md"'))
+  // Round-trips through the grammar extractMentions parses: quoted, not cut at the first space.
   expect(t.captureCharFrame()).toContain('@"Getting Started.md"')
   t.renderer.destroy()
 }, 30_000)
@@ -2212,6 +2315,8 @@ test("a path-like token that isn't a real file is left alone — no false-positi
 interface Composer {
   on: (event: string, callback: () => void) => void
   value: string
+  /** Caret position in UTF-16 code units (pinned by a test); the
+   * atomic-backspace gate compares it to `draft().length`. */
   cursorOffset: number
 }
 function findComposer(node: unknown): Composer | undefined {
@@ -2436,6 +2541,7 @@ test("opening the pager shows an honest 'rendering…' notice instead of a silen
   t.mockInput.pressKey("o", { ctrl: true })
   const frame = await waitForFrameSlow(t, (f: string) => f.includes("PAGER"))
   expect(frame).toContain("rendering…")
+  // It clears itself once the settle window passes.
   await waitForFrameSlow(t, (f: string) => !f.includes("rendering…"), 3_000)
   t.renderer.destroy()
 })
@@ -2496,6 +2602,9 @@ test("pager search finds prompt text from a replayed journal fixture, n/N cycle 
   await t.waitForFrame((frame: string) => frame.includes("resumed session"))
 
   t.mockInput.pressKey("o", { ctrl: true })
+  // Search reaches the raw journal export. The text is also in the live
+  // transcript, so wait for the pager chrome and the content together.
+  // Markdown highlighting runs off-thread, so plain waitForFrame times out.
   await waitForFrameSlow(t, (frame) => frame.includes("PAGER") && frame.includes("xyzzyfindme"))
 
   t.mockInput.typeText("/")
@@ -2658,6 +2767,8 @@ test("Ctrl+C interrupts a busy turn from inside the pager", async () => {
           home={tempDir("bfly-home-")}
         />
       ),
+      // Mirror startTui's renderer config: with exitOnCtrlC left true,
+      // CliRenderer destroys itself on Ctrl+C before the app's handler runs.
       { width: 100, height: 40, exitOnCtrlC: false },
     )
     await t.renderOnce()
@@ -2669,6 +2780,8 @@ test("Ctrl+C interrupts a busy turn from inside the pager", async () => {
     t.mockInput.pressKey("o", { ctrl: true })
     await waitForFrameSlow(t, (frame) => frame.includes("PAGER"))
 
+    // A modal must not eat Ctrl+C; watching a long turn from the pager is when
+    // interrupting matters most.
     t.mockInput.pressKey("c", { ctrl: true })
     await t.renderOnce()
     // Interrupting does not yank the view the user is reading.
@@ -2688,6 +2801,7 @@ test("Ctrl+C reaches the global handler with a picker open (the hoist, pinned tw
   writeFileSync(join(cwd, "notes.md"), "hello\n")
   const t = await testRender(
     () => <App cwd={cwd} config={{ model: "mock/model" }} home={tempDir("bfly-home-")} />,
+    // exitOnCtrlC: false as in startTui, so the app's handler is what runs.
     { width: 100, height: 32, exitOnCtrlC: false },
   )
   await t.renderOnce()
@@ -2699,6 +2813,8 @@ test("Ctrl+C reaches the global handler with a picker open (the hoist, pinned tw
   t.mockInput.typeText("look at @")
   await t.waitForFrame((frame: string) => frame.includes("mention a file"))
 
+  // Idle with a modal open, Ctrl+C quits (quit() destroys the renderer); the
+  // picker must not consume the key.
   t.mockInput.pressKey("c", { ctrl: true })
   await new Promise((resolve) => setTimeout(resolve, 50))
   expect(destroys).toBe(1)
@@ -2725,6 +2841,9 @@ test("[ resumes the renderer even when the scrollback write throws", async () =>
   t.mockInput.pressKey("o", { ctrl: true })
   await t.waitForFrame((frame: string) => frame.includes("PAGER"))
 
+  // Deterministic stand-ins for the terminal handover; the test checks the
+  // order of operations. The test renderer writes to its own stream, so
+  // stubbing process.stdout.write only hits the dump.
   const realSuspend = t.renderer.suspend
   const realResume = t.renderer.resume
   const realWrite = process.stdout.write
@@ -2749,6 +2868,7 @@ test("[ resumes the renderer even when the scrollback write throws", async () =>
     t.renderer.resume = realResume
   }
 
+  // Suspended, then the write blew up. resume() must still run or the TUI never comes back.
   expect(suspends).toBe(1)
   expect(resumes).toBe(1)
   t.renderer.destroy()
@@ -2785,6 +2905,7 @@ test("win32 console guard installs and stops without throwing", () => {
   stop() // idempotent
 })
 
+// --- paste chips and multiline keys ---
 
 test("Ctrl+J inserts a newline marker into the composer without submitting", async () => {
   const t = await testRender(
@@ -2801,11 +2922,14 @@ test("Ctrl+J inserts a newline marker into the composer without submitting", asy
   const submits = countSubmits(t)
 
   t.mockInput.typeText("line one")
+  // Raw 0x0A ("\n") is what a terminal sends for Ctrl+J; ctrl:true + name:"j"
+  // covers the Kitty protocol path.
   t.mockInput.pressKey("j", { ctrl: true })
   t.mockInput.typeText("line two")
   await t.renderOnce()
 
   expect(submits.composer.value).toBe(`line one${NEWLINE_MARKER}line two`)
+  // The renderable's own submit binding never fired: preventDefault() stopped it.
   expect(submits.count()).toBe(0)
   t.renderer.destroy()
 }, 30_000)
@@ -2830,6 +2954,7 @@ test("backslash+Enter inserts a newline without submitting", async () => {
   expect(submits.composer.value).toBe(`line one${NEWLINE_MARKER}`)
   expect(submits.count()).toBe(0)
 
+  // A plain Enter afterward still submits normally.
   t.mockInput.typeText("line two")
   t.mockInput.pressEnter()
   await t.renderOnce()
@@ -2871,6 +2996,12 @@ test("a pasted image path is NOT chipped — the image-chip path still owns it",
   t.renderer.destroy()
 }, 30_000)
 
+/**
+ * Drives the composer through its `.value` setter, the same path a paste's
+ * default handling takes before emitting "input". Used instead of
+ * `mockInput.pasteBracketedText`, which is flaky for onInput-based detection
+ * in multi-step sequences.
+ */
 function setComposerValue(composer: Composer, value: string): void {
   composer.value = value
 }
@@ -2897,6 +3028,7 @@ test("submitting a message with two paste chips expands both payloads in order",
   expect(composer.value).toBe("[Pasted #1 +1 lines] and [Pasted #2 +1 lines]")
 
   t.mockInput.pressEnter()
+  // The user line is pushed synchronously in submit(), before the model call starts.
   await t.renderOnce()
 
   const frame = t.captureCharFrame()
@@ -2968,6 +3100,8 @@ test("history recall after a chip-containing submit shows the fully expanded tex
   const composer = findComposer(t.renderer.root)
   if (!composer) throw new Error("composer not found")
 
+  // Routed through a command so the app never goes busy (history recall is
+  // gated on !busy()). Commands use the same chip expansion in submit().
   t.mockInput.typeText("/help ")
   await t.renderOnce()
   setComposerValue(composer, `${composer.value}${"A".repeat(900)}`)
@@ -2979,15 +3113,22 @@ test("history recall after a chip-containing submit shows the fully expanded tex
 
   t.mockInput.pressArrow("up")
   await t.renderOnce()
+  // The recalled draft is the expanded text, never the label: the payloads
+  // were cleared at submit.
   expect(composer.value).toBe(`/help ${"A".repeat(900)}`)
   t.renderer.destroy()
 }, 30_000)
 
+// --- paste chips: silent data-loss paths ---
 
 /**
  * Starts a turn that never resolves in this sandbox (`mock/model` is not a
  * real provider) — i.e. leaves the app in exactly the `busy()` state a
  * QUEUED message gets composed in.
+ */
+/**
+ * A provider that accepts the request and never answers, keeping a turn busy
+ * as long as a test needs ("mock/model" errors out too fast).
  */
 function neverAnsweringProvider(): { config: ButterflyConfig; stop: () => void } {
   const server = Bun.serve({ port: 0, fetch: () => new Promise<Response>(() => {}) })
@@ -3027,6 +3168,7 @@ test("a multi-line paste WHILE BUSY becomes a chip and the queued message keeps 
 
   await t.mockInput.pasteBracketedText("alphaAAAA\nbravoBBBB\ncharlieCC")
   await t.renderOnce()
+  // The composer's value setter strips newlines, so raw text would fuse the words.
   expect(composer.value).toBe("[Pasted #1 +3 lines]")
 
   t.mockInput.pressEnter()
@@ -3083,8 +3225,10 @@ test("Backspace away from the end edits normally — a trailing chip is not swal
   t.mockInput.pressArrow("right")
   t.mockInput.pressBackspace()
   await t.renderOnce()
+  // Backspace with the cursor away from the end must not delete the chip.
   expect(composer.value).toBe("helo[Pasted #1 +1 lines]")
 
+  // …and with the cursor back at the end it is atomic.
   t.mockInput.pressKey("e", { ctrl: true })
   t.mockInput.pressBackspace()
   await t.renderOnce()
@@ -3112,6 +3256,8 @@ test("history recall of a multi-line entry keeps its line breaks, both direction
   t.mockInput.pressEnter()
   await t.renderOnce()
 
+  // History stores the expanded text; recall must put the marker form back
+  // into the single-line composer, or the break is lost.
   t.mockInput.pressArrow("up")
   await t.renderOnce()
   expect(composer.value).toBe(`/help ${NEWLINE_MARKER}second`)
@@ -3148,16 +3294,21 @@ test("a chip whose label got edited out is reported at submit, never silently dr
   await t.renderOnce()
   expect(composer.value).toBe("[Pasted #1 +1 lines]")
 
+  // Backspace inside the label edits it normally, which breaks the
+  // CHIP_PATTERN match; the orphaned payload must be reported.
   t.mockInput.pressArrow("left")
   t.mockInput.pressBackspace()
   await t.renderOnce()
   expect(composer.value).toBe("[Pasted #1 +1 line]")
 
   t.mockInput.pressEnter()
+  // The notice lands above the echoed user line; poll until both are on
+  // screen.
   await waitForFrameSlow(t, (frame: string) => frame.includes("no longer in the message"))
   t.renderer.destroy()
 }, 30_000)
 
+// --- paste during a pending approval, and the cursorOffset unit ---
 
 test("a multi-line paste DURING A PENDING APPROVAL chips — and y/n still resolves the approval", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -3174,6 +3325,9 @@ test("a multi-line paste DURING A PENDING APPROVAL chips — and y/n still resol
   t.mockInput.pressEnter()
   await waitForFrameSlow(t, (frame) => frame.includes("stage all tracked modifications"))
 
+  // A paste arrives on the paste channel; the approval only intercepts
+  // keypresses and the composer stays focused. Without preventDefault() the
+  // text would reach the input and lose its newlines.
   await t.mockInput.pasteBracketedText("alphaAAAA\nbravoBBBB\ncharlieCC")
   await t.renderOnce()
   expect(composer.value).toBe("[Pasted #1 +3 lines]")
@@ -3208,6 +3362,9 @@ test("atomic backspace works on a draft holding a ⏎ marker and an astral emoji
   const composer = findComposer(t.renderer.root)
   if (!composer) throw new Error("composer not found")
 
+  // UTF-16 length (5) differs from UTF-8 bytes (9): a marker is 3 bytes and an
+  // emoji is 4 bytes / 2 units. The atomic-backspace gate is
+  // `cursorOffset === draft().length`, so a byte-offset accessor would break it.
   setComposerValue(composer, `a${NEWLINE_MARKER}b😀`)
   await t.renderOnce()
   setComposerValue(composer, `${composer.value}${"A".repeat(900)}`)
@@ -3224,9 +3381,15 @@ test("atomic backspace works on a draft holding a ⏎ marker and an astral emoji
   t.renderer.destroy()
 }, 30_000)
 
+/**
+ * /handoff: a preloaded handoff must be announced, the handoff turn must be
+ * metered, and a session must never reinject the handoff it wrote.
+ */
 test("a pending handoff is preloaded on the first turn — and says so, naming the file", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
+  // Written by an earlier session: no journal here carries a session.handoff
+  // event (the self-guard signal, tested next).
   const saved = saveHandoff(cwd, "## Goal\nBuild a widget\n", false, { append: () => {} })
   const provider = hangingProvider()
   try {
@@ -3245,6 +3408,7 @@ test("a pending handoff is preloaded on the first turn — and says so, naming t
     await t.renderOnce()
     t.mockInput.typeText("carry on")
     t.mockInput.pressEnter()
+    // Boot preloads too, but visibly, with the source file and its age.
     const frame = await waitForFrameSlow(t, (f) => f.includes("loaded the handoff"))
     expect(frame).toContain("handoff.md")
     expect(frame).toContain("just now")
@@ -3291,9 +3455,12 @@ test("/handoff is metered like any other turn, and its own session never reinjec
     t.mockInput.typeText("/handoff")
     t.mockInput.pressEnter()
     const frame = await waitForFrameSlow(t, (f) => f.includes("handoff saved"), 25_000)
+    // The priciest turn shape in the app must not read as free.
     expect(frame).toContain("$5.00")
     expect(existsSync(join(cwd, ".butterfly", "handoff.md"))).toBe(true)
 
+    // This session wrote that file before its first submit; submitting must
+    // not reinject it.
     t.mockInput.typeText("one more thing")
     t.mockInput.pressEnter()
     const after = await waitForFrameSlow(t, (f) => f.includes("in 5 · out 3"), 25_000)
@@ -3306,6 +3473,7 @@ test("/handoff is metered like any other turn, and its own session never reinjec
   }
 }, 60_000)
 
+// --- /loop in the TUI ---
 
 test("/loop run renders a live card (iteration/queue/task) and Ctrl+C interrupts it, leaving the task claimed", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -3328,12 +3496,15 @@ test("/loop run renders a live card (iteration/queue/task) and Ctrl+C interrupts
           home={tempDir("bfly-home-")}
         />
       ),
+      // Mirror startTui's renderer config (exitOnCtrlC: false) so the app's Ctrl+C handler runs.
       { width: 120, height: 40, exitOnCtrlC: false },
     )
     await t.renderOnce()
 
     t.mockInput.typeText("/loop run")
     t.mockInput.pressEnter()
+    // task.claimed fires before the iteration reaches the network, so the card
+    // already shows iteration 1 here.
     const running = await waitForFrameSlow(t, (frame) => frame.includes("loop running"))
     expect(running).toContain("iteration 1")
     expect(running).toContain("claimed 1")
@@ -3341,14 +3512,20 @@ test("/loop run renders a live card (iteration/queue/task) and Ctrl+C interrupts
     expect(running).toContain("working")
 
     t.mockInput.pressKey("c", { ctrl: true })
+    // The "(loop interrupted…)" line is pushed synchronously by the Ctrl+C
+    // handler, before the abort unwinds; teardown is awaited separately.
     const message = await waitForFrameSlow(t, (frame) => frame.includes("loop interrupted"))
     expect(message).toContain("Ctrl+C again to quit")
 
+    // Once the abort propagates, the composer is free and the card is cleared;
+    // the outcome goes to the transcript.
     const settled = await waitForFrameSlow(t, (frame) => frame.includes("describe a task"), 15_000)
     expect(settled).not.toContain("loop running")
 
     t.renderer.destroy()
 
+    // An abort mid-iteration leaves the task "claimed". Reopening the queue (as
+    // the next /loop run does) resets the stale claim to "open" for a retry.
     const check = WorkQueue.open(queuePath)
     expect(check.get(taskId)?.status).toBe("open")
     check.closeDb()
@@ -3384,8 +3561,11 @@ test("/loop run completes, summarizes the outcome into the transcript, and drain
 
     t.mockInput.typeText("/loop run")
     t.mockInput.pressEnter()
+    // Busy flips synchronously within pressEnter(), so this queues rather than racing.
     t.mockInput.typeText("what happened while looping")
     t.mockInput.pressEnter()
+    // Wait on the task text, not "(queued)": the status bar's "N (queued)" count
+    // can render before the scrollback row, so that predicate races.
     const queued = await waitForFrameSlow(t, (frame) =>
       frame.includes("what happened while looping"),
     )
@@ -3399,6 +3579,8 @@ test("/loop run completes, summarizes the outcome into the transcript, and drain
     expect(summary).toContain("1 closed, 0 blocked, 1 iteration")
     expect(summary).not.toContain("loop running")
 
+    // The queued message drains as an ordinary chat turn after the loop; only
+    // submit()'s turn path writes "in N · out N".
     const drained = await waitForFrameSlow(t, (frame) => frame.includes("in 5 · out 3"), 25_000)
     expect(drained).toContain("❯ what happened while looping")
 
@@ -3458,6 +3640,7 @@ test("plan mode denies /loop run (mutating) but still allows /loop plan (read-on
     expect(denied).not.toContain("loop running")
     expect(denied).not.toContain("working")
 
+    // /loop plan only stages rows in queue.db (no edit/bash/commit), so plan mode allows it.
     t.mockInput.typeText("/loop plan add tests for the parser")
     t.mockInput.pressEnter()
     const planned = await waitForFrameSlow(t, (f) => f.includes("planned 1 task(s)"), 25_000)
@@ -3473,6 +3656,7 @@ test("plan mode denies /loop run (mutating) but still allows /loop plan (read-on
   }
 }, 60_000)
 
+// --- /loop preflight guards ---
 
 /**
  * A fresh models.dev cache under the test's HOME, so catalog-driven pricing
@@ -3499,6 +3683,8 @@ function seedCatalogCache(
 test("/loop run refuses to start on a dirty working tree — nothing claimed, no supervisor", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
+  // Uncommitted work: the loop commits with `git add -A` on every green gate,
+  // which would sweep this in.
   writeFileSync(join(cwd, "app.ts"), "export const v = 999\n")
   const queuePath = join(cwd, ".butterfly", "queue.db")
   const seed = WorkQueue.open(queuePath)
@@ -3525,6 +3711,8 @@ test("/loop run refuses to start on a dirty working tree — nothing claimed, no
   // The card never appeared: no supervisor was started.
   expect(refused).not.toContain("loop running")
 
+  // Proof nothing ran: runLoop first logs "loop.started" to loop.jsonl. Task
+  // status can't prove it, since WorkQueue.open() resets stale claims.
   expect(existsSync(join(cwd, ".butterfly", "loop.jsonl"))).toBe(false)
 
   // busy cleared — the composer is usable again, not wedged.
@@ -3663,10 +3851,13 @@ test("/loop run meters its token usage into the session cost — a loop never re
   }
 }, 60_000)
 
+// --- pager and approval modality ---
 
 test("an approval that fires while the pager is open is NOT answerable by pager keys (incl. the [a] config write)", async () => {
   const cwd = tempDir("bfly-tui-")
   await stagedGitFixture(cwd)
+  // The delay ensures the pager is open before the bash ask lands, as when a
+  // user reads with Ctrl+O mid-turn.
   const server = startFakeChatServer("chore: pager modality test", { delayMs: 1_500 })
   const t = await testRender(
     () => (
@@ -3712,6 +3903,7 @@ test("an approval that fires while the pager is open is NOT answerable by pager 
   server.stop()
 }, 60_000)
 
+// --- Ctrl+C with a pending approval ---
 
 test("Ctrl+C during a real in-turn approval denies it, journals the paired tool.result, and unblocks the turn", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -3726,11 +3918,14 @@ test("Ctrl+C during a real in-turn approval denies it, journals the paired tool.
         home={tempDir("bfly-home-")}
       />
     ),
+    // testRender defaults exitOnCtrlC:true, which would destroy the renderer
+    // before app.tsx's handler runs.
     { width: 140, height: 30, exitOnCtrlC: false },
   )
   await t.renderOnce()
   t.mockInput.typeText("run the thing")
   t.mockInput.pressEnter()
+  // busy() + a live AbortController + a pending ask.
   await waitForFrameSlow(t, (f) => f.includes("approve?"), 25_000)
   t.mockInput.pressKey("c", { ctrl: true })
   await waitForFrameSlow(t, (f) => f.includes("turn interrupted"), 15_000)
@@ -3773,6 +3968,7 @@ test("/review with a shell expression as its range is refused in the UI — no g
   t.renderer.destroy()
 }, 30_000)
 
+// --- theme repaint, not just the token store ---
 
 /** "#8b8b8b" -> [139,139,139]; captureSpans hands back RGBA channels. */
 function hexToInts(hex: string): [number, number, number] {
@@ -3814,6 +4010,7 @@ test("/theme light actually REPAINTS — a styled span's colour changes, not jus
   t.renderer.destroy()
 }, 30_000)
 
+// --- thinking / todo / tool-output / error presentation ---
 
 test("reasoning deltas render a live thinking block (height-capped to 3 lines) that collapses once the answer starts, and Ctrl+R expands/collapses it", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -3841,6 +4038,8 @@ test("reasoning deltas render a live thinking block (height-capped to 3 lines) t
     t.mockInput.typeText("think about it")
     t.mockInput.pressEnter()
 
+    // Still streaming: header + last 3 lines, so the first line is cut. Wait on
+    // the reasoning text, not the status-bar spinner (also "thinking…").
     const streaming = await waitForFrameSlow(t, (frame) => frame.includes("beta-reasoning"))
     expect(streaming).toContain("thinking…")
     expect(streaming).toContain("delta-reasoning")
@@ -3898,6 +4097,7 @@ test("an inline <think> block from a qwen-style model feeds the SAME thinking pr
     t.mockInput.typeText("think inline")
     t.mockInput.pressEnter()
 
+    // Collapsed by default: a "thought" line instead of raw <think> markup.
     const settled = await waitForFrameSlow(t, (frame) => frame.includes("qwen final answer"))
     expect(settled).toMatch(/thought( for \d+s)? - qwen reasoning here/)
     expect(settled).not.toContain("and a second line")
@@ -3957,6 +4157,7 @@ test("the plan lives in the sidebar (glyphs, progress, live updates) and the tra
     t.mockInput.typeText("plan the work")
     t.mockInput.pressEnter()
 
+    // The plan is pinned in the sidebar, not pushed up the transcript.
     const firstPlan = await waitForFrameSlow(t, (frame) => frame.includes("Plan 0/2"))
     expect(firstPlan).toContain("[~] first task")
     expect(firstPlan).toContain("[ ] second task")
@@ -3972,6 +4173,8 @@ test("the plan lives in the sidebar (glyphs, progress, live updates) and the tra
 
     expect(spanFgFor(t, "[~] second task")).toEqual(hexToInts(DARK_TOKENS.accent))
 
+    // …and the same element under the light token set: flip the theme at
+    // runtime and re-read the span to prove the card reads themeTokens().
     t.mockInput.typeText("/theme light")
     t.mockInput.pressEnter()
     await waitForFrameSlow(t, (frame) => frame.includes("theme set to light"))
@@ -4033,6 +4236,8 @@ test("bash results render a $ command cell with dim output and a right-aligned e
 test("a provider error renders a structured card from the classified error — kind-specific first line, no duplicate generic Error: line", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
+  // 401, not 429: the AI SDK doesn't retry auth failures, so this resolves
+  // fast. It retries 429s (honoring Retry-After), which would hang the turn.
   const server = Bun.serve({
     port: 0,
     fetch: () =>
@@ -4084,6 +4289,7 @@ test("a provider error renders a structured card from the classified error — k
   }
 }, 30_000)
 
+// --- a thinking block must never outlive its turn ---
 
 test("a provider error mid-reasoning collapses the open thinking block instead of leaving it streaming under the error card", async () => {
   const cwd = tempDir("bfly-tui-")
@@ -4116,6 +4322,7 @@ test("a provider error mid-reasoning collapses the open thinking block instead o
       t,
       (frame) => frame.includes("describe a task") && frame.includes("provider unavailable"),
     )
+    // The error card still renders, with its kind-specific headline…
     expect(settled).toContain("error: provider unavailable/overloaded — try again shortly")
     // …and the block above it is COLLAPSED: no streaming header, no rolling
     // reasoning preview. This turn never produced a text-delta, a tool-call
@@ -4146,6 +4353,7 @@ test("Ctrl+C mid-reasoning collapses the thinking block — an aborted turn ends
           home={tempDir("bfly-home-")}
         />
       ),
+      // exitOnCtrlC: false as in startTui, so the app's handler runs.
       { width: 120, height: 34, exitOnCtrlC: false },
     )
     await t.renderOnce()
@@ -4154,6 +4362,8 @@ test("Ctrl+C mid-reasoning collapses the thinking block — an aborted turn ends
     await waitForFrameSlow(t, (frame) => frame.includes("beta-reasoning"))
 
     t.mockInput.pressKey("c", { ctrl: true })
+    // An abort makes the AI SDK emit `{type:"abort"}` and close the stream, so
+    // the runner sees no finish or error; only the turn's .finally can close the block.
     const settled = await waitForFrameSlow(
       t,
       (frame) => frame.includes("turn interrupted") && frame.includes("describe a task"),
@@ -4199,6 +4409,8 @@ test("the turn-end sweep is idempotent — a block already collapsed by the answ
     const frozen = mid.match(/thought for (\d+)s/)
     expect(frozen).not.toBeNull()
 
+    // Turn over and the answer still on screen: the turn-end sweep must not
+    // write the messages signal when nothing is left open.
     const settled = await waitForFrameSlow(
       t,
       (frame) => frame.includes("describe a task") && frame.includes("idempotent answer"),
@@ -4212,7 +4424,12 @@ test("the turn-end sweep is idempotent — a block already collapsed by the answ
   }
 }, 30_000)
 
+// --- label/value split direction and tool-call summaries ---
 
+/**
+ * All spans of the first captured line containing `lineNeedle`. Finer than
+ * `spanFgFor`, since /context repeats " tok" on several rows.
+ */
 function spansOfLine(
   t: { captureSpans: () => CapturedFrame },
   lineNeedle: string,
@@ -4230,10 +4447,13 @@ function spansOfLine(
 }
 
 test("splitLabelValue splits at the FIRST 2+-space run, so a primary value is never left on the muted side", () => {
+  // /context and /doctor rows with a bar: the split is at the first 2+-space
+  // run, so "~558 tok" stays on the value side. Bars need a catalog limit.
   expect(splitLabelValue("  system prompt   ~558 tok  █████")).toEqual({
     label: "  system prompt   ",
     value: "~558 tok  █████",
   })
+  // The same row without a bar (unknown limit).
   expect(splitLabelValue("  system prompt   ~558 tok")).toEqual({
     label: "  system prompt   ",
     value: "~558 tok",
@@ -4253,10 +4473,12 @@ test("splitLabelValue splits at the FIRST 2+-space run, so a primary value is ne
     splitLabelValue("  [unknown-model] mock/model is not in the models.dev catalog"),
   ).toBeUndefined()
   expect(splitLabelValue("doctor — context audit:")).toBeUndefined()
+  // /sessions: the index is the label; timestamp, title and "(current)" are value.
   expect(splitLabelValue("  1  2026-08-06 12:34  fix the bar  (current)")).toEqual({
     label: "  1  ",
     value: "2026-08-06 12:34  fix the bar  (current)",
   })
+  // /help's padded usage column: the description becomes the value.
   expect(splitLabelValue("  /status                   show session status")).toEqual({
     label: "  /status                   ",
     value: "show session status",
@@ -4270,12 +4492,16 @@ test("splitLabelValue splits at the FIRST 2+-space run, so a primary value is ne
 
 test("with a real catalog limit, /context's bar row paints the token count as primary content — only the label is muted", async () => {
   const home = tempDir("bfly-home-")
+  // A known context limit makes contextText's bar() emit; without one the row
+  // has a single column.
   seedCatalogCache(home, "fake", "cat-model", { input: 1, output: 2 })
   const t = await testRender(
     () => <App cwd={tempDir("bfly-tui-")} config={{ model: "fake/cat-model" }} home={home} />,
     { width: 120, height: 34 },
   )
   await t.renderOnce()
+  // contextText() is built once when the command runs, so wait for the catalog
+  // load first; the status gauge prints a limit only once ctxLimit is set.
   await waitForFrameSlow(t, (frame) => frame.includes("128.0k"))
   t.mockInput.typeText("/context")
   t.mockInput.pressEnter()
@@ -4287,7 +4513,9 @@ test("with a real catalog limit, /context's bar row paints the token count as pr
   const value = spans.find((s) => s.text.includes("tok"))
   expect(label).toBeDefined()
   expect(value).toBeDefined()
+  // The label is the secondary half…
   expect(label?.fg).toEqual(muted)
+  // …and the token count is not.
   expect(value?.fg).not.toEqual(muted)
   t.renderer.destroy()
 }, 30_000)
@@ -4327,6 +4555,7 @@ test("a tool-call row is a summarized one-liner, never a raw JSON dump", () => {
   expect(rows[0]?.text).not.toContain("{")
   expect(rows[0]?.isCall).toBe(true)
   expect(rows[1]?.text).toBe("grep splitLabelValue *.tsx")
+  // The generic fallback still caps, at a token boundary with a visible ellipsis.
   const fallback = rows[2]?.text ?? ""
   expect(fallback.startsWith("memory ")).toBe(true)
   expect(fallback.endsWith("…")).toBe(true)
@@ -4366,6 +4595,12 @@ test("the rendered call row shows the summary, not the JSON the model sent", asy
   }
 }, 30_000)
 
+/**
+ * A failed step attempt has already streamed into the live transcript but
+ * journals nothing, so the runner emits `step-retracted` and the UI drops
+ * those rows; otherwise appendAssistant merges the ghost text into the real
+ * answer. The first response streams text, then a retryable error chunk.
+ */
 function startFakeErrorThenTextServer(
   ghostText: string,
   replyText: string,
@@ -4417,6 +4652,8 @@ test("a retried step retracts the doomed attempt's ghost text — the retry's an
 test("butterfly.jsonc `retries: 0` reaches the runner from the TUI — the failure is not retried", async () => {
   const cwd = tempDir("bfly-tui-")
   await gitFixture(cwd)
+  // Always fails, retryably. If the config value were ignored, the default
+  // of 3 retries would add "retrying (1/3)" rows before the card.
   const errorBody = sseChunk({
     error: { message: "the upstream model fell over", type: "overloaded_error" },
   })
@@ -4542,6 +4779,8 @@ function startChunkedStreamServer(points: number): { baseURL: string; stop: () =
 }
 
 test("a long many-chunk reply streams in step with the model and the view follows its end", async () => {
+  // Each delta must update the row in place; rebuilding it re-parses markdown
+  // per token and the transcript falls far behind the stream.
   const server = startChunkedStreamServer(120)
   try {
     const t = await testRender(
@@ -4576,6 +4815,7 @@ test("a long many-chunk reply streams in step with the model and the view follow
   }
 }, 40_000)
 
+// --- multi-pane layout ---
 
 function multiPaneScenario(cwd: string) {
   mkdirSync(join(cwd, "src"), { recursive: true })
@@ -4767,6 +5007,7 @@ test("actions sit behind a rail apart from prose; a running shell shows live and
     expect(running).toContain("│ read a.ts · 30 lines")
     expect(running).toMatch(/│ \$ sleep 2 && echo built\s+running \d+s/)
     expect(running).toContain("1 > sleep 2 && echo built")
+    // Tool verbs are tinted by family, not the white of the reply text.
     expect(spanFgFor(t, "read")).toEqual(hexToInts(DARK_TOKENS.link))
     expect(spanFgFor(t, "a.ts")).toEqual(hexToInts(DARK_TOKENS.muted))
     const done = await waitForFrameSlow(t, (f) => f.includes("The build passes."), 20_000)

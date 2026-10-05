@@ -1,9 +1,24 @@
+/**
+ * Paste chips and composer newlines: pure logic, kept IO-free for testing.
+ * app.tsx owns the state and key/paste wiring.
+ *
+ * The composer is OpenTUI's single-line `<input>`, whose `value` setter
+ * silently strips `\n` and `\r`. Line breaks are therefore held as
+ * NEWLINE_MARKER and expanded to real newlines once, at submit.
+ */
 
 /** Pastes at or under this size stay inline as plain text. */
 export const PASTE_CHIP_CHAR_THRESHOLD = 800
+/** Pastes with more than this many lines become a chip. */
 export const PASTE_CHIP_LINE_THRESHOLD = 2
+/**
+ * Without bracketed paste, a paste arrives as an ordinary input update. No
+ * one types this many characters in one frame (~16ms), so a larger single
+ * insertion is treated as a paste.
+ */
 export const PASTE_RATE_HEURISTIC_CHARS = 100
 
+/** Line-break stand-in inside the single-line composer (U+23CE RETURN SYMBOL). */
 export const NEWLINE_MARKER = "⏎"
 
 /** Matches one paste-chip placeholder anywhere in text (global). */
@@ -15,10 +30,12 @@ export function lineCount(text: string): number {
   return text.split("\n").length
 }
 
+/** Chip iff the paste exceeds the char threshold or the line threshold. */
 export function shouldChip(text: string): boolean {
   return text.length > PASTE_CHIP_CHAR_THRESHOLD || lineCount(text) > PASTE_CHIP_LINE_THRESHOLD
 }
 
+/** Chip label: `[Pasted #N +K lines]`. */
 export function chipLabel(n: number, lines: number): string {
   return `[Pasted #${n} +${lines} lines]`
 }
@@ -26,10 +43,16 @@ export function chipLabel(n: number, lines: number): string {
 export interface AddChipResult {
   /** `draft` with the new chip label appended. */
   draftWithChip: string
+  /** `payloads` plus the new chip, as a fresh Map. */
   payloads: ReadonlyMap<number, string>
+  /** Next chip number; monotonic and never reused, so labels can't collide. */
   nextChipNumber: number
 }
 
+/**
+ * Chips the pasted text and appends its label to the end of `draft`
+ * (cursor position is ignored, as with @-mention insertion).
+ */
 export function addPasteChip(
   draft: string,
   pastedText: string,
@@ -43,6 +66,7 @@ export function addPasteChip(
   return { draftWithChip: draft + label, payloads: updated, nextChipNumber: n + 1 }
 }
 
+/** The chip label `text` ends with, if any (triggers atomic backspace). */
 export function endsWithChip(text: string): { label: string; n: number } | null {
   const m = text.match(TRAILING_CHIP_PATTERN)
   if (!m) return null
@@ -55,9 +79,15 @@ export function endsWithChip(text: string): { label: string; n: number } | null 
 export interface RemoveChipResult {
   /** `draft` with the trailing chip label removed. */
   draft: string
+  /** `payloads` minus the removed chip, unless its label still appears elsewhere. */
   payloads: ReadonlyMap<number, string>
 }
 
+/**
+ * Atomic backspace: removes the whole trailing chip label, or returns null if
+ * there is none. Chips are keyed by label text, so the payload is dropped only
+ * when no other copy of the label remains in the draft.
+ */
 export function removeTrailingChip(
   draft: string,
   payloads: ReadonlyMap<number, string>,
@@ -70,6 +100,10 @@ export function removeTrailingChip(
   return { draft: remaining, payloads: updated }
 }
 
+/**
+ * Expands every chip reference in `text`. References without a payload stay
+ * as literal text, so nothing the user wrote is silently dropped.
+ */
 export function expandChips(text: string, payloads: ReadonlyMap<number, string>): string {
   return text.replace(CHIP_PATTERN, (whole, numStr: string) => {
     const payload = payloads.get(Number(numStr))
@@ -77,14 +111,27 @@ export function expandChips(text: string, payloads: ReadonlyMap<number, string>)
   })
 }
 
+/**
+ * Submit-time expansion: chips inlined and newline markers restored. History,
+ * transcript, and journal all use this string.
+ */
 export function expandComposerText(text: string, payloads: ReadonlyMap<number, string>): string {
   return expandChips(text, payloads).replaceAll(NEWLINE_MARKER, "\n")
 }
 
+/**
+ * Real line breaks -> NEWLINE_MARKER. Any text that may contain newlines
+ * (e.g. recalled history) must pass through this before entering the
+ * composer. `\r\n` becomes one marker.
+ */
 export function toComposerDraft(text: string): string {
   return text.replace(/\r\n|\r|\n/g, NEWLINE_MARKER)
 }
 
+/**
+ * Chip numbers whose payload has no intact label left in `text` (edited or
+ * deleted), ascending. submit() reports these rather than guessing.
+ */
 export function unreferencedChips(text: string, payloads: ReadonlyMap<number, string>): number[] {
   if (payloads.size === 0) return []
   const referenced = new Set<number>()
@@ -95,6 +142,10 @@ export function unreferencedChips(text: string, payloads: ReadonlyMap<number, st
   return [...payloads.keys()].filter((n) => !referenced.has(n)).sort((a, b) => a - b)
 }
 
+/**
+ * Text inserted between two composer values (common prefix and suffix
+ * trimmed); "" for deletions and same-length edits. Used by the paste heuristic.
+ */
 export function insertedSpan(previous: string, value: string): string {
   if (value.length <= previous.length) return ""
   const maxPrefix = Math.min(previous.length, value.length)

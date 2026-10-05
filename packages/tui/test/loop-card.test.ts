@@ -14,6 +14,7 @@ import {
   spendCapNotice,
 } from "../src/loop-card"
 
+/** Pure reducer/formatter tests with hand-built LoopEvents; no rendering or real loop. */
 
 const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
@@ -85,6 +86,7 @@ test("loopCardText starts empty-but-sane before any task has been claimed", () =
   expect(text).not.toContain("tok") // no tokens spent yet
 })
 
+// --- preflight guards ---
 
 test("dirtyLoopLines keeps real changes and drops .butterfly/ runtime state", () => {
   const porcelain = [
@@ -130,6 +132,7 @@ test("askBearingRules finds explicit ask entries at both levels", () => {
 })
 
 test("askBearingRules flags the IMPLICIT ask when no root default is set", () => {
+  // resolvePermission() falls through to "ask" when rules["*"] is absent.
   const found = askBearingRules({ bash: { "git *": "allow" } })
   expect(found.length).toBe(1)
   expect(found[0]).toContain("*")

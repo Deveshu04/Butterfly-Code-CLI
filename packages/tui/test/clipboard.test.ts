@@ -56,7 +56,9 @@ test("returns null (fail-soft) when spawn itself throws — e.g. powershell.exe 
   expect(path).toBeNull()
 })
 
+// --- capOsc52Text: size cap applied before handing text to OpenTUI ---
 
+/** Base64 size the native side will write for a payload. */
 function base64Len(text: string): number {
   return Buffer.from(text, "utf-8").toString("base64").length
 }
@@ -72,6 +74,7 @@ test("capOsc52Text: empty string is a valid, untruncated payload", () => {
 })
 
 test("capOsc52Text: a payload exactly at the cap is NOT truncated and lands exactly on it", () => {
+  // A multiple of 3 bytes expands exactly 4/3: the precise boundary case.
   const text = "a".repeat(OSC52_TEXT_CAP_BYTES)
   const capped = capOsc52Text(text)
   expect(capped.truncated).toBe(false)
@@ -95,16 +98,20 @@ test("capOsc52Text: respects a custom cap (not hardcoded to the default)", () =>
   expect(base64Len(text)).toBeLessThanOrEqual(8)
 })
 
+// Built from code points to keep the source ASCII; each is 3 UTF-8 bytes.
 const CJK_A = String.fromCodePoint(0x4e16)
 const CJK_B = String.fromCodePoint(0x754c)
 /** U+FFFD - what a decoder emits when a UTF-8 sequence was cut in half. */
 const REPLACEMENT = String.fromCodePoint(0xfffd)
 
 test("capOsc52Text: a multi-byte character straddling the cut is dropped whole, never split", () => {
+  // Cap 8 => 6-byte budget; the second CJK char spans bytes 5-7, so a naive
+  // slice at 6 would split it.
   const text = `ab${CJK_A}${CJK_B}`
   expect(Buffer.from(text, "utf-8").length).toBe(8)
   const { text: capped, truncated } = capOsc52Text(text, 8)
   expect(truncated).toBe(true)
+  // Backed off to the boundary: "ab" + the first CJK char (5 bytes).
   expect(capped).toBe(`ab${CJK_A}`)
   expect(Buffer.from(capped, "utf-8").length).toBe(5)
   expect(capped).not.toContain(REPLACEMENT)
@@ -112,18 +119,26 @@ test("capOsc52Text: a multi-byte character straddling the cut is dropped whole, 
 })
 
 test("capOsc52Text: a multi-byte payload trimmed at the REAL cap still ends cleanly", () => {
+  // The leading "a" puts the default cap's cut inside a character.
   const text = `a${CJK_A.repeat(OSC52_BASE64_CAP)}`
   const { text: capped, truncated } = capOsc52Text(text)
   expect(truncated).toBe(true)
   expect(capped).not.toContain(REPLACEMENT)
   expect(text.startsWith(capped)).toBe(true)
   expect(base64Len(capped)).toBeLessThanOrEqual(OSC52_BASE64_CAP)
+  // The back-off fired: the trim stopped short of the full budget.
   expect(Buffer.from(capped, "utf-8").length).toBeLessThan(OSC52_TEXT_CAP_BYTES)
 })
 
 test("the user-facing cap figure is DERIVED from the one constant, not typed twice", () => {
+  // base64 cap -> raw byte budget -> human label.
   expect(OSC52_TEXT_CAP_BYTES).toBe(Math.floor(OSC52_BASE64_CAP / 4) * 3)
   expect(osc52CapLabel()).toBe(`~${Math.round(OSC52_TEXT_CAP_BYTES / 1024)}KB`)
+  // The label describes raw bytes copied, not the base64 size.
   expect(osc52CapLabel()).not.toContain("100")
 })
 
+/**
+ * Manual check on Windows: copy a screenshot, press Ctrl+V or run /paste-img,
+ * and confirm a chip appears and .butterfly/media/<ts>.png exists.
+ */

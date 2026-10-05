@@ -2,8 +2,16 @@ import { readdirSync, readFileSync } from "node:fs"
 import { basename, join } from "node:path"
 import type { ReasoningEffort } from "@butterfly/core"
 
+/**
+ * Slash commands. The table drives /help, autocomplete, and dispatch; command
+ * bodies live in the App and are injected via CommandActions.
+ */
 
 export interface CommandActions {
+  /**
+   * `structured` marks command output (rendered as muted label + normal value
+   * per line). Omit it for plain confirmations, which render fully muted.
+   */
   info(text: string, structured?: boolean): void
   error(text: string): void
   openSetup(): void
@@ -42,6 +50,7 @@ export interface CommandActions {
   rewind(): void
   pickEffort(): void
   togglePlan(): void
+  /** Show or hide the sidebar. */
   toggleSidebar(): void
   /** "" lists the session's subagents; "N" opens agent N; "main" returns. */
   agents(arg: string): void
@@ -62,6 +71,7 @@ export interface CommandActions {
   killTask(id: string): void
   showTask(id: string): string
   loopPlan(goal: string): Promise<void>
+  /** `allowDirty` is the explicit `--allow-dirty` opt-out from the uncommitted-work guard. */
   loopRun(allowDirty: boolean): Promise<void>
   loopStatusText(): string
   /** Opens the theme picker (windowed, like /model). */
@@ -80,10 +90,19 @@ export interface SlashCommand {
   args: string
   description: string
   aliases?: string[]
+  /**
+   * Search synonyms ("/history", "/llm", "/revert") for the `/` list and
+   * did-you-mean. An exact keyword dispatches only if no other command shares
+   * it. Not shown in /help.
+   */
   keywords?: string[]
   run(arg: string, actions: CommandActions): void | Promise<void>
 }
 
+/**
+ * Shift+Tab effort cycle: rising levels, then "none", then back to the
+ * provider default. Levels outside the cycle (minimal, max) re-enter at "low".
+ */
 export const EFFORT_CYCLE: (ReasoningEffort | undefined)[] = [
   undefined,
   "low",
@@ -483,6 +502,8 @@ export const COMMANDS: SlashCommand[] = [
         return
       }
       if (trimmed === "run" || trimmed.startsWith("run ")) {
+        // Matches the CLI flag exactly. Unknown flags error rather than being
+        // ignored: silently starting an auto-committing loop is what the guard prevents.
         const flag = trimmed.slice(3).trim()
         if (flag !== "" && flag !== "--allow-dirty") {
           a.error(`unknown option "${flag}" — usage: /loop run [--allow-dirty]`)
@@ -528,6 +549,7 @@ export const COMMANDS: SlashCommand[] = [
   },
 ]
 
+// Custom commands: .butterfly/commands/*.md and ~/.config/butterfly/commands/*.md
 
 export interface CustomCommand {
   name: string
@@ -580,9 +602,13 @@ export function expandTemplate(template: string, argsLine: string): string {
   return out
 }
 
+/** Usage column width in /help. Longer usages get their own line with the
+ * description hang-indented below, so one outlier doesn't widen every row. */
 const HELP_USAGE_COL = 26
 const HELP_DESC_WIDTH = 54
 
+/** Greedy word-wrap with a hanging indent, to a fixed width so output does
+ * not depend on the terminal size. */
 function wrapHanging(text: string, indent: number, width: number): string {
   const words = text.split(/\s+/).filter((w) => w !== "")
   const pad = " ".repeat(indent)
@@ -605,6 +631,7 @@ export function renderHelp(): string {
   const lines = COMMANDS.map((command) => {
     const usage = `/${command.name}${command.args ? ` ${command.args}` : ""}`
     if (usage.length <= HELP_USAGE_COL) {
+      // Continuation lines align under the description: row margin + column + gap.
       const wrapped = wrapHanging(command.description, 2 + HELP_USAGE_COL + 2, HELP_DESC_WIDTH)
       return `  ${usage.padEnd(HELP_USAGE_COL)}  ${wrapped}`
     }
@@ -631,6 +658,13 @@ export interface CommandMatch {
   arg: string
 }
 
+/**
+ * How well a command answers a typed token (higher is better, 0 = no match).
+ * Tiers: exact name > alias > keyword > the same three as prefixes >
+ * substring > typo (edit distance 1, 2 for long tokens) > subsequence. Within
+ * a tier the shorter candidate wins. Fuzzy tiers only apply to word-like
+ * tokens, so a message starting with a path is never read as a typo.
+ */
 export interface CommandScore {
   score: number
   /** The name, alias, or keyword that earned the score. */
@@ -690,6 +724,9 @@ export function scoreCommand(command: SlashCommand, token: string): CommandScore
     else if (fuzzy && token.length >= 4 && word.includes(token))
       consider(600 + weight * 10 - word.length, word, kind)
     else if (fuzzy && token.length >= (kind === "keyword" ? 4 : 3)) {
+      // Keywords need a longer token: almost any three letters are one edit
+      // from some synonym. Also compare the same-length prefix so a typo
+      // still matches while the word is incomplete.
       const allowed = token.length >= 6 ? 2 : 1
       const distance = Math.min(
         editDistance(token, word),
@@ -753,16 +790,22 @@ export function findCommand(input: string): CommandMatch | { suggestions: SlashC
   }
 }
 
+/** Commands matching the draft for the suggestion list, best first: names,
+ * aliases, keywords and near-miss typos. One row per command. */
 export function commandMatches(draft: string): SlashCommand[] {
   if (!draft.startsWith("/")) return []
   return rankCommands(draftToken(draft)).map((row) => row.command)
 }
 
+/** The name or alias that matched `draft`; labels the row and drives
+ * Tab-complete. Keyword and fuzzy hits use the primary name. */
 export function commandMatchLabel(command: SlashCommand, draft: string): string {
   const score = scoreCommand(command, draftToken(draft))
   return score?.kind === "alias" && score.via !== command.name ? score.via : command.name
 }
 
+/** Why a row matched (`alias of /resume`, `matches "history"`,
+ * `did you mean?`); empty for plain name matches. */
 export function commandMatchReason(command: SlashCommand, draft: string): string {
   const token = draftToken(draft)
   const score = scoreCommand(command, token)
