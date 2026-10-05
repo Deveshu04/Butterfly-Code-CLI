@@ -355,6 +355,14 @@ function startFakeOllamaServer(names: string[]): { baseURL: string; stop: () => 
  * background async chain (e.g. a `git` subprocess) is still working. This
  * polls with real sleeps and forced `renderOnce()` calls instead.
  */
+/** The transcript column of a frame (left of the sidebar), rows joined with spaces. */
+function transcriptText(frame: string): string {
+  const rows = frame.split("\n")
+  const sidebarAt =
+    rows.map((row) => row.indexOf("╭─")).find((col) => col > 0) ?? Number.MAX_SAFE_INTEGER
+  return rows.map((row) => row.slice(0, sidebarAt).trim()).join(" ")
+}
+
 async function waitForFrameSlow(
   t: { renderOnce: () => Promise<void>; captureCharFrame: () => string },
   predicate: (frame: string) => boolean,
@@ -1378,7 +1386,8 @@ test("/new clears any stale duration from the status bar — replay must never f
         .filter((l) => l.trim() !== "")
         .at(-1) ?? ""
     expect(lastLine).not.toContain("in 5 · out 3")
-    expect(lastLine).not.toMatch(/\d+s\b/)
+    // The idle line shows the (random) cwd, so match the duration format only.
+    expect(lastLine).not.toMatch(/(steps|·) \d+s\b/)
     expect(lastLine).toContain("/help for commands")
     t.renderer.destroy()
   } finally {
@@ -3411,7 +3420,9 @@ test("a pending handoff is preloaded on the first turn — and says so, naming t
     // Boot preloads too, but visibly, with the source file and its age.
     const frame = await waitForFrameSlow(t, (f) => f.includes("loaded the handoff"))
     expect(frame).toContain("handoff.md")
-    expect(frame).toContain("just now")
+    // Long temp paths (macOS) wrap the notice anywhere, so read the
+    // transcript column with its rows joined back together.
+    expect(transcriptText(frame)).toMatch(/\(\s*written\s+just\s+now\s*\)/)
     // Consumed exactly once: the pending pointer is retired.
     expect(existsSync(saved.path)).toBe(false)
     expect(existsSync(`${saved.path}.consumed`)).toBe(true)
