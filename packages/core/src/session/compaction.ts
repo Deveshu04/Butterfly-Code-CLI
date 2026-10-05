@@ -8,7 +8,9 @@ import { SessionJournal } from "./journal"
 import { foldTimeline, type TimelineEntry } from "./projector"
 import { renderTodos, todosFromTimeline } from "./todo-state"
 
+/** Room left for the model's reply when deciding whether to compact. */
 export const OUTPUT_RESERVE_TOKENS = 16_384
+/** Recent transcript kept word for word after a compaction. */
 export const VERBATIM_TAIL_TOKENS = 10_000
 const CUT_RENDER_MAX_CHARS = 60_000
 
@@ -93,7 +95,9 @@ export interface ModelLimits {
 /** Overflow check: trigger before the window actually fills. */
 export function needsCompaction(lastTurnUsage: Usage, limits: ModelLimits): boolean {
   const reserve =
-    limits.output === undefined ? OUTPUT_RESERVE_TOKENS : Math.min(limits.output, OUTPUT_RESERVE_TOKENS)
+    limits.output === undefined
+      ? OUTPUT_RESERVE_TOKENS
+      : Math.min(limits.output, OUTPUT_RESERVE_TOKENS)
   return lastTurnUsage.input + lastTurnUsage.output + reserve >= limits.context
 }
 

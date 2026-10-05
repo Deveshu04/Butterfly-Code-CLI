@@ -245,9 +245,10 @@ export {
 export {
   COMPACTION_PROMPT,
   compactSession,
-  VERBATIM_TAIL_TOKENS,
   needsCompaction,
+  OUTPUT_RESERVE_TOKENS,
   planCompaction,
+  VERBATIM_TAIL_TOKENS,
 } from "./session/compaction"
 export { JournalHeader, now, SessionEvent, type Usage } from "./session/events"
 export {
