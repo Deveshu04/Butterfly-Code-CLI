@@ -36,13 +36,6 @@ curl -fsSL https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/master
 
 # Windows (PowerShell), prebuilt binary
 irm https://raw.githubusercontent.com/Deveshu04/Butterfly-Code-CLI/master/scripts/install.ps1 | iex
-
-# Homebrew
-brew install Deveshu04/tap/butterfly-code
-
-# Scoop
-scoop bucket add butterfly https://github.com/Deveshu04/scoop-bucket
-scoop install butterfly-code
 ```
 
 Binaries for Linux, macOS and Windows are also attached to every
