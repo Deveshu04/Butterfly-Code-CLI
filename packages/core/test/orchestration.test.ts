@@ -11,6 +11,9 @@ import { editTool } from "../src/tool/tools/edit"
 import { createTaskTool, type TaskToolOptions } from "../src/tool/tools/task"
 import { listWorktrees } from "../src/tool/worktree"
 
+/** File text with LF line endings: git on Windows may check worktrees out as CRLF. */
+const readText = (path: string) => readFileSync(path, "utf8").replace(/\r\n/g, "\n")
+
 const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }
 
 /**
@@ -164,7 +167,7 @@ test("parallel worktree workers edit independently, then op=merge integrates bot
   expect(asks[0]).toContain("2 isolated subagents in parallel")
   expect(batch.isError).toBeFalsy()
   // Main tree untouched until merge.
-  expect(readFileSync(join(dir, "a.ts"), "utf8")).toBe("export const a = 1\n")
+  expect(readText(join(dir, "a.ts"))).toBe("export const a = 1\n")
 
   const pending = listWorktrees(dir)
   expect(pending.length).toBe(2)
@@ -176,8 +179,8 @@ test("parallel worktree workers edit independently, then op=merge integrates bot
     expect(merged.isError).toBeFalsy()
     expect(merged.output).toContain("Merged 1 file(s)")
   }
-  expect(readFileSync(join(dir, "a.ts"), "utf8")).toBe("export const a = 2\n")
-  expect(readFileSync(join(dir, "b.ts"), "utf8")).toBe("export const b = 2\n")
+  expect(readText(join(dir, "a.ts"))).toBe("export const a = 2\n")
+  expect(readText(join(dir, "b.ts"))).toBe("export const b = 2\n")
   expect(listWorktrees(dir)).toEqual([])
   expect((await tool.execute({ op: "list" }, ctx(dir))).output).toContain("No isolated worktrees")
 }, 60_000)
@@ -195,7 +198,7 @@ test("a conflicting merge changes nothing and keeps the worktree for inspection"
   const merged = await tool.execute({ op: "merge", worktree: id }, ctx(dir))
   expect(merged.isError).toBe(true)
   expect(merged.output).toContain("do not apply cleanly")
-  expect(readFileSync(join(dir, "a.ts"), "utf8")).toBe("export const a = 99\n")
+  expect(readText(join(dir, "a.ts"))).toBe("export const a = 99\n")
   expect(listWorktrees(dir).map((w) => w.id)).toEqual([id])
   const discarded = await tool.execute({ op: "discard", worktree: id }, ctx(dir))
   expect(discarded.output).toContain("Discarded")
@@ -223,7 +226,7 @@ test("merging obeys the edit rule: plan mode refuses, an ask session asks", asyn
     ctx(dir, { rules: { "*": "allow", edit: "ask" }, ask: async () => "deny" }),
   )
   expect(declined.isError).toBe(true)
-  expect(readFileSync(join(dir, "b.ts"), "utf8")).toBe("export const b = 1\n")
+  expect(readText(join(dir, "b.ts"))).toBe("export const b = 1\n")
   expect(existsSync(listWorktrees(dir)[0]?.path ?? "")).toBe(true)
 }, 60_000)
 

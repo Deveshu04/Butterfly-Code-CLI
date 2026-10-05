@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { z } from "zod"
@@ -143,6 +143,21 @@ test("dedup is case-insensitive on Windows/NTFS: mixed-casing touches of files u
   const again = reconcileAgentsMd([...events, priorEvent], cwd)
   expect(again.fragments).toEqual([])
 })
+
+test.skipIf(process.platform === "win32")(
+  "one physical AGENTS.md reached through two spellings loads once (identity, not spelling)",
+  () => {
+    const cwd = tempDir("bfly-agentsmd-")
+    buildFixture(cwd)
+    // A second spelling of the same directory, like A/ vs a/ on a
+    // case-insensitive filesystem.
+    symlinkSync(join(cwd, "a"), join(cwd, "alias"), "dir")
+    writeFileSync(join(cwd, "a", "b", "d.ts"), "export const d = 1\n")
+    const events: SessionEvent[] = [readCallEvent("a/b/c.ts"), readCallEvent("alias/b/d.ts")]
+    const result = reconcileAgentsMd(events, cwd)
+    expect(result.fragments.map((f) => f.relPath)).toEqual(["AGENTS.md", "a/AGENTS.md"])
+  },
+)
 
 test("epoch reconcile: once a fragment is loaded (recorded in a prior context.fragment event) it is never reloaded", () => {
   const cwd = tempDir("bfly-agentsmd-")

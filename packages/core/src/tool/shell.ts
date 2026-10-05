@@ -85,6 +85,8 @@ export async function collectBounded(
   stream: ReadableStream<Uint8Array>,
   maxBytes: number = MAX_CAPTURE_BYTES,
   onChunk?: (chunk: Uint8Array) => void,
+  /** Stop reading early (keeps what was captured so far). */
+  stop?: AbortSignal,
 ): Promise<string> {
   const headLimit = Math.floor(maxBytes * 0.6)
   const tailLimit = maxBytes - headLimit
@@ -93,7 +95,21 @@ export async function collectBounded(
   let tail: Uint8Array[] = []
   let tailBytes = 0
   let dropped = 0
-  for await (const chunk of stream) {
+  const reader = stream.getReader()
+  const cancel = () => {
+    reader.cancel().catch(() => {})
+  }
+  if (stop?.aborted) cancel()
+  stop?.addEventListener("abort", cancel, { once: true })
+  for (;;) {
+    let next: Awaited<ReturnType<typeof reader.read>>
+    try {
+      next = await reader.read()
+    } catch {
+      break
+    }
+    if (next.done) break
+    const chunk = next.value
     onChunk?.(chunk)
     let rest = chunk
     if (headBytes < headLimit) {
@@ -119,6 +135,7 @@ export async function collectBounded(
       }
     }
   }
+  stop?.removeEventListener("abort", cancel)
   const decoder = new TextDecoder()
   // Nothing dropped: decode as one buffer so a multi-byte character that
   // straddles the head/tail split stays intact.
@@ -144,6 +161,15 @@ export function killCommand(id: string): boolean {
 }
 
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000
+/** After a stop, how long the shell gets to exit before it is terminated directly. */
+const KILL_GRACE_MS = 2_000
+/**
+ * Once the shell has exited, how long to keep reading its pipes. A leftover
+ * child (a background job, or a Git Bash child that survived a tree kill on
+ * Windows) can hold them open indefinitely.
+ */
+const DRAIN_GRACE_MS = 1_000
+const DRAIN_GRACE_AFTER_KILL_MS = 200
 export const MAX_COMMAND_TIMEOUT_MS = 600_000
 
 /** Stateless command execution (no persistent shell). Pagers and progress
@@ -187,14 +213,26 @@ export async function runCommand(
 
   let timedOut = false
   let killed = false
+  let forceTimer: ReturnType<typeof setTimeout> | undefined
+  const stopTree = () => {
+    killTree(proc)
+    // If the shell outlives the tree kill, terminate it directly.
+    forceTimer ??= setTimeout(() => {
+      try {
+        proc.kill(9)
+      } catch {
+        // already gone
+      }
+    }, KILL_GRACE_MS)
+  }
   const timer = setTimeout(() => {
     timedOut = true
-    killTree(proc)
+    stopTree()
   }, timeoutMs)
   const kill = () => {
     if (killed) return
     killed = true
-    killTree(proc)
+    stopTree()
   }
   if (opts.signal?.aborted) kill()
   opts.signal?.addEventListener("abort", kill, { once: true })
@@ -212,15 +250,24 @@ export async function runCommand(
       }
     : undefined
 
+  const drain = new AbortController()
+  let drainTimer: ReturnType<typeof setTimeout> | undefined
   try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      collectBounded(proc.stdout, MAX_CAPTURE_BYTES, tee?.(0)),
-      collectBounded(proc.stderr, MAX_CAPTURE_BYTES, tee?.(1)),
-      proc.exited,
+    const outputs = Promise.all([
+      collectBounded(proc.stdout, MAX_CAPTURE_BYTES, tee?.(0), drain.signal),
+      collectBounded(proc.stderr, MAX_CAPTURE_BYTES, tee?.(1), drain.signal),
     ])
+    const exitCode = await proc.exited
+    drainTimer = setTimeout(
+      () => drain.abort(),
+      killed || timedOut ? DRAIN_GRACE_AFTER_KILL_MS : DRAIN_GRACE_MS,
+    )
+    const [stdout, stderr] = await outputs
     return { stdout, stderr, exitCode, timedOut, ...(killed ? { killed: true } : {}) }
   } finally {
     clearTimeout(timer)
+    clearTimeout(forceTimer)
+    clearTimeout(drainTimer)
     opts.signal?.removeEventListener("abort", kill)
     if (opts.id !== undefined && liveCommands.get(opts.id) === kill) liveCommands.delete(opts.id)
   }

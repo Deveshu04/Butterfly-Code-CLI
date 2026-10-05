@@ -66,3 +66,32 @@ test("the bash tool reports live output and tells the model about a user stop", 
   expect(outcome.isError).toBe(true)
   expect(outcome.output).toContain("stopped by the user")
 })
+
+// A child that escapes the kill (here via setsid; on Windows a Git Bash child
+// can survive the tree kill) must not keep runCommand waiting on its pipes.
+const hasSetsid = Bun.which("setsid") !== null
+
+test.skipIf(!hasSetsid)(
+  "a stopped command returns even if an escaped child holds its output",
+  async () => {
+    const started = Date.now()
+    const run = runCommand("echo start; (setsid sleep 30 &); sleep 30", {
+      cwd: tmpdir(),
+      id: "live-escape",
+    })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    killCommand("live-escape")
+    const result = await run
+    expect(Date.now() - started).toBeLessThan(4_000)
+    expect(result.killed).toBe(true)
+    expect(result.stdout).toContain("start")
+  },
+)
+
+test.skipIf(!hasSetsid)("a finished command is not held open by a background child", async () => {
+  const started = Date.now()
+  const result = await runCommand("echo done; (setsid sleep 30 &)", { cwd: tmpdir() })
+  expect(Date.now() - started).toBeLessThan(4_000)
+  expect(result.exitCode).toBe(0)
+  expect(result.stdout).toContain("done")
+})

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import type { SessionEvent } from "../session/events"
 
@@ -46,11 +46,19 @@ function toAbsPath(cwdAbs: string, raw: string): string {
 }
 
 /**
- * Dedup key for a path. Lower-cased on Windows, where the filesystem is
- * case-insensitive and models do not reliably preserve casing; exact on
- * other platforms. Stored and returned paths keep their original casing.
+ * Dedup key for a path: the file's physical identity (device + inode), so
+ * differently cased spellings of one file on a case-insensitive filesystem
+ * (Windows, default macOS) count once. Falls back to the path, lower-cased
+ * on Windows, when the file can't be stat'ed. Stored and returned paths
+ * keep their original casing.
  */
 function pathKey(absPath: string): string {
+  try {
+    const st = statSync(absPath, { bigint: true })
+    if (st.ino !== 0n) return `inode:${st.dev}:${st.ino}`
+  } catch {
+    // missing or unreadable: fall through to the path
+  }
   return process.platform === "win32" ? absPath.toLowerCase() : absPath
 }
 
