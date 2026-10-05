@@ -320,7 +320,10 @@ test("config lint: a disabled hook (enabled:false) with a dead command is NOT fl
 
 test("config lint: an unknown event name is still flagged even when the hook is disabled", () => {
   const cwd = tempDir("bfly-doc-")
-  writeConfig(cwd, `{ "hooks": [{ "event": "tool.finished", "command": "true", "enabled": false }] }`)
+  writeConfig(
+    cwd,
+    `{ "hooks": [{ "event": "tool.finished", "command": "true", "enabled": false }] }`,
+  )
   const report = doctor({
     cwd,
     home: tempDir("bfly-doc-home-"),
@@ -407,6 +410,7 @@ test("a clean, well-formed config produces zero lint issues", () => {
   expect(report.configLint).toEqual([])
 })
 
+// renderDoctorReport: the shared text formatter (CLI + TUI)
 
 function sampleReport(): DoctorReport {
   return {

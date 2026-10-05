@@ -1,4 +1,13 @@
+/**
+ * Hand-written ACP wire types and runtime validators for the subset of the
+ * Agent Client Protocol that `butterfly acp` implements.
+ * Spec: https://agentclientprotocol.com
+ *
+ * Not zod: packages/cli does not depend on zod, and these validators are
+ * enough to reject malformed params with a proper JSON-RPC error.
+ */
 
+/** A single integer identifying a MAJOR protocol version. */
 export const PROTOCOL_VERSION = 1
 
 export interface ValidationOk<T> {
@@ -22,6 +31,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
+// initialize
 
 export interface ClientCapabilities {
   fs?: { readTextFile?: boolean; writeTextFile?: boolean }
@@ -76,6 +86,8 @@ export function parseInitializeParams(raw: unknown): ValidationResult<Initialize
 export interface AgentCapabilities {
   loadSession: boolean
   promptCapabilities: { image: boolean; audio: boolean; embeddedContext: boolean }
+  /** stdio MCP is mandatory; http/sse are opt-in. McpHub speaks stdio and
+   * streamable HTTP but not legacy HTTP+SSE. */
   mcpCapabilities: { http: boolean; sse: boolean }
 }
 
@@ -85,6 +97,7 @@ export interface AgentInfo {
   version?: string
 }
 
+// session/new
 
 export interface McpServerConfigAcp {
   name: string
@@ -116,6 +129,7 @@ export function parseSessionNewParams(raw: unknown): ValidationResult<SessionNew
   return ok({ cwd: raw.cwd, mcpServers })
 }
 
+// content blocks
 
 export type ContentBlock =
   | { type: "text"; text: string }
@@ -178,6 +192,7 @@ function parseContentBlock(raw: unknown): ValidationResult<ContentBlock> {
   }
 }
 
+// session/prompt
 
 export interface SessionPromptParams {
   sessionId: string
@@ -199,6 +214,7 @@ export function parseSessionPromptParams(raw: unknown): ValidationResult<Session
   return ok({ sessionId: raw.sessionId, prompt: blocks })
 }
 
+// session/cancel: notification, params only
 
 export interface SessionCancelParams {
   sessionId: string
@@ -212,6 +228,7 @@ export function parseSessionCancelParams(raw: unknown): ValidationResult<Session
   return ok({ sessionId: raw.sessionId })
 }
 
+// session/request_permission: Agent -> Client request
 
 export type PermissionOptionKind = "allow_once" | "allow_always" | "reject_once" | "reject_always"
 
@@ -238,6 +255,7 @@ export function parseRequestPermissionResult(
   return err('outcome must be "cancelled" or {"outcome":"selected","optionId":string}')
 }
 
+// session/update: Agent -> Client notification payloads we emit
 
 export type ToolKind =
   | "read"
@@ -296,10 +314,19 @@ export type SessionUpdate =
     }
   | { sessionUpdate: "plan"; entries: PlanEntry[] }
 
+// stopReason
 
 export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled"
 
+// error codes
 
 export const ACP_AUTH_REQUIRED = -32000
 
+/**
+ * A `session/prompt` arrived while that session already has a turn in flight.
+ * -32001 sits in JSON-RPC's implementation-defined range and is not claimed
+ * by ACP (-32000 auth_required, -32800 cancelled). Overlapping turns would
+ * interleave writes into one journal, so we refuse instead of queueing.
+ * Concurrency across sessions is unaffected.
+ */
 export const ACP_SESSION_BUSY = -32001

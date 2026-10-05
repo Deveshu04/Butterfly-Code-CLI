@@ -7,6 +7,7 @@ import {
   RETRYABLE_ERROR_KINDS,
 } from "../src/provider/describe-error"
 
+/** Table-driven; error shapes match the installed `ai` / @ai-sdk/provider types. */
 
 function apiCallError(opts: {
   message: string
@@ -28,6 +29,7 @@ function apiCallError(opts: {
   })
 }
 
+// classifyProviderError: APICallError (typed)
 
 test("429 APICallError with Retry-After classifies as rate_limit with retryAfterSec", () => {
   const error = apiCallError({
@@ -134,6 +136,7 @@ test("429 APICallError with an insufficient_quota code classifies as quota, not 
   expect(classifyProviderError(error).kind).toBe("quota")
 })
 
+// classifyProviderError: RetryError unwrapping
 
 test("RetryError unwraps to the last underlying error's classification", () => {
   const last = apiCallError({ message: "Rate limit reached", statusCode: 429 })
@@ -147,6 +150,7 @@ test("RetryError unwraps to the last underlying error's classification", () => {
   expect(info.status).toBe(429)
 })
 
+// classifyProviderError: plain-object bodies (must not render as [object Object])
 
 test("plain-object OpenAI-shape body (no APICallError wrapper) classifies correctly", () => {
   const raw = {
@@ -200,6 +204,9 @@ test("a FastAPI-style {detail} body still extracts", () => {
   expect(info.message).toBe("model not found")
 })
 
+// classifyProviderError: context overflow behind a generic invalid_request type.
+// Anthropic and Gemini report overflow as a generic 400; the message text is
+// the only signal, so it outranks the generic type tag.
 
 test("Anthropic's canonical 400 'prompt is too long' body classifies as context_length", () => {
   const body = {
@@ -299,6 +306,7 @@ test("a genuine invalid_request_error that is NOT an overflow stays bad_request"
   expect(describeProviderError(info)).not.toContain("/compact")
 })
 
+// detail: deduped tags, human message first
 
 test("an OpenAI quota body (type AND code both insufficient_quota) never duplicates the tag", () => {
   const human = "You exceeded your current quota, please check your plan and billing details."
@@ -360,6 +368,7 @@ test("detail is capped like the JSON fallback", () => {
   expect(info.detail?.endsWith("…")).toBe(true)
 })
 
+// classifyProviderError: string / Error / unclassifiable
 
 test("string errors pass through verbatim as the message", () => {
   const info = classifyProviderError("connection reset by peer")
@@ -380,6 +389,7 @@ test("a DOMException named TimeoutError (chunk-timeout shape) classifies as time
   expect(info.message).toContain("timeout")
 })
 
+// retryable-kind taxonomy
 
 test("RETRYABLE_ERROR_KINDS / isRetryableProviderError are exactly: rate_limit, unavailable, timeout, network", () => {
   const expectedRetryable = ["rate_limit", "unavailable", "timeout", "network"]
@@ -394,6 +404,7 @@ test("RETRYABLE_ERROR_KINDS / isRetryableProviderError are exactly: rate_limit, 
   }
 })
 
+// the AI SDK's dangling-tool-call message
 
 test("the AI SDK's 'Tool result is missing for tool call' Error classifies as bad_request (not unknown) and is not retryable", () => {
   const info = classifyProviderError(new Error("Tool result is missing for tool call call-abc123."))
@@ -438,6 +449,7 @@ test("unclassifiable-object JSON is capped to roughly 300 chars", () => {
   expect(info.message.endsWith("…")).toBe(true)
 })
 
+// describeProviderError: templates
 
 test("describeProviderError renders the rate_limit template with provider + retry", () => {
   const line = describeProviderError({

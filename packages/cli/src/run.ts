@@ -79,6 +79,10 @@ const HEADLESS_DEFAULT_RULES: PermissionRules = {
   edit: { "**/.env*": "deny", ".env*": "deny" },
 }
 
+/**
+ * Task-tool options for a headless run, exported for testing. `extras`
+ * registers caller-owned tools (explore, web) into each subagent registry.
+ */
 export function taskToolOptions(deps: {
   cwd: string
   sessionsDir: string
@@ -117,6 +121,11 @@ export function taskToolOptions(deps: {
   }
 }
 
+/**
+ * `--resume-handoff`: prepends any pending `.butterfly/handoff.md` to
+ * `taskText` and consumes it so it is never loaded twice. `notify` receives
+ * the same notice the TUI prints; injecting an old doc must never be silent.
+ */
 export function applyResumeHandoff(
   cwd: string,
   taskText: string,
@@ -124,6 +133,8 @@ export function applyResumeHandoff(
   notify?: (text: string) => void,
 ): string {
   if (!resumeHandoff) return taskText
+  // No `journalPath`: headless builds its task text before any turn runs, so
+  // this process can't have written the pending handoff itself.
   const preload = preloadHandoff(cwd, taskText)
   if (preload.notice) notify?.(preload.notice)
   return preload.taskText
@@ -141,6 +152,7 @@ function makeRegistry(cwd: string): ToolRegistry {
   return registry
 }
 
+/** Plain-ASCII progress lines ("-> tool"/"ok"/"failed"), exported for tests. */
 export function renderEvent(event: RunnerEvent, json: boolean): void {
   if (json) {
     console.log(JSON.stringify({ event: event.type, ...event }))
@@ -176,10 +188,13 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
 
   const registry = makeRegistry(cwd)
   const journal = SessionJournal.create(join(cwd, ".butterfly", "sessions"))
+  // "mock/*" needs no provider or network; scripts/smoke-exe.ts uses it to
+  // exercise a compiled exe without an API key.
   const provider = modelRef.startsWith("mock/")
     ? new OfflineMockProvider()
     : new AiSdkProvider(createModelResolver(config))
 
+  // Memory: frozen file snapshots, episodic index, skills, tools.
   const home = homedir()
   const paths = memoryPaths(cwd, home)
   const memory = loadMemory(paths)
@@ -213,6 +228,7 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     mcpHub = await McpHub.connect(config.mcp).catch(() => undefined)
   }
 
+  // Code graph: incremental sync, explore tool, budgeted skeleton.
   const codeGraph = CodeGraph.open(cwd)
   const sync = await codeGraph.sync().catch(() => ({ scanned: 0, skipped: 0, removed: 0 }))
   const graph = codeGraph.db
@@ -236,6 +252,8 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
       }),
     ),
   )
+  // @-mentions: attach mentioned files as capped context and boost their
+  // paths in the skeleton ranking.
   const mentions = expandMentions(cwd, opts.task)
   const mentionBlock = renderMentionBlock(mentions)
   const mentioned = opts.task.split(/[^A-Za-z0-9_]+/).filter((word) => word.length >= 3)
@@ -289,11 +307,14 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
     skillsIndex: skillsIndex(skillDirs),
   })
 
+  // Headless has no window to focus, so it counts as always unfocused.
   const notifications = config.notifications ?? true
   const attentionState = { focus: "blurred" as const, cwd }
   const attentionConfig = { notifications }
   applyHeadlessAttention(decideAttention({ kind: "turn.start" }, attentionState, attentionConfig))
 
+  // Background tasks: seeded here so this process keeps a reference for the
+  // reap-on-exit below (a lazily created registry would be unreachable).
   const state: Record<string, unknown> = {}
   const bgTasks = new BgTaskRegistry({
     cwd,
@@ -302,6 +323,9 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
   })
   state[BG_TASKS_STATE_KEY] = bgTasks
 
+  // Covers the paths `finally` can't (Ctrl+C, SIGTERM, hard crash): clear the
+  // OSC 9;4 progress indicator and reap background tasks. Both are
+  // synchronous, so they're safe in an "exit" handler; keepAlive tasks are spared.
   const stopExitClear = installProgressExitClear(process.stderr, () => {
     bgTasks.reap()
   })
@@ -338,6 +362,8 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
           ? { maxSpendUSD: opts.maxSpendUSD ?? config.maxSpendUSD }
           : {}),
         ...(config.hooks?.length ? { hooks: config.hooks } : {}),
+        // Unattended runs shouldn't die on a transient 429/503; `retries: 0`
+        // must still reach the runner. Unset means the runner default.
         ...(config.retries !== undefined ? { retries: config.retries } : {}),
         ...(config.autoContinue !== undefined ? { autoContinue: config.autoContinue } : {}),
         ...(entry ? { limits: { context: entry.context, output: entry.output } } : {}),
@@ -425,6 +451,8 @@ export async function runHeadless(opts: RunOptions): Promise<number> {
       decideAttention({ kind: "turn.end", detail: turnDetail }, attentionState, attentionConfig),
     )
     stopExitClear()
+    // Reap on exit: a headless run is one-shot, so nothing it started should
+    // outlive it. keepAlive tasks are left running.
     bgTasks.reap()
   }
 }

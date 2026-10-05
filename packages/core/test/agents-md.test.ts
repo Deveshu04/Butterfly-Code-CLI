@@ -119,6 +119,9 @@ test("dedup is case-insensitive on Windows/NTFS: mixed-casing touches of files u
   buildFixture(cwd)
   writeFileSync(join(cwd, "a", "b", "d.ts"), "export const d = 1\n")
 
+  // Same physical files touched with different casing for "a" and "b"
+  // (models don't reliably preserve casing). On a case-insensitive
+  // filesystem both resolve to the same AGENTS.md files.
   const events: SessionEvent[] = [readCallEvent("a/b/c.ts"), readCallEvent("A/B/d.ts")]
   const result = reconcileAgentsMd(events, cwd)
 
@@ -308,6 +311,8 @@ test("runUserTurn integration: reading a nested file journals a context.fragment
   const firstCombined = first?.messages.map((m) => ("content" in m ? m.content : "")).join("\n")
   expect(firstCombined).toContain("ROOT GUIDANCE")
 
+  // The second call must include both fragments, and the system message must
+  // be byte-identical to what was passed in (stable prefix).
   const second = provider.requests[1]
   expect(second?.messages[0]).toEqual({ role: "system", content: "You are Butterfly." })
   const combined = second?.messages.map((m) => ("content" in m ? m.content : "")).join("\n")

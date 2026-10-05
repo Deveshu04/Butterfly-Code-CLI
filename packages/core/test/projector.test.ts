@@ -77,6 +77,9 @@ test("safeRewindIndex walks a per-call checkpoint back to its step's message.ass
     }, // 6 — checkpoint before c2 runs
     { type: "tool.result", callId: "c2", output: "ok", isError: false, time: t }, // 7
   ]
+  // Both per-call checkpoints must resolve to index 1 (the step's
+  // message.assistant), never their own index: truncating there would leave a
+  // tool.call without its tool.result.
   expect(safeRewindIndex(events, 4)).toBe(1)
   expect(safeRewindIndex(events, 6)).toBe(1)
 })
@@ -87,6 +90,11 @@ test("safeRewindIndex on an out-of-range or non-snapshot index is a no-op", () =
   expect(safeRewindIndex(events, 99)).toBe(99)
 })
 
+/**
+ * Rewinding to a checkpoint at or before a compaction cut must restore the
+ * pre-cut originals, not filter the folded list (which would leave an empty
+ * timeline).
+ */
 test("rewinding past a compaction cut re-folds the raw prefix instead of emptying the timeline", () => {
   const events: SessionEvent[] = [
     { type: "message.user", id: "u1", text: "first ask", time: t }, // 0
@@ -100,6 +108,8 @@ test("rewinding past a compaction cut re-folds the raw prefix instead of emptyin
     { type: "session.rewound", toIndex: 2, time: t }, // 7
   ]
   const { entries } = foldTimeline(events)
+  // The correct view is fold(events[0..2)): the pre-cut originals, which the
+  // rewind un-supersedes.
   expect(entries.map((e) => e.index)).toEqual([0, 1])
   expect(entries.map((e) => ("text" in e.event ? e.event.text : e.event.type))).toEqual([
     "first ask",
@@ -121,6 +131,11 @@ test("rewinding to a point AFTER a compaction cut keeps the summary and drops on
   expect(entries.map((e) => e.index)).toEqual([2, 1])
 })
 
+/**
+ * Context fragments inside a rewound region must be carried forward, as the
+ * compaction branch does. reconcileAgentsMd dedups against the raw journal,
+ * so a dropped fragment would never be model-visible again.
+ */
 test("rewind carries context.fragment entries from the undone region forward", () => {
   const fragment: SessionEvent = {
     type: "context.fragment",

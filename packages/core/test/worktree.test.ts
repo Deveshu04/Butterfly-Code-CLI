@@ -120,6 +120,11 @@ test("removeWorktree removes a clean worktree and frees a concurrency slot", asy
   expect(countActiveWorktrees(dir)).toBe(0)
 }, 30_000)
 
+/**
+ * Fail-safe: a git call that fails or times out must never read as "clean",
+ * since clean authorizes force-removing the subagent's work. Unknown means
+ * dirty: reported, never removed.
+ */
 test("worktreeStatus fails SAFE: a failing git status reports dirty + undetermined, never clean", async () => {
   const dir = nonRepoDir("bfly-wt-nogit-") // `git status` here exits 128: "not a git repository"
   const status = await worktreeStatus(dir, "0".repeat(40))
@@ -155,6 +160,8 @@ test("removeWorktree reports a typed failure (with the reason) instead of preten
   const created = await createWorktree(dir, "task1")
   expect(created.ok).toBe(true)
   if (!created.ok) return
+  // A locked worktree (like a lingering child on Windows):
+  // `git worktree remove --force` exits 128 while `git status` reports clean.
   await runCommand(`git worktree lock "${created.path}"`, { cwd: dir })
   const removed = await removeWorktree(dir, created.path)
   expect(removed.ok).toBe(false)

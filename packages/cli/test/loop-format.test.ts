@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import type { LoopEvent, LoopProgress } from "@butterfly/core"
 import { formatLoopTaskEvent } from "../src/loop"
 
+/** `butterfly loop run` task-outcome lines use plain "ok"/"FAIL" words, never glyphs. */
 
 const progress: LoopProgress = {
   counts: { open: 0, claimed: 0, closed: 1, blocked: 0 },

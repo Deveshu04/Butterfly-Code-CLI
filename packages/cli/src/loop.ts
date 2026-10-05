@@ -35,6 +35,8 @@ import {
 } from "@butterfly/core"
 import { applyHeadlessAttention, installProgressExitClear } from "./attention-headless"
 
+/** The line `butterfly loop run` prints per task outcome (plain ASCII
+ * "ok"/"FAIL"), or `undefined` for events the CLI doesn't print. */
 export function formatLoopTaskEvent(event: LoopEvent): string | undefined {
   if (event.type === "task.closed") return `ok ${event.title}`
   if (event.type === "task.failed") return `FAIL ${event.title} (attempt ${event.attempts})`
@@ -203,6 +205,8 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
         return registry
       }
 
+      // Unattended runs get title + progress for the whole run and a
+      // completion notification (headless counts as unfocused).
       const notifications = config.notifications ?? true
       const attentionState = { focus: "blurred" as const, cwd }
       const attentionConfig = { notifications }
@@ -213,6 +217,8 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
       // that never unwinds. Uninstalled below once turn.end has run.
       const stopExitClear = installProgressExitClear()
 
+      // turn.end lives in `finally`: anything below can throw, and skipping
+      // turn.end would leave the terminal showing "busy" and a progress bar.
       let loopDetail: string | undefined
       try {
         const queue = WorkQueue.open(paths.queue)
@@ -234,7 +240,10 @@ export async function runLoopCommand(argv: string[]): Promise<number> {
             sessionsDir: paths.sessions,
             handoffPath: paths.handoff,
             ...(config.small_model ? { smallModel: config.small_model } : {}),
+            // Long unattended loops shouldn't lose an iteration to a transient provider error.
             ...(config.retries !== undefined ? { retries: config.retries } : {}),
+            // Only closed/failed are printed; the other events feed the TUI
+            // and loop.jsonl.
             onEvent: (event) => {
               const line = formatLoopTaskEvent(event)
               if (line !== undefined) console.log(line)

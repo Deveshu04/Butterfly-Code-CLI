@@ -50,6 +50,7 @@ test("gatherDiff reports empty for a clean repo with nothing to diff", async () 
   const result = await gatherDiff(dir)
   expect(result.empty).toBe(true)
   expect(result.diff).toBe("")
+  // A clean tree is not a failure; the two must stay distinguishable.
   expect(result.failure).toBeUndefined()
 }, 20_000)
 
@@ -385,6 +386,7 @@ test("journalReview journals nothing when no subagent ran", async () => {
   expect(SessionJournal.replay(main.path).events.length).toBe(0)
 })
 
+// revision-syntax allowlist (shell interpolation)
 
 test("validateRevisionRange accepts the revision forms git users actually type", () => {
   for (const range of [

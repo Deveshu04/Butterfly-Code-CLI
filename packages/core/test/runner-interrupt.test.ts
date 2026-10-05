@@ -10,6 +10,11 @@ import { type RunnerDeps, runUserTurn } from "../src/session/runner"
 import { ToolRegistry } from "../src/tool/registry"
 import { MockProvider } from "./helpers/mock-provider"
 
+/**
+ * An interrupted turn must never leave a journaled tool.call without a
+ * tool.result: the runner synthesizes results for calls it never ran, and
+ * assembly.ts repairs older journals on replay (see the /resume test below).
+ */
 
 function makeDeps(provider: MockProvider, overrides: Partial<RunnerDeps> = {}): RunnerDeps {
   return {
@@ -24,6 +29,7 @@ function makeDeps(provider: MockProvider, overrides: Partial<RunnerDeps> = {}): 
   }
 }
 
+/** Every journaled tool.call must have exactly one paired tool.result. */
 function assertPaired(events: SessionEvent[]): void {
   const calls = events
     .filter((e) => e.type === "tool.call")
@@ -115,6 +121,8 @@ test("interrupt mid-tool (execute() in-flight when the signal fires): the in-fli
   const deps = makeDeps(provider, { registry, signal: abort.signal })
   const turn = runUserTurn(deps, "go")
 
+  // Wait until "slow" is mid-execute() before interrupting: the case of a
+  // call in flight when the signal fires.
   for (let i = 0; i < 100 && slowStarted.length === 0; i++) {
     await new Promise((r) => setTimeout(r, 5))
   }
@@ -165,6 +173,11 @@ test("an interrupted turn resolves (does not throw/reject) even though the provi
   expect(outcome.interrupted).toBe(true)
 })
 
+/**
+ * A journal with a dangling tool.call written directly to disk (as a hard
+ * kill could leave) must still assemble into a provider-valid request for the
+ * next turn, with no assistant tool call lacking its tool message.
+ */
 test("/resume-then-turn E2E: an old dangling tool.call heals at assembly for the next turn's provider request", async () => {
   const journal = SessionJournal.create(mkdtempSync(join(tmpdir(), "bfly-resume-")))
   journal.append({ type: "message.user", id: "u1", text: "do the thing", time: now() })
@@ -212,6 +225,11 @@ test("/resume-then-turn E2E: an old dangling tool.call heals at assembly for the
   expect([...called].every((id) => answered.has(id))).toBe(true)
 })
 
+/**
+ * A provider whose stream resolves cleanly on abort (no error part, as the AI
+ * SDK does) must still report `outcome.interrupted`, even though it lands via
+ * the non-tool-calls finish path rather than the retry loop's failure path.
+ */
 test("abort during provider streaming (no error part, clean synthetic finish) is still reported as interrupted", async () => {
   const provider: ProviderPort = {
     async *streamTurn(request) {

@@ -68,6 +68,13 @@ import {
   type ToolKind,
 } from "./types"
 
+/**
+ * ACP is interactive (a human can answer `session/request_permission`), so the
+ * defaults match the TUI rather than headless `run`: reads are free, mutating
+ * or networked tools ask, secrets are denied. A `permissions` block in
+ * butterfly.jsonc replaces this object. `task` with worktree isolation
+ * derives its approval from the edit/bash decisions.
+ */
 const DEFAULT_RULES: PermissionRules = {
   "*": "allow",
   bash: "ask",
@@ -75,18 +82,25 @@ const DEFAULT_RULES: PermissionRules = {
   web: "ask",
 }
 
+/**
+ * How long to wait for a permission answer before denying. Generous because a
+ * human must read the prompt, but finite so a silent client can't park a turn.
+ */
 const PERMISSION_TIMEOUT_MS = 120_000
 
 export interface AcpAgentOptions {
   /** Single provider instance shared by every session (mirrors run.ts). */
   provider: ProviderPort
+  /** Model ref override (CLI `--model`); otherwise butterfly.jsonc's `model` for the session's cwd. */
   model?: string
   /** Home directory for config/memory/skills resolution. */
   home: string
   agentInfo?: AgentInfo
   /** Override for `PERMISSION_TIMEOUT_MS` (tests use a short one). */
   permissionTimeoutMs?: number
+  /** Diagnostics sink. Defaults to stderr; stdout is protocol-only. */
   onLog?: (message: string) => void
+  /** Builds the MCP hub from converted configs. Defaults to `McpHub.connect`; tests inject a transport. */
   mcpConnect?: (configs: Record<string, McpServerConfig>) => Promise<McpHub>
 }
 
@@ -98,17 +112,30 @@ interface AcpSession {
   rules: PermissionRules
   model: string
   system: string
+  /** Step-level provider retry cap from this cwd's butterfly.jsonc. Unset means the runner default. */
   retries?: number
   autoApproveReadOnly?: boolean
   state: Record<string, unknown>
+  /** Seeded into `state` so background tasks get a journal audit trail and are reaped at teardown. */
   bgTasks: BgTaskRegistry
   episodic: EpisodicIndex
+  /** Tool calls this step without a result yet. Tool execution is sequential, so
+   * the first entry is the running call; `ask()` takes its toolCallId from here. */
   pendingCalls: Map<string, { name: string; input: unknown }>
+  /**
+   * Set only while a `session/prompt` turn is in flight; doubles as the busy
+   * flag. Set and cleared synchronously, so check-then-set is atomic.
+   */
   abortController?: AbortController
   /** Connected MCP servers for this session (client-supplied + config). */
   mcpHub?: McpHub
 }
 
+/**
+ * ACP sends MCP servers as an array with `{name,value}` env/headers; McpHub
+ * takes a name-keyed record. Entries with neither `command` nor `url` are
+ * dropped with a log line.
+ */
 function toHubConfigs(
   servers: McpServerConfigAcp[],
   log: (message: string) => void,
@@ -217,6 +244,11 @@ function withRuleDecision(
   return { ...rules, [tool]: { ...patternMap, [target]: decision } }
 }
 
+/**
+ * The ACP agent: one process, one session per `session/new`, each with its own
+ * journal, registry and rules. Journals are normal butterfly journals, so
+ * `/resume` works on them. Wire it up with `connectAcpAgent`.
+ */
 export class AcpAgent {
   /** Set immediately after construction by `connectAcpAgent` — never used before then. */
   peer!: JsonRpcPeer
@@ -232,6 +264,12 @@ export class AcpAgent {
     else process.stderr.write(`acp: ${message}\n`)
   }
 
+  /**
+   * Client gone or process exiting: abandon outbound requests (pending asks
+   * deny), abort running turns and wait for them, then close MCP servers and
+   * reap background tasks. Reaping runs after the wait so a turn still
+   * spawning can't add a task behind it; `keepAlive` tasks are spared.
+   */
   async shutdown(reason = "client disconnected"): Promise<void> {
     this.peer?.abandonAll(reason)
     for (const session of this.sessions.values()) session.abortController?.abort()
@@ -254,6 +292,8 @@ export class AcpAgent {
       case "session/prompt":
         return this.handleSessionPrompt(params)
       default:
+        // Optional or capability-gated methods we don't implement (none are
+        // advertised). Method-not-found beats a silent no-op.
         throw new JsonRpcError(JSON_RPC_METHOD_NOT_FOUND, `Method not found: ${method}`)
     }
   }
@@ -262,11 +302,13 @@ export class AcpAgent {
     if (method === "session/cancel") {
       this.handleSessionCancel(params)
     }
+    // Unknown notifications are ignored: there is no channel to report an error on.
   }
 
   private handleInitialize(rawParams: unknown): unknown {
     const parsed = parseInitializeParams(rawParams)
     if (!parsed.ok) throw new JsonRpcError(JSON_RPC_INVALID_PARAMS, parsed.message)
+    // Never error on an unknown version: answer with ours and let the client decide.
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
@@ -300,6 +342,9 @@ export class AcpAgent {
       })
     }
 
+    // The client's `mcpServers` are merged with butterfly.jsonc's `mcp` block;
+    // the client wins a name clash. Connects are fail-soft and time-capped, so
+    // a dead server shows as "unavailable" instead of failing session/new.
     const mcpConfigs = {
       ...(config.mcp ?? {}),
       ...toHubConfigs(parsed.data.mcpServers, (message) => this.log(message)),
@@ -339,6 +384,8 @@ export class AcpAgent {
       skillsIndex: skillsIndex(skillDirs),
     })
 
+    // Seed the background-task registry before any turn runs, so tasks are
+    // journalled and `shutdown()` can reap them.
     const bgTasks = new BgTaskRegistry({
       cwd,
       logDir: join(cwd, ".butterfly", "bg"),
@@ -365,6 +412,10 @@ export class AcpAgent {
     return { sessionId }
   }
 
+  /**
+   * Same tool set as run.ts, plus `mcp` when the session has servers. No
+   * graph/explore tool: a repo-wide scan would make every session/new slow.
+   */
   private buildRegistry(
     cwd: string,
     home: string,
@@ -408,6 +459,7 @@ export class AcpAgent {
         },
       }),
     )
+    // Only when servers exist: an empty `mcp` tool would waste a tool slot.
     if (mcpHub) registry.register(createMcpTool({ hub: () => mcpHub }))
     return registry
   }
@@ -429,6 +481,8 @@ export class AcpAgent {
         `Unknown sessionId "${parsed.data.sessionId}"`,
       )
     }
+    // One turn per session. Everything up to the abortController assignment
+    // is synchronous, so this check-then-set can't interleave. See ACP_SESSION_BUSY.
     if (session.abortController) {
       throw new JsonRpcError(
         ACP_SESSION_BUSY,
@@ -468,6 +522,11 @@ export class AcpAgent {
         { optionId: "reject-once", name: "Reject", kind: "reject_once" },
         { optionId: "reject-always", name: `Never allow ${request.tool}`, kind: "reject_always" },
       ]
+      // A client that never answers must not park the turn. The answer, the
+      // abort signal or the deadline ends the wait; every non-answer denies.
+      // Auto-denies return an AskDenial with the real reason so the model is
+      // not told "User denied" when no user decided. Only an actual Reject
+      // returns the bare "deny".
       const { id, promise } = this.peer.requestWithId("session/request_permission", {
         sessionId: session.id,
         toolCall: { toolCallId },
@@ -483,6 +542,8 @@ export class AcpAgent {
           )
         }),
       ])
+      // raceAbort short-circuits on an already-aborted signal without attaching
+      // to `answered`; mark it handled so abandon() doesn't reject unobserved.
       answered.catch(() => {})
       try {
         const raw = await raceAbort(answered, abortController.signal)
@@ -511,6 +572,7 @@ export class AcpAgent {
             return "deny"
         }
       } catch (error) {
+        // Timeout, disconnect, JSON-RPC error answer, or cancel: deny, never hang.
         this.peer.abandon(id, "permission request abandoned") // no-op if already answered
         const reason = error instanceof Error ? error.message : String(error)
         this.log(
@@ -561,6 +623,7 @@ export class AcpAgent {
       // best-effort — never fail the turn's response over indexing
     }
 
+    // After a cancel, the session/prompt reply must carry stopReason "cancelled".
     if (abortController.signal.aborted) return { stopReason: "cancelled" }
     if (thrown) {
       const message = thrown instanceof Error ? thrown.message : String(thrown)
@@ -697,6 +760,10 @@ export class AcpAgent {
         break
       }
       case "step-retracted": {
+        // The attempt that emitted these cards failed and is being retried, so
+        // no result will arrive. A tool call left `in_progress` spins in the
+        // editor forever, so fail them all. Retries only happen before any of
+        // the step's calls ran, so every pending entry belongs to the dead attempt.
         for (const callId of session.pendingCalls.keys()) {
           this.sendUpdate(session, {
             sessionUpdate: "tool_call_update",
@@ -708,6 +775,8 @@ export class AcpAgent {
         break
       }
       default:
+        // "finish", "error" and "notice" have no session/update mapping here;
+        // errors already surface through the tool-result path.
         break
     }
   }
@@ -717,6 +786,7 @@ export class AcpAgent {
     pending: { name: string; input: unknown } | undefined,
     cwd: string,
   ): ToolCallContent[] {
+    // A failed edit never touched the file, so show the error text instead of a diff.
     if (event.name === "edit" && pending && !event.isError) {
       const input = pending.input as {
         file_path?: string

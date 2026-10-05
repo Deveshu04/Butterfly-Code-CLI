@@ -156,6 +156,11 @@ test("session.rewound truncates the projected timeline", () => {
   expect(texts).not.toContain("undone")
 })
 
+/**
+ * Compaction can land mid-turn, so a turn's snapshot can sit behind the cut
+ * it later has to be rewound past. /undo must still yield the pre-cut
+ * originals, not an empty timeline.
+ */
 test("/undo of a turn that compacted mid-flight replays to a correct, non-empty timeline", () => {
   const dir = mkdtempSync(join(tmpdir(), "bfly-undo-compact-"))
   const journal = SessionJournal.create(dir)

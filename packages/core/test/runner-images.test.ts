@@ -99,6 +99,7 @@ test("an unsupported model still JOURNALS the image (journal is model-agnostic) 
   if (userEvent?.type !== "message.user") throw new Error("expected message.user")
   // The journal records what the USER did, not what this model could take.
   expect(userEvent.images).toEqual([image])
+  // ...and it must NOT bake a capability-dependent notice into the text.
   expect(userEvent.text).toBe("what is this")
 
   const sent = provider.requests[0]?.messages.find((m) => m.role === "user")
@@ -106,12 +107,14 @@ test("an unsupported model still JOURNALS the image (journal is model-agnostic) 
   const hasImagePart =
     typeof sent.content !== "string" && sent.content.some((p) => p.type === "image")
   expect(hasImagePart).toBe(false)
+  // The stripped attachment still names the file for the model.
   const modelText =
     typeof sent.content === "string"
       ? sent.content
       : sent.content.map((p) => (p.type === "text" ? p.text : "")).join("\n")
   expect(modelText).toContain(image.path)
 
+  // ...and the live UI notice names it too.
   expect(notices).toHaveLength(1)
   expect(notices[0]).toContain(image.path)
   expect(notices[0]?.toLowerCase()).toContain("does not support image input")
@@ -171,6 +174,7 @@ test("switching to a text-only model mid-session strips the HISTORICAL image —
   })
   const outcome = await runUserTurn(deps2, "and now describe it in words")
 
+  // (ii) the turn completes: no provider error from an unusable FilePart.
   expect(outcome.text).toBe("no vision here")
   // (i) nothing image-shaped reached the text-only provider, for ANY message.
   const anyImagePart = textOnly.requests[0]?.messages.some(
@@ -185,6 +189,8 @@ test("switching to a text-only model mid-session strips the HISTORICAL image —
   const first = events.find((e) => e.type === "message.user")
   if (first?.type !== "message.user") throw new Error("expected message.user")
   expect(first.images).toEqual([image])
+  // History is stripped silently; the live notice is only for this turn's
+  // own attachments, and it has none.
   expect(notices).toEqual([])
 })
 

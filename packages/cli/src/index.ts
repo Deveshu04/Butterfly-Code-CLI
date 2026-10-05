@@ -82,11 +82,15 @@ async function main(): Promise<number> {
       console.log("  butterfly version        print the version")
       return 0
     default: {
+      // A compiled exe has no `bun` to re-exec and no node_modules, but
+      // scripts/build-exe.ts baked the Solid JSX transform in, so run in-process.
       if (isCompiledExecutable()) {
         const { startTui } = await import("@butterfly/tui")
         await startTui({ cwd: process.cwd() })
         return 0
       }
+      // Dev mode: re-exec with the Solid compiler preload (absolute path).
+      // Without it Bun loads Solid's SSR build and the TUI crashes at mount.
       const { solidPreloadPath, tuiEntrypoint } = await import("@butterfly/tui/launch")
       const child = Bun.spawn(
         [process.execPath, "--preload", solidPreloadPath(), tuiEntrypoint()],

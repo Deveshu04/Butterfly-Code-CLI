@@ -54,6 +54,7 @@ test("ButterflyConfig validates a realistic config", () => {
   expect(parsed.model).toContain("deepseek")
 })
 
+// the `retries` config key
 
 test("ButterflyConfig accepts an optional non-negative integer `retries`", () => {
   expect(ButterflyConfig.parse({ retries: 5 }).retries).toBe(5)

@@ -12,6 +12,11 @@ import {
 } from "@butterfly/core"
 import { taskToolOptions } from "../src/run"
 
+/**
+ * Pins the CLI wiring for worktree isolation: the options `runHeadless`
+ * builds must give a task tool whose isolation:"worktree" path runs a
+ * mutating subagent whose edits land in the worktree, not the main tree.
+ */
 
 const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }
 

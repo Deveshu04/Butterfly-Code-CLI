@@ -147,6 +147,7 @@ test("compaction fires when a step approaches the context limit", async () => {
 })
 
 test("dollar budget stops the loop and emits warnings", async () => {
+  // cost: $10/M input, $30/M output -> each step = 60k*10/1M + 1k*30/1M = $0.63
   const step = (n: number) => [
     { type: "tool-call" as const, callId: `c${n}`, name: "echo", input: { text: "go" } },
     { type: "finish" as const, reason: "tool-calls" as const, usage: bigUsage },
@@ -162,6 +163,7 @@ test("dollar budget stops the loop and emits warnings", async () => {
   })
   const outcome = await runUserTurn(deps, "spend dollars")
 
+  // Step 1: $0.63 (under, but past 50%). Step 2: $1.26 >= $1.00 -> stop.
   expect(outcome.steps).toBe(2)
   expect(outcome.budgetExceeded).toBe(true)
   expect(outcome.costUSD).toBeCloseTo(1.26, 2)
@@ -212,6 +214,11 @@ test("onEvent streams deltas, tool calls, and tool results", async () => {
   expect(seen).toContain("text-delta")
 })
 
+/**
+ * Budget stops happen after a step's tool.call batch is journaled but before
+ * any tool.result exists. Every tool.call must still get a result, or the
+ * next request has unanswered tool calls that providers reject.
+ */
 function assertPaired(events: SessionEvent[]): void {
   const calls = events
     .filter((e) => e.type === "tool.call")
@@ -292,6 +299,9 @@ test("a DOLLAR budget stop mid-batch pairs its pending calls too", async () => {
 })
 
 test("tool calls emitted with a non-tool-calls finish reason are still answered", async () => {
+  // Some providers end a step with `stop` while still carrying tool calls.
+  // Complete calls run; any other finish (here "error") still gets every
+  // call answered.
   const provider = new MockProvider([
     [
       { type: "tool-call", callId: "c1", name: "echo", input: { text: "orphan" } },

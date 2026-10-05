@@ -132,6 +132,7 @@ test("isCompiledExecutable is false under bun test (never a standalone executabl
   expect(isCompiledExecutable()).toBe(false)
 })
 
+// Atomic publish: partial files are never trusted, first-run races are safe
 
 test("a successful extraction leaves no scratch/tmp files behind", async () => {
   const root = cacheDir()

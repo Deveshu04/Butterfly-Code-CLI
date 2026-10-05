@@ -1,3 +1,9 @@
+/**
+ * JSON-RPC 2.0 peer over newline-delimited frames (ndjson), the ACP transport.
+ * No LSP Content-Length framing. Generic: knows only the JSON-RPC envelope.
+ * Either side may send requests (with `id`) or notifications (no `id`, and
+ * answering one is a protocol violation).
+ */
 
 export type JsonRpcId = number | string
 
@@ -39,6 +45,12 @@ interface PendingCall {
   reject: (error: Error) => void
 }
 
+/**
+ * Bidirectional ndjson JSON-RPC 2.0 peer. `handleLine` resolves when that
+ * line's handling completes, but read loops must not await it: a long
+ * `session/prompt` has to observe a `session/cancel` arriving on a later line.
+ * Dispatch with `.catch()` instead.
+ */
 export class JsonRpcPeer {
   private nextId = 0
   private readonly pending = new Map<JsonRpcId, PendingCall>()
@@ -68,6 +80,10 @@ export class JsonRpcPeer {
     return this.requestWithId(method, params).promise
   }
 
+  /**
+   * Like `request`, but also returns the wire id so the caller can `abandon()`
+   * a peer that never answers (permission prompts pair this with a timeout).
+   */
   requestWithId(method: string, params?: unknown): { id: JsonRpcId; promise: Promise<unknown> } {
     const id = this.nextId++
     const promise = new Promise<unknown>((resolve, reject) => {
@@ -82,6 +98,10 @@ export class JsonRpcPeer {
     return { id, promise }
   }
 
+  /**
+   * Stop waiting on one outbound request and reject it with `reason`. A late
+   * response is ignored. No-op if already settled.
+   */
   abandon(id: JsonRpcId, reason: string): void {
     const pending = this.pending.get(id)
     if (!pending) return

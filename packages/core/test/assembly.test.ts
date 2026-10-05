@@ -125,6 +125,7 @@ test("imageInputSupported false strips journaled images to path-naming text part
   expect(user.content[0]).toEqual({ type: "text", text: "what is this" })
   const stripped = user.content[1]
   if (stripped?.type !== "text") throw new Error("expected stripped text part")
+  // The model must still learn which file was attached.
   expect(stripped.text).toContain(path)
 })
 
@@ -179,13 +180,14 @@ test("message.user without images keeps plain string content — unchanged histo
   expect(messages[1]).toEqual({ role: "user", content: "hi" })
 })
 
-
+// replay repair for an unpaired tool.call
 
 test("a dangling tool.call at the END of the timeline heals into a synthesized isError tool message", () => {
   const timeline: SessionEvent[] = [
     { type: "message.user", id: "u1", text: "do it", time: t },
     { type: "message.assistant", id: "a1", text: "", time: t },
     { type: "tool.call", callId: "c1", name: "bash", input: { command: "sleep 100" }, time: t },
+    // interrupted here: no tool.result ever journaled for c1.
   ]
   const messages = assemble({ system: "s", timeline })
   expect(messages.map((m) => m.role)).toEqual(["system", "user", "assistant", "tool"])
@@ -196,6 +198,8 @@ test("a dangling tool.call at the END of the timeline heals into a synthesized i
   expect(tool.isError).toBe(true)
   expect(tool.output).toBe(UNANSWERED_CALL_OUTPUT)
 
+  // The assistant's toolCalls entry and its healed tool message must agree,
+  // as real providers enforce.
   const assistant = messages[2]
   if (assistant?.role !== "assistant") throw new Error("expected assistant")
   expect(assistant.toolCalls?.map((c) => c.callId)).toEqual(["c1"])
@@ -206,6 +210,7 @@ test("a dangling tool.call heals BEFORE the next turn's user message, not after 
     { type: "message.user", id: "u1", text: "do it", time: t },
     { type: "message.assistant", id: "a1", text: "", time: t },
     { type: "tool.call", callId: "c1", name: "bash", input: { command: "x" }, time: t },
+    // interrupted (no tool.result), then /resume + a new turn:
     { type: "message.user", id: "u2", text: "continue", time: t },
     { type: "message.assistant", id: "a2", text: "done", time: t },
   ]
@@ -232,6 +237,7 @@ test("multiple dangling calls in one batch all heal, in call order; the one real
     { type: "tool.call", callId: "c2", name: "echo", input: {}, time: t },
     { type: "tool.call", callId: "c3", name: "echo", input: {}, time: t },
     { type: "tool.result", callId: "c1", output: "real result", isError: false, time: t },
+    // c2, c3 interrupted before they could run: no tool.result for either.
   ]
   const messages = assemble({ system: "s", timeline })
   const toolMsgs = messages.filter((m) => m.role === "tool")

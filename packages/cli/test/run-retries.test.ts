@@ -4,6 +4,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { runHeadless } from "../src/run"
 
+/**
+ * Headless `retries` wiring end to end: a real `runHeadless`, a real config
+ * file and a local OpenAI-compatible endpoint that always fails, counting the
+ * requests that reach the wire.
+ *
+ * The endpoint answers 503 + `Retry-After: 0` (retryable, zero backoff), so
+ * retries run instantly. The counts also pin that the AI SDK's own
+ * `maxRetries` isn't stacked under ours (they'd be 3x higher).
+ */
 
 function failingProviderFixture(): { port: number; hits: () => number; stop: () => void } {
   let hits = 0
@@ -22,6 +31,8 @@ function failingProviderFixture(): { port: number; hits: () => number; stop: () 
 
 function headlessCwd(retries: number, port: number): string {
   const cwd = mkdtempSync(join(tmpdir(), "bfly-cli-retries-"))
+  // Its own .git so the runner's snapshot walk stops here instead of
+  // staging an ancestor repo.
   Bun.spawnSync(["git", "init", "-q"], { cwd, stdout: "ignore", stderr: "ignore" })
   writeFileSync(
     join(cwd, "butterfly.jsonc"),

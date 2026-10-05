@@ -85,6 +85,7 @@ test("loadRawConfig keeps unknown keys that loadConfig would silently strip", ()
   expect(parsed.notInTheSchema).toBeUndefined()
 })
 
+// hooks[] source location + enable/disable write-back
 
 test("locateHooksSource finds the most-local file that defines hooks[] (mergeConfigs replaces arrays wholesale)", () => {
   const home = tempDir()
@@ -171,6 +172,7 @@ test("setHookEnabled fails soft on a commented file — never corrupts it, offer
   expect(after).toBe(original)
 })
 
+// permission quick-add write-back
 
 test("setPermissionRule creates butterfly.jsonc and the rule round-trips through loadConfig", () => {
   const cwd = tempDir()

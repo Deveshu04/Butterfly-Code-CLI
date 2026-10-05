@@ -3,6 +3,10 @@ import { tmpdir } from "node:os"
 import { killCommand, runCommand } from "../src/tool/shell"
 import { bashTool } from "../src/tool/tools/bash"
 
+/**
+ * Live shells: output streams to the UI while a command runs, one command can
+ * be stopped on its own, and a stop or timeout ends the whole process tree.
+ */
 
 test("killCommand stops a compound command at once, children included", async () => {
   const started = Date.now()

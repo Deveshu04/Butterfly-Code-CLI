@@ -5,6 +5,11 @@ import { basename, join } from "node:path"
 import { runCommand } from "@butterfly/core"
 import { runLoopCommand } from "../src/loop"
 
+/**
+ * Captures what the headless attention adapter writes by making stderr look
+ * like a TTY for the call. The adapter reads `process.stderr` at call time,
+ * so patching the descriptor avoids needing a real PTY.
+ */
 async function captureStderr(fn: () => Promise<unknown>): Promise<{
   written: string
   error: unknown
@@ -43,6 +48,8 @@ async function loopFixture(): Promise<string> {
 
 test("a loop run that blows up before runLoop still clears title + progress", async () => {
   const cwd = await loopFixture()
+  // Make WorkQueue.open fail like a corrupt or locked queue would, after
+  // turn.start has already set "busy + indeterminate progress".
   mkdirSync(join(cwd, ".butterfly", "queue.db"), { recursive: true })
 
   const { written, error } = await captureStderr(() =>
@@ -50,8 +57,10 @@ test("a loop run that blows up before runLoop still clears title + progress", as
   )
 
   expect(error).toBeDefined()
+  // Started busy...
   expect(written).toContain(`\x1b]0;busy — ${basename(cwd)}\x07`)
   expect(written).toContain("\x1b]9;4;3;0\x07")
+  // ...and ended idle with the progress indicator cleared.
   expect(written).toContain(`\x1b]0;idle — ${basename(cwd)}\x07`)
   expect(written).toContain("\x1b]9;4;0;0\x07")
 }, 60_000)

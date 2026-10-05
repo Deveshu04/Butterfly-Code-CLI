@@ -1,4 +1,17 @@
 #!/usr/bin/env bun
+/**
+ * Smoke test for the compiled exe (not part of `bun test`; run
+ * `bun run build:exe` first). Checks the exe works without bun, node_modules,
+ * system ripgrep or an API key.
+ *
+ * Usage: bun scripts/smoke-exe.ts [path-to-exe]   (default ./dist/butterfly[.exe])
+ *
+ * Checks:
+ *   1. `<exe> --help` exits 0 and prints the usage banner.
+ *   2. `<exe> run "<task>" --model mock/mock --cwd <fixture>` exits 0.
+ *   3. The fixture's graph.db has symbols. Graph loading fails soft, so
+ *      exit 0 alone would not catch missing grammar wasm or tags queries.
+ */
 import { Database } from "bun:sqlite"
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -35,6 +48,7 @@ function runExe(args: string[], cwd: string): { exitCode: number; stdout: string
 
 console.log(`smoke-exe: target = ${EXE}\n`)
 
+// 1. --help
 {
   const result = runExe(["--help"], ROOT)
   check(result.exitCode === 0, `--help exits 0 (got ${result.exitCode})`)
@@ -42,6 +56,7 @@ console.log(`smoke-exe: target = ${EXE}\n`)
   if (result.exitCode !== 0) console.error(result.stderr)
 }
 
+// 2 + 3. headless run with the mock provider, then check the graph
 {
   const fixture = mkdtempSync(join(tmpdir(), "bfly-exe-smoke-"))
   mkdirSync(join(fixture, "src"), { recursive: true })
@@ -76,7 +91,10 @@ console.log(`smoke-exe: target = ${EXE}\n`)
     db.close()
     check((row?.c ?? 0) > 0, `graph sync populated symbols in ${dbPath} (found ${row?.c ?? 0})`)
   } catch (error) {
-    check(false, `graph.db readable at ${dbPath} (${error instanceof Error ? error.message : error})`)
+    check(
+      false,
+      `graph.db readable at ${dbPath} (${error instanceof Error ? error.message : error})`,
+    )
   }
 }
 

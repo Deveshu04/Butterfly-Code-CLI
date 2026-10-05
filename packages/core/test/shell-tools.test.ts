@@ -31,11 +31,13 @@ function fixtureDir(): string {
   return mkdtempSync(join(tmpdir(), "bfly-shell-"))
 }
 
+// shell resolution
 
 test("resolveShell never picks the WSL bash launcher on Windows", () => {
   const { exe } = resolveShell()
   expect(exe).toBeTruthy()
   if (process.platform === "win32") {
+    // system32\bash.exe is the WSL launcher, which must never be used.
     expect(exe.toLowerCase()).not.toMatch(/system32[\\/]bash\.exe$/)
     if (Bun.which("git")) {
       // With Git for Windows installed, Git Bash must win regardless of
@@ -45,6 +47,7 @@ test("resolveShell never picks the WSL bash launcher on Windows", () => {
   }
 })
 
+// runCommand
 
 test("runCommand captures stdout and exit code", async () => {
   const result = await runCommand("echo hello-butterfly", { cwd: fixtureDir() })
@@ -65,6 +68,7 @@ test("runCommand kills long commands at the timeout", async () => {
   expect(Date.now() - start).toBeLessThan(8_000)
 }, 15_000)
 
+// bash tool
 
 test("bash tool reports success output", async () => {
   const result = await bashTool.execute({ command: "echo tool-ok" }, ctx(fixtureDir()))
@@ -83,6 +87,7 @@ test("bash tool says so when a command produces no output", async () => {
   expect(result.output).toContain("no output")
 }, 20_000)
 
+// bash tool: UI-only meta.command/meta.exitCode
 
 test("bash tool meta carries the command + exit code on success", async () => {
   const result = await bashTool.execute({ command: "echo meta-ok" }, ctx(fixtureDir()))
@@ -100,6 +105,7 @@ test("bash tool meta is present even when the command produces no output", async
   expect(result.meta).toEqual({ command: "true", exitCode: 0 })
 }, 20_000)
 
+// bash tool: background:true
 
 test("background:true spawns detached — returns fast with a task id + log path, not waiting for the command", async () => {
   const state: Record<string, unknown> = {}
@@ -141,6 +147,7 @@ test("background bash goes through the SAME permission gate as foreground bash",
   )
   expect(result.isError).toBe(true)
   expect(result.output).toContain("Permission denied")
+  // Nothing was spawned: deny fires before execute() runs.
   expect(state[BG_TASKS_STATE_KEY]).toBeUndefined()
 })
 
@@ -148,6 +155,8 @@ test("a shell that can't host a detached task fails the tool call, never the tur
   const dir = fixtureDir()
   const state: Record<string, unknown> = {}
   liveStates.push(state)
+  // A shell background tasks can't detach on: execute() must return an
+  // isError result with an actionable message, not throw.
   state[BG_TASKS_STATE_KEY] = new BgTaskRegistry({
     cwd: dir,
     logDir: join(dir, ".butterfly", "bg"),
@@ -172,6 +181,7 @@ test("background bash without a pre-seeded registry still works (lazy, no journa
   expect(state[BG_TASKS_STATE_KEY]).toBeDefined()
 })
 
+// grep tool
 
 test("resolveRipgrep finds an rg binary", async () => {
   const rg = await resolveRipgrep()
@@ -196,6 +206,7 @@ test("grep reports no matches without erroring", async () => {
   expect(result.output).toContain("No matches")
 })
 
+// edit tool
 
 test("edit replaces text and persists to disk", async () => {
   const dir = fixtureDir()

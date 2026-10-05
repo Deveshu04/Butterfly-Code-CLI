@@ -16,6 +16,10 @@ import { todoTool } from "../src/tool/tools/todo"
 import { createWebTool } from "../src/web/web-tool"
 import { MockProvider } from "./helpers/mock-provider"
 
+/**
+ * Keeps the system prefix (system prompt + tool schemas) small. Growth should
+ * be deliberate: raise a budget here only with a reason in the commit message.
+ */
 function fullRegistry(): ToolRegistry {
   const registry = new ToolRegistry()
   for (const tool of [bashTool, readTool, editTool, globTool, grepTool, todoTool]) {

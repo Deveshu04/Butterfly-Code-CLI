@@ -19,7 +19,12 @@ import {
   todoTool,
 } from "@butterfly/core"
 
+/**
+ * `butterfly bench`: solve rate, input tokens per solved task, malformed-edit
+ * rate. Uses the plain tool set (no graph/memory) to isolate the core harness.
+ */
 
+/** Per-task result line with a plain ASCII status word ("ok"/"FAIL"). */
 export function formatBenchResultLine(result: BenchTaskResult): string {
   const m = result.metrics
   return `${result.solved ? "ok" : "FAIL"} ${result.id}  in=${m.usage.input} out=${m.usage.output} steps=${m.steps} edits=${m.editCalls} malformed=${m.malformedEdits}${result.solved ? "" : `  [check: ${result.checkOutput.slice(0, 120)}]`}`

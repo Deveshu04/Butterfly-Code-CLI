@@ -70,6 +70,8 @@ test("touchFrecency caps the store at 1000 entries, dropping the oldest lastOpen
   writeFileSync(store, `${seeded.map((e) => JSON.stringify(e)).join("\n")}\n`, "utf8")
   expect(loadFrecency(store)).toHaveLength(FRECENCY_CAP)
 
+  // One more new path pushes the store over the cap and the LRU rewrite drops
+  // only the oldest entry (file-0.ts, lastOpen=0).
   const after = touchFrecency(store, "new-file.ts", FRECENCY_CAP)
   expect(after).toHaveLength(FRECENCY_CAP)
   expect(after.some((e) => e.path === "file-0.ts")).toBe(false)

@@ -6,6 +6,11 @@ import { fetchProviderModels } from "../src/provider/list-models"
 import { ModelsCatalog } from "../src/provider/models-catalog"
 import type { ReasoningEffort, TurnEvent } from "../src/provider/port"
 
+/**
+ * Sarvam provider: a fake OpenAI-compatible server stands in for
+ * api.sarvam.ai so the real wire body (after the SDK and our transform) is
+ * asserted.
+ */
 
 interface Captured {
   body: Record<string, unknown>
@@ -113,7 +118,7 @@ test("streams reasoning_content as reasoning and content as text, with usage", a
 
 test("reasoning levels map onto Sarvam's low|medium|high|null on the wire", async () => {
   const cases: [ReasoningEffort, unknown][] = [
-    ["none", null],
+    ["none", null], // explicit off; omitting it would leave thinking on
     ["minimal", "low"],
     ["low", "low"],
     ["medium", "medium"],

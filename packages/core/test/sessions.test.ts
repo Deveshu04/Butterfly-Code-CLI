@@ -107,12 +107,15 @@ test("export labels the region /undo rewound out of the conversation", () => {
 
   const markdown = exportSessionMarkdown(journal.path)
 
+  // The undone region is delimited on both sides like session.compacted:
+  // nothing is dropped, but readers (and the Ctrl+O pager) can tell live from undone.
   expect(markdown).toContain("/undo rewound")
   expect(markdown).toContain("end of undone")
   // Undone content is still present, and every undone turn carries the
   // label — not just the region's first line.
   expect(markdown).toContain("undone reply")
   expect(markdown).toContain("## (undone) ❯ undone ask")
+  // ...and it no longer has the live-prompt heading the pager's { } jumps use.
   expect(markdown).not.toContain("## ❯ undone ask")
   // Live turns on both sides of the region are untouched.
   expect(markdown).toContain("## ❯ kept ask")

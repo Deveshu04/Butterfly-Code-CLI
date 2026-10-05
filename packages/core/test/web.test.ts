@@ -24,8 +24,11 @@ function textStub(body: string, status = 200, headers?: Record<string, string>):
   return (async () => new Response(body, { status, headers })) as unknown as typeof fetch
 }
 
+// Calls against a domain name (not a literal IP) must inject a resolver;
+// otherwise the SSRF guard's default DNS lookup hits the real network.
 const noNetworkResolve = async () => ["93.184.216.34"]
 
+// html.ts: readability-lite extraction
 
 test("htmlToText strips script/style/nav and collapses whitespace", () => {
   const html = `
@@ -73,6 +76,7 @@ test("extractTitle pulls the <title> tag, decoded and trimmed", () => {
   expect(extractTitle("<html><body>no title here</body></html>")).toBeUndefined()
 })
 
+// ssrf.ts: scheme + private/loopback/link-local guard, incl. IP tricks
 
 test("validateFetchUrl refuses non-http(s) schemes", async () => {
   await expect(validateFetchUrl("file:///etc/passwd")).rejects.toThrow(SsrfError)
@@ -81,6 +85,8 @@ test("validateFetchUrl refuses non-http(s) schemes", async () => {
 })
 
 test("validateFetchUrl allows ordinary public https URLs", async () => {
+  // The guard fails closed on resolver errors, so an unstubbed domain host
+  // would hit real DNS and refuse when offline.
   const url = await validateFetchUrl("https://example.com/docs", { resolveHost: noNetworkResolve })
   expect(url.hostname).toBe("example.com")
 })
@@ -135,6 +141,7 @@ test("validateFetchUrl resolves hostnames via an injectable resolver and blocks 
   expect(ok.hostname).toBe("good.example.com")
 })
 
+// backends.ts: search adapters
 
 test("tavilySearchBackend maps results[].content into snippet", async () => {
   const backend = tavilySearchBackend({
@@ -237,6 +244,7 @@ test("ddgSearchBackend treats HTTP 202 as rate-limited and does not retry", asyn
   await expect(backend.search("q", { maxResults: 5 })).rejects.toThrow(/202|rate-limit/i)
 })
 
+// extract.ts: op=fetch adapters
 
 test("tavilyExtractBackend returns raw_content as markdown", async () => {
   const backend = tavilyExtractBackend({
@@ -339,6 +347,7 @@ test("rawFetchBackend surfaces non-2xx responses as errors", async () => {
   await expect(backend.extract("https://example.com/missing", {})).rejects.toThrow(/404/)
 })
 
+// config schema: web block, {env:VAR} substitution
 
 test("ButterflyConfig accepts the web block schema", () => {
   const parsed = ButterflyConfig.parse({
@@ -362,6 +371,7 @@ test("substituteEnv resolves {env:VAR} inside web.tavily.apiKey like every other
   expect(resolved.web.tavily.apiKey).toBe("tvly-abc123")
 })
 
+// web-tool.ts: buildWebBackends resolution chain
 
 test("buildWebBackends picks the first backend whose key is configured", () => {
   const { searchChain } = buildWebBackends({ tavily: { apiKey: "t" }, brave: { apiKey: "b" } })
@@ -401,6 +411,7 @@ test("buildWebBackends fetch chain always ends in raw (no key required)", () => 
   expect(withTavily.map((b) => b.name)).toEqual(["tavily", "raw"])
 })
 
+// web-tool.ts: the model-visible tool
 
 test("createWebTool op=search formats numbered results with a backend trailer", async () => {
   const tool = createWebTool({
@@ -440,6 +451,9 @@ test("createWebTool op=search with no backend configured self-describes the fix"
 
 test("createWebTool op=fetch renders a title/url header plus body and truncates over the char budget", async () => {
   const html = "<html><head><title>Example</title></head><body><p>hello</p></body></html>"
+  // The default fetch chain is raw-only (r.jina.ai is opt-in). The r.jina.ai
+  // stub 404s, so if jina ever enters the default chain the assertions below
+  // still describe the raw backend.
   const fetchFn = (async (url: unknown) => {
     if (String(url).startsWith("https://r.jina.ai/")) return new Response("", { status: 404 })
     return new Response(html, { status: 200, headers: { "content-type": "text/html" } })
@@ -485,6 +499,8 @@ test("createWebTool description contains no self-preferential phrasing", () => {
   expect(lower).not.toContain("you should always")
 })
 
+// Third-party transit: opt-in, disclosed at approval, and never used for
+// credential-bearing URLs
 
 test("buildWebBackends keeps r.jina.ai out of the fetch chain unless opted in", () => {
   expect(buildWebBackends(undefined).fetchChain.map((b) => b.name)).toEqual(["raw"])
@@ -497,6 +513,7 @@ test("buildWebBackends keeps r.jina.ai out of the fetch chain unless opted in", 
     "jina",
     "raw",
   ])
+  // ...but an explicit false always wins over that implied opt-in.
   expect(
     buildWebBackends({ jinaKey: "jina_x", allowJina: false }).fetchChain.map((b) => b.name),
   ).toEqual(["raw"])
@@ -559,6 +576,7 @@ test("looksCredentialBearing flags signed/tokenized URLs and leaves plain ones a
   expect(looksCredentialBearing("not a url")).toBe(false)
 })
 
+// web.maxResults / web.maxFetchChars drive behavior
 
 test("web.maxResults from config drives the request; constructor opts and per-call args override", async () => {
   const bodies: string[] = []
@@ -597,6 +615,7 @@ test("web.maxFetchChars from config truncates the model-visible body", async () 
   expect(result.output).toContain("truncated at 12 chars")
 })
 
+// Full capture rides `meta` (capture limit != model limit)
 
 test("op=fetch keeps the full capture in meta while the model sees only the truncated body", async () => {
   const html = `<html><head><title>Big</title></head><body><p>${"z".repeat(50_000)}</p></body></html>`
@@ -626,6 +645,7 @@ test("the meta capture is itself capped so one huge page cannot bloat the journa
   expect(meta.chars).toBeGreaterThan(200_000)
 })
 
+// ctx.signal reaches the backends (a user interrupt cancels)
 
 /** Never settles unless the caller's signal aborts it — proves the wiring. */
 function hangingFetch(): typeof fetch {
@@ -674,6 +694,7 @@ test("op=search cancels in-flight backend requests when ctx.signal aborts", asyn
   expect(result.output.toLowerCase()).toContain("abort")
 })
 
+// The SSRF guard fails closed on resolver error / empty answer
 
 test("validateFetchUrl fails CLOSED when the resolver errors or answers with nothing", async () => {
   const throwing = async () => {

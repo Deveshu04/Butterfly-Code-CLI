@@ -3,6 +3,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { isGitRepo } from "../../src/session/snapshot"
 
+/**
+ * A directory guaranteed not to be inside a git repo (isGitRepo() walks up
+ * for `.git`, and some home directories are git-tracked). Prefers the per-run
+ * test sandbox; if an ancestor `.git` rules that out, falls back to the drive
+ * root and registers the directory for removal at exit.
+ */
 export function nonRepoDir(prefix: string): string {
   const candidate = mkdtempSync(join(tmpdir(), prefix))
   if (!isGitRepo(candidate)) return candidate

@@ -1,4 +1,13 @@
 #!/usr/bin/env bun
+/**
+ * Builds the standalone exe with `bun build --compile` into ./dist
+ * (`bun run build:exe`).
+ *
+ * The TUI's Solid JSX transform is normally a preload plugin, which the
+ * bundler never consults, so `@opentui/solid/bun-plugin` is registered here to
+ * bake it in. Grammar wasm and ripgrep binaries are embedded automatically via
+ * the `import(..., { with: { type: "file" } })` calls in core.
+ */
 import { mkdirSync } from "node:fs"
 import { createRequire } from "node:module"
 import { join } from "node:path"
@@ -11,6 +20,7 @@ const OUT_FILE = join(OUT_DIR, process.platform === "win32" ? "butterfly.exe" : 
 async function main(): Promise<void> {
   mkdirSync(OUT_DIR, { recursive: true })
 
+  // `@opentui/solid` is installed only under packages/tui, so resolve it from there.
   const tuiRequire = createRequire(join(ROOT, "packages", "tui", "package.json"))
   const solidPluginPath = tuiRequire.resolve("@opentui/solid/bun-plugin")
   const { default: solidTransformPlugin } = (await import(solidPluginPath)) as {

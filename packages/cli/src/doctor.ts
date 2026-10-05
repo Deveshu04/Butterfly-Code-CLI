@@ -17,6 +17,12 @@ import {
   skillsIndex,
 } from "@butterfly/core"
 
+/**
+ * `butterfly doctor`: the same context audit the TUI's /doctor renders.
+ * Strictly read-only: never creates files, hits the network or spawns
+ * processes. The graph index is opened only if it already exists, the
+ * models catalog is read cache-only, and MCP servers are never connected.
+ */
 export async function runDoctorCommand(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
@@ -30,6 +36,8 @@ export async function runDoctorCommand(argv: string[]): Promise<number> {
   const cwd = resolve(values.cwd ?? process.cwd())
   const home = values.home ?? homedir()
 
+  // A broken config must not crash the diagnostic tool. doctor() lints the
+  // config itself; here we just fall back to an unconfigured session.
   const config = (() => {
     try {
       return loadConfig({ cwd, home })
@@ -56,6 +64,7 @@ export async function runDoctorCommand(argv: string[]): Promise<number> {
       })
     : ""
 
+  // Open the graph index only if it exists; never create it.
   const graphDbPath = join(cwd, ".butterfly", "graph.db")
   const graphAvailable = existsSync(graphDbPath)
   let graphSkeletonText = ""

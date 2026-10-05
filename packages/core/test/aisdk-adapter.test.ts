@@ -3,6 +3,11 @@ import { APICallError } from "ai"
 import { buildErrorEvent, toModelMessages } from "../src/provider/aisdk-adapter"
 import type { ChatMessage } from "../src/provider/port"
 
+/**
+ * Image parts use the AI SDK v7 FilePart shape (not the deprecated
+ * ImagePart): `{ type: "file", mediaType, data }`, where `data` may be a bare
+ * base64 string.
+ */
 
 test("plain string user content maps through unchanged", () => {
   const messages: ChatMessage[] = [{ role: "user", content: "hello" }]
@@ -45,6 +50,7 @@ test("an image-only part list (no text) maps to a single-element FilePart array"
   ])
 })
 
+// buildErrorEvent: plain-object errors must not render as [object Object]
 
 test("buildErrorEvent stamps providerId onto info.provider when classification found none", () => {
   const error = new APICallError({
@@ -61,6 +67,8 @@ test("buildErrorEvent stamps providerId onto info.provider when classification f
 })
 
 test("buildErrorEvent never renders [object Object] for a raw plain-object stream error part", () => {
+  // A plain-object provider JSON body passed straight through as a stream
+  // `{type:'error'}` part's `error`.
   const rawStreamErrorPart = { foo: "unrecognized shape", nested: { bar: 1 } }
   const event = buildErrorEvent(rawStreamErrorPart, "ollama")
   expect(event.message).not.toContain("[object Object]")
@@ -70,6 +78,8 @@ test("buildErrorEvent never renders [object Object] for a raw plain-object strea
 })
 
 test("buildErrorEvent keeps a classification-provided provider over the stamped providerId", () => {
+  // classifyProviderError doesn't set `provider` today, but stamping must not
+  // clobber it if a future source does.
   const event = buildErrorEvent("plain string error", "openrouter")
   expect(event.info?.provider).toBe("openrouter")
 })

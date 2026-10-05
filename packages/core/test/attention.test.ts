@@ -6,6 +6,7 @@ const blurredState = { focus: "blurred" as const, cwd: "/home/user/my-repo" }
 const notifyOn = { notifications: true }
 const notifyOff = { notifications: false }
 
+// turn.start: title + indeterminate progress, always (focus-independent)
 
 test("turn.start sets a busy title and starts indeterminate progress", () => {
   const actions = decideAttention({ kind: "turn.start" }, blurredState, notifyOn)
@@ -21,6 +22,7 @@ test("turn.start behaves the same whether focused or blurred (title/progress una
   )
 })
 
+// turn.progress: percent-based OSC 9;4, only when percent is known
 
 test("turn.progress with a known percent emits an exact OSC 9;4 percent sequence", () => {
   const actions = decideAttention({ kind: "turn.progress", percent: 42 }, blurredState, notifyOn)
@@ -43,6 +45,7 @@ test("turn.progress with no percent (budget unknown) yields no action", () => {
   expect(decideAttention({ kind: "turn.progress" }, blurredState, notifyOn)).toEqual([])
 })
 
+// turn.end: idle title + progress clear, always; notify gated by focus + config
 
 test("turn.end while blurred with notifications on: title, progress clear, and a notify action", () => {
   const actions = decideAttention({ kind: "turn.end" }, blurredState, notifyOn)
@@ -89,6 +92,7 @@ test("turn.end includes a detail (e.g. loop outcome) in the notify message when 
   })
 })
 
+// approval.request: notify-only, gated by focus + config; no title/progress
 
 test("approval.request while blurred with notifications on emits a notify action only", () => {
   const actions = decideAttention({ kind: "approval.request" }, blurredState, notifyOn)
@@ -126,6 +130,7 @@ test("approval.request while blurred with notifications off emits nothing (confi
   expect(decideAttention({ kind: "approval.request" }, blurredState, notifyOff)).toEqual([])
 })
 
+// message sanitization: strip ANSI, collapse newlines, strip control chars, clamp
 
 test("notify message strips ANSI escapes, collapses newlines, and strips control chars", () => {
   const detail = "line one\x1b[31m red \x1b[0m\nline two\x07\x00 done"
@@ -149,6 +154,7 @@ test("notify message is clamped to 240 chars and title to 80 chars", () => {
   expect(notify.title.length).toBeLessThanOrEqual(80)
 })
 
+// title basename derivation
 
 const hasControlChars = (text: string): boolean =>
   [...text].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f)
@@ -194,6 +200,7 @@ test("title text is clamped to 80 chars, same as notify titles", () => {
   expect(title.osc).toBe(`\x1b]0;${title.text}\x07`)
 })
 
+// abnormal-termination cleanup: the bare progress-clear sequence
 
 test("clearProgressOsc is exactly the sequence turn.end uses to clear progress", () => {
   const endProgress = decideAttention({ kind: "turn.end" }, focusedState, notifyOn).find(

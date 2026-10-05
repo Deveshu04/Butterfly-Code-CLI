@@ -29,6 +29,7 @@ async function gitFixture(): Promise<string> {
   return dir
 }
 
+// recentLogSubjects
 
 test("recentLogSubjects is empty outside a git repo", async () => {
   const dir = tempDir("bfly-nogit-")
@@ -49,6 +50,7 @@ test("recentLogSubjects respects the count option", async () => {
   expect(subjects[0]).toBe("Core: bump version")
 }, 20_000)
 
+// buildCommitMessagePrompt
 
 test("buildCommitMessagePrompt includes recent subjects as a style guide plus the diff", () => {
   const prompt = buildCommitMessagePrompt("--- a/x\n+++ b/x\n", ["Core: did a thing", "TUI: fix"])
@@ -63,6 +65,7 @@ test("buildCommitMessagePrompt omits the style section when there is no history 
   expect(prompt).toContain("--- a/x")
 })
 
+// generateCommitMessage
 
 test("generateCommitMessage reports nothingStaged without ever calling the model", async () => {
   const dir = await gitFixture()
@@ -101,6 +104,7 @@ test("generateCommitMessage builds a prompt from the staged diff and returns the
   ).toBe(true)
 }, 20_000)
 
+// stageAllTracked
 
 test("stageAllTracked stages tracked modifications but not untracked files", async () => {
   const dir = await gitFixture()
@@ -120,6 +124,7 @@ test("stageAllTracked returns false outside a git repo", async () => {
   expect(await stageAllTracked(dir)).toBe(false)
 }, 20_000)
 
+// writeCommitMessageFile
 
 test("writeCommitMessageFile writes the message verbatim and returns the path", () => {
   const dir = tempDir("bfly-msgfile-")
@@ -128,6 +133,8 @@ test("writeCommitMessageFile writes the message verbatim and returns the path", 
 })
 
 test("generateCommitMessage reports a git failure instead of offering to stage", async () => {
+  // A `.git` file containing garbage: fs-based detection says "repo" but every
+  // git spawn exits 128. That must not read as "nothing staged".
   const dir = tempDir("bfly-brokengit-")
   writeFileSync(join(dir, ".git"), "not a gitfile\n")
   const provider = new MockProvider([])

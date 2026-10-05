@@ -31,14 +31,14 @@ test("extractMentions stops a token at whitespace or the next @", () => {
 })
 
 test("extractMentions accepts a quoted token so paths with spaces round-trip", () => {
-  expect(extractMentions('see @"docs/Getting Started.md" now')).toEqual([
-    "docs/Getting Started.md",
-  ])
+  expect(extractMentions('see @"docs/Getting Started.md" now')).toEqual(["docs/Getting Started.md"])
   // Quoted and unquoted tokens mixed in the same message.
   expect(extractMentions('review @"src/My File.ts" and @src/plain.ts please')).toEqual([
     "src/My File.ts",
     "src/plain.ts",
   ])
+  // A bare unquoted mention with a space is not recovered: the picker must
+  // quote on insert, and extractMentions only round-trips quoted tokens.
   expect(extractMentions("see @docs/Getting Started.md now")).toEqual(["docs/Getting"])
 })
 

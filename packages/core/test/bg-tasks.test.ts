@@ -7,6 +7,11 @@ import type { SessionEvent } from "../src/session/events"
 import type { BgTaskRegistryOptions } from "../src/tool/bg-tasks"
 import { BgTaskRegistry } from "../src/tool/bg-tasks"
 
+/**
+ * Background bash task registry. Every spawned process, including keepAlive
+ * survivors and children of wrapper bun processes, is force-killed in
+ * afterEach so nothing leaks across tests.
+ */
 
 function fixtureDir(): string {
   return mkdtempSync(join(tmpdir(), "bfly-bgtasks-"))
@@ -33,6 +38,9 @@ function isAlive(pid: number): boolean {
   } catch {
     return false
   }
+  // A killed process whose parent is gone stays a zombie until PID 1 reaps it,
+  // which in containers may never happen. kill(pid, 0) succeeds on a zombie,
+  // so on Linux read the real state: "Z" is dead.
   if (process.platform === "linux") {
     try {
       const stat = require("node:fs").readFileSync(`/proc/${pid}/stat`, "utf8") as string
@@ -81,8 +89,16 @@ async function waitFor(predicate: () => boolean, timeoutMs = 15_000): Promise<vo
   }
 }
 
+/** ~40s of steady output: still running after a parent dies, but
+ * self-terminating if cleanup ever misses it. */
 const CHATTY = "i=0; while [ $i -lt 200 ]; do echo tick $i; i=$((i+1)); sleep 0.2; done"
 
+/**
+ * Runs a BgTaskRegistry in a separate bun process that spawns one keepAlive
+ * and one ordinary background task, then exits or waits to be killed. Child
+ * pids and the keepAlive log path are written to info.json. Returns the
+ * wrapper's pid and the parsed info.
+ */
 async function spawnWrapperParent(mode: "exit" | "stay"): Promise<{
   parentPid: number
   info: { kept: number; normal: number; keptLog: string }
@@ -167,11 +183,12 @@ test("reap kills every running task except keepAlive ones", async () => {
   expect(killed).toEqual([normal.id])
   expect(registry.get(normal.id)?.status).toBe("killed")
   expect(registry.get(kept.id)?.status).toBe("running")
+  // afterEach still kills the surviving keepAlive task.
 }, 20_000)
 
 test("output logs are capped on disk, with a truncation notice appended", async () => {
   const registry = makeRegistry({ logCapBytes: 40 })
-  const line = "0123456789".repeat(10)
+  const line = "0123456789".repeat(10) // 100 bytes, well past the 40-byte cap
   const record = registry.spawn(`echo ${line}`)
   await waitFor(() => registry.get(record.id)?.status !== "running")
   const content = readFileSync(record.logPath, "utf8")
@@ -219,6 +236,7 @@ test("stderr lands in the log alongside stdout, in order", async () => {
 
 test("the log rolls at the cap WHILE the task is still running (no unbounded growth)", async () => {
   const registry = makeRegistry({ logCapBytes: 400, logCheckIntervalMs: 100 })
+  // ~48 bytes per iteration, 100 iterations = ~4.8kB, 12x the cap.
   const record = registry.spawn(
     "i=0; while [ $i -lt 100 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); sleep 0.02; done",
   )
@@ -243,6 +261,7 @@ test("spawn refuses (clearly) on a shell family it cannot detach safely", () => 
   expect(registry.list()).toHaveLength(0)
 })
 
+// survival across parent-process exit
 
 test("a keepAlive task SURVIVES its parent process being killed — and keeps logging", async () => {
   const { parentPid, info } = await spawnWrapperParent("stay")
@@ -267,6 +286,7 @@ test("a keepAlive task SURVIVES its parent process being killed — and keeps lo
 
 test("a normal parent exit reaps ordinary tasks and spares keepAlive ones", async () => {
   const { info, waitParentGone } = await spawnWrapperParent("exit")
+  // The wrapper never calls reap() itself; the process-exit hook must.
   await waitParentGone()
   await new Promise((r) => setTimeout(r, 1_500))
 

@@ -12,6 +12,11 @@ import {
 import { ToolRegistry } from "../src/tool/registry"
 import { MockProvider } from "./helpers/mock-provider"
 
+/**
+ * Step-level retry for classified retryable provider failures
+ * (rate_limit/unavailable/timeout/network). Non-retryable kinds and exhausted
+ * retries fail as usual.
+ */
 
 function makeDeps(provider: MockProvider, overrides: Partial<RunnerDeps> = {}): RunnerDeps {
   return {
@@ -28,6 +33,7 @@ function makeDeps(provider: MockProvider, overrides: Partial<RunnerDeps> = {}): 
 
 const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }
 
+// computeRetryBackoffMs: pure, so pinned without real sleeping
 
 test("computeRetryBackoffMs doubles the jitter ceiling per attempt (base 2s, x2)", () => {
   for (let i = 0; i < 25; i++) {
@@ -47,6 +53,7 @@ test("computeRetryBackoffMs honors retryAfterSec over the computed backoff, rega
   expect(computeRetryBackoffMs(1, 0)).toBe(0)
 })
 
+// A step that fails mid-stream journals nothing, so a retry supersedes it cleanly
 
 test("a retried step's journal reflects ONLY the successful attempt — nothing from the failed one leaks in", async () => {
   const provider = new MockProvider([
@@ -78,12 +85,15 @@ test("a retried step's journal reflects ONLY the successful attempt — nothing 
 
   const { events } = SessionJournal.replay(deps.journal.path)
   const assistantTexts = events.filter((e) => e.type === "message.assistant").map((e) => e.text)
+  // Exactly one message.assistant for the step (the successful attempt's
+  // text) and no trace of "ghost-call" or the failed attempt's partial text.
   expect(assistantTexts).toEqual(["all good"])
   expect(events.some((e) => e.type === "tool.call")).toBe(false)
   expect(JSON.stringify(events)).not.toContain("ghost-call")
   expect(JSON.stringify(events)).not.toContain("doomed")
 })
 
+// retryable kinds are retried, with the expected notice format
 
 test("a rate_limit failure is retried and the notice names the provider and the wait", async () => {
   const provider = new MockProvider([
@@ -137,6 +147,7 @@ for (const kind of ["rate_limit", "unavailable", "timeout", "network"] as const)
   })
 }
 
+// non-retryable kinds: one attempt, immediate throw
 
 for (const kind of ["auth", "quota", "bad_request", "context_length", "unknown"] as const) {
   test(`${kind} is NOT retried — fails on the first attempt with the usual throw shape`, async () => {
@@ -147,6 +158,8 @@ for (const kind of ["auth", "quota", "bad_request", "context_length", "unknown"]
     const deps = makeDeps(provider, { onEvent: (event) => seen.push(event) })
     await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: nope")
     expect(provider.requests.length).toBe(1)
+    // The raw error event still reaches onEvent for a non-retried failure
+    // (the UI's error card).
     expect(seen.some((e) => e.type === "error")).toBe(true)
     expect(seen.some((e) => e.type === "notice")).toBe(false)
   })
@@ -159,6 +172,7 @@ test("an error with no `info` (unclassified) is treated as non-retryable", async
   expect(provider.requests.length).toBe(1)
 })
 
+// retries exhausted: same throw shape, capped at deps.retries (default 3)
 
 test("retries exhausted (default cap 3) still throws 'Provider error: ...' unchanged in shape", async () => {
   const failStep = () => [
@@ -213,10 +227,14 @@ test("retries: 0 disables step retry entirely — one attempt, then the usual th
   const deps = makeDeps(provider, { retries: 0, onEvent: (event) => seen.push(event) })
   await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: rate limited")
   expect(provider.requests.length).toBe(1)
+  // No "retrying" notice: a retryable kind with the cap at 0 takes the
+  // non-retryable path.
   expect(seen.some((e) => e.type === "notice")).toBe(false)
   expect(seen.some((e) => e.type === "error")).toBe(true)
 })
 
+// Abort wins over retry and settles like any interrupt: no throw,
+// `interrupted: true`, one turn.completed, and no error event.
 
 test("an already-aborted signal short-circuits the backoff — settles interrupted, fails fast, never retries", async () => {
   const provider = new MockProvider([
@@ -294,6 +312,7 @@ test("an abort mid-backoff journals turn.completed and nothing for the doomed st
   expect(seen.some((e) => e.type === "error")).toBe(false)
 })
 
+// a failed attempt's live-streamed events are retracted
 
 test("a failed attempt emits step-retracted BEFORE its retry notice, so the UI drops the ghost first", async () => {
   const provider = new MockProvider([
@@ -319,8 +338,10 @@ test("a failed attempt emits step-retracted BEFORE its retry notice, so the UI d
   const types = seen.map((e) => e.type)
   const retracted = types.indexOf("step-retracted")
   expect(retracted).toBeGreaterThan(-1)
+  // Everything the failed attempt streamed came before the retraction...
   expect(types.indexOf("text-delta")).toBeLessThan(retracted)
   expect(types.indexOf("tool-call")).toBeLessThan(retracted)
+  // ...and the explanation comes after it.
   expect(types.indexOf("notice")).toBeGreaterThan(retracted)
   const event = seen[retracted]
   expect(event).toEqual({ type: "step-retracted", attempt: 1 })
@@ -351,6 +372,9 @@ test("a FINAL failure does NOT retract — nothing is coming to replace what it 
   const seen: RunnerEvent[] = []
   const deps = makeDeps(provider, { onEvent: (event) => seen.push(event) })
   await expect(runUserTurn(deps, "go")).rejects.toThrow("Provider error: nope")
+  // Retraction only prevents a retry from double-writing the transcript.
+  // With no retry coming, the partial output stays and the error card lands
+  // beneath it.
   expect(seen.map((e) => e.type)).toEqual(["text-delta", "error"])
 })
 

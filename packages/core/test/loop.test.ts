@@ -167,6 +167,7 @@ test("budget ceiling stops the loop between iterations", async () => {
   expect(outcome.iterations).toBe(1)
 })
 
+// structured onEvent + signal interrupt
 
 test("onEvent streams the structured, typed event sequence for a green task", async () => {
   const { queue, deps } = loopFixture({
@@ -236,6 +237,10 @@ test("a signal aborted mid-iteration abandons that iteration (no commit) and lea
   const outcome = await runLoop({
     ...deps,
     signal: controller.signal,
+    // Interrupt the moment the first task is claimed. MockProvider ignores the
+    // signal, so runUserTurn returns normally, but the supervisor re-checks the
+    // signal before gates or commit: a stopped iteration must not commit. The
+    // task stays "claimed" so the next `loop run` redoes it.
     onEvent: (event) => {
       seen.push(event)
       if (event.type === "task.claimed") controller.abort()
@@ -245,6 +250,8 @@ test("a signal aborted mid-iteration abandons that iteration (no commit) and lea
   expect(outcome.stopReason).toBe("interrupted")
   expect(outcome.iterations).toBe(1)
   expect(outcome.closed).toBe(0)
+  // Left "claimed" (not closed, released or blocked), so the next
+  // WorkQueue.open() resets it to "open" via stale-claim recovery.
   expect(queue.get(first)?.status).toBe("claimed")
   // The second task was never even reached.
   expect(queue.get(second)?.status).toBe("open")

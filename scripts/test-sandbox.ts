@@ -1,3 +1,13 @@
+/**
+ * Test-run sandbox, loaded as a bun test preload (root and packages/tui
+ * bunfig.toml). Many tests create temp dirs and don't clean up, so before any
+ * test loads TMPDIR/TEMP/TMP (read by os.tmpdir() and inherited by children)
+ * point at one per-run folder, `<temp>/butterfly-tests/run-XXXXXX/`, which is
+ * deleted after the last test. Leftovers older than 2h are swept on start.
+ *
+ * `registerTestCleanup(path)` (globalThis.__bflyTestCleanup) registers a path
+ * outside the sandbox for removal.
+ */
 import { afterAll } from "bun:test"
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -39,6 +49,8 @@ if (!globalThis.__bflyTestCleanup) {
 
   const cleanup = new Set<string>([run])
   globalThis.__bflyTestCleanup = cleanup
+  // Use a global afterAll, not process.on("exit"): some tests emit a synthetic
+  // "exit" to exercise exit hooks, which would delete the sandbox mid-run.
   afterAll(() => {
     for (const path of cleanup) {
       try {

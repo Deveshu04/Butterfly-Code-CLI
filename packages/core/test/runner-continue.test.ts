@@ -118,6 +118,8 @@ test("stale todos from an earlier turn never trigger a nudge", async () => {
 })
 
 test("a cut-off reply keeps resuming until it finishes, even after a todo nudge", async () => {
+  // A todo nudge must not spend the cut-off allowance, or the next cut-off
+  // ends the turn mid-sentence with the plan never updated.
   const provider = new MockProvider([
     callTodo("t1", ["in_progress", "pending"]),
     say("stopping early"),

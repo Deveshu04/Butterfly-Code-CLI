@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { computeAllowPattern, planQuickAdd } from "../src/permission/quick-add"
 import { resolvePermission } from "../src/permission/tree"
 
+// computeAllowPattern: narrowing rules per tool category
 
 test("bash: narrows to the first word only, never the full literal", () => {
   expect(computeAllowPattern("bash", "git push origin main")).toBe("git *")
@@ -9,6 +10,8 @@ test("bash: narrows to the first word only, never the full literal", () => {
 })
 
 test("bash: env-var assignment prefixes are stripped, with NO leading wildcard", () => {
+  // A leading "*" would compile to /^.*npm .*$/, a match-anywhere rule. The
+  // narrowing is `VAR=x cmd -> cmd`, nothing wider.
   expect(computeAllowPattern("bash", "CI=1 npm test")).toBe("npm *")
   expect(computeAllowPattern("bash", "NODE_ENV=production PORT=3000 npm run build")).toBe("npm *")
 })
@@ -62,6 +65,7 @@ test("tools with no per-call target narrow to the whole tool, never the root wil
   expect(computeAllowPattern("memory", undefined)).toBe("*")
 })
 
+// planQuickAdd: deny-not-widened + in-memory effect
 
 test("planQuickAdd installs the rule and it takes effect via resolvePermission", () => {
   const plan = planQuickAdd({ "*": "allow", bash: "ask" }, "bash", "git push origin main")
@@ -117,6 +121,10 @@ test("planQuickAdd refuses an exact pattern collision with an existing deny", ()
 })
 
 test("planQuickAdd refuses a narrowed pattern that would outrank a shorter overlapping deny", () => {
+  // "*it*" denies anything containing "it", which "git *" (the narrowed
+  // candidate for "git status") contains. The candidate is longer, so under
+  // longest-match-wins it would silently un-deny every "git ..." command.
+  // Refuse instead.
   const rules = { bash: { "*it*": "deny" as const } }
   const plan = planQuickAdd(rules, "bash", "git status")
   expect(plan.ok).toBe(false)
@@ -125,12 +133,17 @@ test("planQuickAdd refuses a narrowed pattern that would outrank a shorter overl
 })
 
 test("planQuickAdd allows a bare word-exact deny to coexist (no real overlap: 'word' never matches 'word *')", () => {
+  // "npm" alone matches only the bare command; "npm *" requires a trailing
+  // space. The matched sets are disjoint, so this is safe.
   const rules = { bash: { npm: "deny" as const } }
   const plan = planQuickAdd(rules, "bash", "npm install-all")
   expect(plan.ok).toBe(true)
 })
 
 test("planQuickAdd refuses a directory glob that would widen a shorter overlapping deny", () => {
+  // ".env*" denies anything starting with ".env". A directory ".env-configs"
+  // narrows to ".env-configs/**", which is longer, and its literal directory
+  // ".env-configs/" is itself caught by the ".env*" deny.
   const rules = { edit: { "*": "ask" as const, ".env*": "deny" as const } }
   const plan = planQuickAdd(rules, "edit", ".env-configs/settings.ts")
   expect(plan.ok).toBe(false)
@@ -148,8 +161,11 @@ test("planQuickAdd allows a directory glob that does NOT overlap an existing den
   expect(resolvePermission(next, "edit", "config/settings.ts")).toBe("allow")
 })
 
+// planQuickAdd: un-escapable glob metacharacters in the target
 
 test("planQuickAdd refuses a bash word containing a glob wildcard", () => {
+  // The rule language has no escape syntax, so "./build* *" would match far
+  // more than the "./build*" the user is looking at.
   const plan = planQuickAdd({ "*": "ask" }, "bash", "./build* --prod")
   expect(plan.ok).toBe(false)
   expect(plan.rules).toBeUndefined()
@@ -199,6 +215,8 @@ test("planQuickAdd refuses a command that is only env assignments (no command wo
 })
 
 test("planQuickAdd leaves a longer, more specific deny in charge even though patterns overlap", () => {
+  // "git rm *" is longer than "git *", so under longest-match-wins the deny
+  // still wins; allowing is safe.
   const rules = { bash: { "*": "ask" as const, "git rm *": "deny" as const } }
   const plan = planQuickAdd(rules, "bash", "git status")
   expect(plan.ok).toBe(true)

@@ -2,6 +2,10 @@ import { expect, test } from "bun:test"
 import type { RunnerEvent } from "@butterfly/core"
 import { renderEvent } from "../src/run"
 
+/**
+ * `butterfly run`'s non-JSON rendering is plain ASCII: "->" for a tool call,
+ * "ok"/"failed" for a result, never glyphs.
+ */
 
 function captureStdout(run: () => void): string {
   const original = process.stdout.write.bind(process.stdout)
@@ -62,6 +66,7 @@ test("json mode is untouched by the ASCII sweep — it's structured output, not 
     name: "read",
     input: { file_path: "app.ts" },
   }
+  // JSON mode uses console.log, not process.stdout.write, so it needs its own mock.
   const original = console.log
   let out = ""
   console.log = (chunk: string) => {

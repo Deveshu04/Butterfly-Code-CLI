@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import type { BenchTaskResult } from "@butterfly/core"
 import { formatBenchResultLine } from "../src/bench"
 
+/** Headless bench output uses plain "ok"/"FAIL" words, never glyphs. */
 
 function fakeResult(overrides: Partial<BenchTaskResult>): BenchTaskResult {
   return {

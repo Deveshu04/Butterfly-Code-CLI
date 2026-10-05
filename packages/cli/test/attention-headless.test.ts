@@ -48,6 +48,7 @@ test("an empty action list writes nothing even on a TTY", () => {
   expect(stream.written).toEqual([])
 })
 
+// abnormal termination: the progress indicator must never outlive us
 
 test("clearHeadlessProgress writes the OSC 9;4;0 clear on a TTY, nothing when piped", () => {
   const tty = fakeStream(true)
@@ -85,6 +86,8 @@ test("the exit hook writes the clear at most once, however many times it fires",
 })
 
 test("the exit hook also runs the caller's extra teardown, at most once", () => {
+  // run.ts hangs its background-task reap here: this hook, not the turn's
+  // `finally`, covers Ctrl+C mid-turn, SIGTERM and hard crashes.
   const stream = fakeStream(true)
   let extra = 0
   const uninstall = installProgressExitClear(stream, () => {
@@ -106,6 +109,11 @@ test("a throwing extra teardown never masks the real exit", () => {
   uninstall()
 })
 
+/**
+ * Proves the hook fires on real teardown: a child bun process installs it
+ * against an injected TTY-shaped stream and exits. Injecting the stream avoids
+ * needing a PTY while still exercising the genuine `process.on("exit")` path.
+ */
 test("the exit hook fires on a real process exit", async () => {
   const moduleUrl = pathToFileURL(
     fileURLToPath(new URL("../src/attention-headless.ts", import.meta.url)),

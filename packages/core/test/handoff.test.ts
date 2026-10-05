@@ -28,6 +28,7 @@ function tempDir(prefix: string): string {
 
 const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }
 
+// truncateHandoffDoc
 
 test("truncateHandoffDoc leaves short docs untouched", () => {
   const result = truncateHandoffDoc("  ## Goal\nship it\n  ")
@@ -42,6 +43,7 @@ test("truncateHandoffDoc hard-truncates to HANDOFF_MAX_CHARS with a visible mark
   expect(result.doc.endsWith(HANDOFF_TRUNCATION_MARKER)).toBe(true)
 })
 
+// runHandoffTurn: prompt assembly + tools masked off
 
 test("runHandoffTurn sends the fixed template prompt with tools masked off, seeing prior history", async () => {
   const journal = SessionJournal.create(tempDir("bfly-handoff-journal-"))
@@ -129,6 +131,7 @@ test("runHandoffTurn hard-truncates a runaway response", async () => {
   expect(result.doc.length).toBeLessThanOrEqual(HANDOFF_MAX_CHARS)
 })
 
+// runHandoffTurn: cost accounting + dollar cap
 
 test("runHandoffTurn reports costUSD from the model's pricing", async () => {
   const journal = SessionJournal.create(tempDir("bfly-handoff-cost-"))
@@ -151,6 +154,8 @@ test("runHandoffTurn reports costUSD from the model's pricing", async () => {
     // USD per 1M tokens (models.dev shape).
     cost: { input: 3, output: 15, cacheRead: 0.3 },
   })
+  // The handoff turn sends the whole conversation, so it must never read as
+  // free. input (1000) includes 200 cached tokens: 800 fresh at the input rate.
   expect(result.costUSD).toBeCloseTo((800 * 3 + 500 * 15 + 200 * 0.3) / 1_000_000, 12)
   expect(result.budgetExceeded).toBe(false)
 })
@@ -203,6 +208,7 @@ test("runHandoffTurn honours maxSpendUSD — the cap notice fires and the turn i
   expect(notices.some((text) => text.includes("dollar budget reached"))).toBe(true)
 })
 
+// handoffPaths / saveHandoff
 
 test("handoffPaths points at the fixed main file and archive dir under .butterfly", () => {
   const paths = handoffPaths("/repo")
@@ -251,6 +257,7 @@ test("saveHandoff records truncated:true when the doc was cut", () => {
   expect(event && "truncated" in event ? event.truncated : false).toBe(true)
 })
 
+// consumeHandoff: save+consume lifecycle
 
 test("consumeHandoff returns undefined when there is no pending handoff", () => {
   const cwd = tempDir("bfly-handoff-empty-")
@@ -268,6 +275,7 @@ test("consumeHandoff returns the content once, then renames the file so it isn't
   expect(existsSync(saved.path)).toBe(false)
   expect(existsSync(`${saved.path}.consumed`)).toBe(true)
 
+  // A second call must find nothing pending.
   const second = consumeHandoff(cwd)
   expect(second).toBeUndefined()
 
@@ -275,6 +283,7 @@ test("consumeHandoff returns the content once, then renames the file so it isn't
   expect(existsSync(saved.archivePath)).toBe(true)
 })
 
+// renderHandoffPreload + /new-style preload injection
 
 test("renderHandoffPreload labels the doc for injection into a fresh session", () => {
   const rendered = renderHandoffPreload("## Goal\ndo the thing")
@@ -328,6 +337,7 @@ test("preload injection: a fresh session's first turn sees the consumed handoff 
   expect(consumeHandoff(cwd)).toBeUndefined()
 })
 
+// preloadHandoff: visible notice + self-reinjection guard
 
 test("preloadHandoff leaves the task text alone and stays silent when nothing is pending", () => {
   const cwd = tempDir("bfly-handoff-preload-none-")
@@ -353,6 +363,7 @@ test("preloadHandoff prepends the handoff AND returns a user-visible notice nami
   expect(result.loaded).toBe(true)
   expect(result.taskText).toContain("Build a widget")
   expect(result.taskText.endsWith("carry on")).toBe(true)
+  // Never silent: the injection is announced with its file and age.
   expect(result.notice).toBeDefined()
   expect(result.notice).toContain(saved.path)
   expect(result.notice).toContain("2h ago")
@@ -401,6 +412,7 @@ test("formatHandoffAge renders coarse, human ages", () => {
   expect(formatHandoffAge(12 * 60 * 1000)).toBe("12m ago")
   expect(formatHandoffAge(3 * 60 * 60 * 1000)).toBe("3h ago")
   expect(formatHandoffAge(2 * 24 * 60 * 60 * 1000)).toBe("2d ago")
+  // Just under an hour boundary rounds to it (avoids flakiness against fs mtimes).
   expect(formatHandoffAge(2 * 60 * 60 * 1000 - 50)).toBe("2h ago")
   expect(formatHandoffAge(89 * 60 * 1000)).toBe("1h ago")
 })

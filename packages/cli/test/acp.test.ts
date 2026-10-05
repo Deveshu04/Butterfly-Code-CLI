@@ -12,7 +12,13 @@ import {
 } from "@butterfly/core"
 import { connectAcpAgent } from "../src/acp/agent"
 
+/**
+ * ACP integration tests over an in-process duplex: an AcpAgent-backed
+ * JsonRpcPeer fed lines via `handleLine`, with every outbound frame captured
+ * in `sent`.
+ */
 
+// Test helpers
 
 class MockProvider implements ProviderPort {
   readonly requests: TurnRequest[] = []
@@ -34,6 +40,11 @@ function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))
 }
 
+/**
+ * A temp dir that is its own git repo. Turn snapshots walk up to the nearest
+ * `.git`; without one here they could stage an unrelated ancestor repo (e.g.
+ * the home directory), which is slow and host-dependent.
+ */
 function gitCwd(prefix: string): string {
   const cwd = tempDir(prefix)
   Bun.spawnSync(["git", "init", "-q"], { cwd, stdout: "ignore", stderr: "ignore" })
@@ -93,6 +104,8 @@ function parsed(sent: string[]): any[] {
   return sent.map((line) => JSON.parse(line))
 }
 
+/** Background task pids are force-killed after each test (keepAlive ones
+ * included) so nothing leaks out of the suite. */
 const bgPids: number[] = []
 afterEach(() => {
   for (const pid of bgPids.splice(0)) {
@@ -139,6 +152,7 @@ async function waitFor<T>(fn: () => T | undefined, timeoutMs = 5000): Promise<T>
   }
 }
 
+// initialize
 
 test("initialize: negotiates protocol version 1 and advertises honest capabilities", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -173,6 +187,7 @@ test("initialize: negotiates protocol version 1 and advertises honest capabiliti
   expect(response.result.authMethods).toEqual([])
 })
 
+// malformed input
 
 test("a malformed JSON line gets a JSON-RPC parse error, not a crash", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -241,6 +256,7 @@ test("session/new without a configured model asks for auth instead of hanging or
   expect(response.error.data.authMethods[0].id).toBe("config")
 })
 
+// prompt round-trip
 
 test("session/prompt streams agent_message_chunk updates and resolves end_turn", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -284,6 +300,7 @@ test("session/prompt streams agent_message_chunk updates and resolves end_turn",
   expect(finalResponse.result.stopReason).toBe("end_turn")
 }, 20_000)
 
+// permission request/response + tool_call cards + diff content
 
 test("an edit under an ask rule round-trips session/request_permission and reports a diff", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -366,6 +383,7 @@ test("an edit under an ask rule round-trips session/request_permission and repor
   expect(finalResponse.result.stopReason).toBe("end_turn")
 }, 20_000)
 
+// cancel mid-turn
 
 test("session/cancel mid-turn resolves stopReason cancelled without hanging", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -375,6 +393,8 @@ test("session/cancel mid-turn resolves stopReason cancelled without hanging", as
     JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
   )
 
+  // Only one script: if the runner reached a second streamTurn despite the
+  // cancel, MockProvider would throw.
   const provider = new MockProvider([
     [
       {
@@ -415,6 +435,7 @@ test("session/cancel mid-turn resolves stopReason cancelled without hanging", as
   expect(finalResponse.result.stopReason).toBe("cancelled")
 }, 20_000)
 
+// concurrent prompts on one session
 
 test("a second session/prompt while one is in flight is rejected, and the first still completes", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -424,6 +445,8 @@ test("a second session/prompt while one is in flight is rejected, and the first 
     JSON.stringify({ permissions: { "*": "allow", edit: "ask" } }),
   )
 
+  // Exactly two scripts (the first turn's two steps). If the rejected second
+  // prompt had started a turn, MockProvider would run dry and throw.
   const provider = new MockProvider(
     oneToolCallThenText({
       callId: "c1",
@@ -478,6 +501,7 @@ test("a second session/prompt while one is in flight is rejected, and the first 
   expect(existsSync(join(cwd, "a.txt"))).toBe(true)
 }, 20_000)
 
+// permission timeout + client disconnect
 
 test("a permission request the client never answers times out and fails safe (deny)", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -573,6 +597,7 @@ test("a client disconnect denies every pending permission instead of hanging the
   expect(existsSync(join(cwd, "a.txt"))).toBe(false)
 }, 20_000)
 
+// client-supplied mcpServers
 
 test("client-supplied mcpServers are converted, connected fail-soft, and reachable via the mcp tool", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -589,6 +614,8 @@ test("client-supplied mcpServers are converted, connected fail-soft, and reachab
     home,
     mcpConnect: async (configs) => {
       seen.push(configs)
+      // Deterministic, no-network stand-in using the hub's fail-soft path
+      // (the MCP SDK isn't resolvable from packages/cli).
       const hub = await McpHub.connect(configs, {
         transportFactory: () => {
           throw new Error("test transport")
@@ -623,6 +650,7 @@ test("client-supplied mcpServers are converted, connected fail-soft, and reachab
   )
   const sessionId = parsed(sent)[0].result.sessionId as string
   expect(sessionId).toBeDefined()
+  // ACP's EnvVariable array -> the hub's env record.
   expect(seen[0]).toEqual({
     docs: { command: "/path/to/mcp-server", args: ["--stdio"], env: { TOKEN: "t" } },
   })
@@ -651,6 +679,7 @@ test("client-supplied mcpServers are converted, connected fail-soft, and reachab
   expect(closed).toBe(1)
 }, 20_000)
 
+// interactive default permission posture
 
 test("with no configured permissions, bash asks (interactive posture) instead of just running", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -726,7 +755,10 @@ test("butterfly.jsonc permissions override the interactive defaults entirely", a
   expect(messages.find((m) => m.id === 2).result.stopReason).toBe("end_turn")
 }, 20_000)
 
+// background tasks
 
+/** Background tasks spawned from the editor must be journalled and must not
+ * outlive the client. */
 test("a background task from an ACP session is journalled and reaped on shutdown", async () => {
   const home = tempDir("bfly-acp-home-")
   const cwd = gitCwd("bfly-acp-cwd-")
@@ -823,6 +855,7 @@ test("a keepAlive background task is spared by ACP shutdown", async () => {
   expect(isAlive(pid)).toBe(true)
 }, 60_000)
 
+// an auto-deny must not be attributed to the user
 
 test("a timed-out permission renders as a timeout, never as 'User denied'", async () => {
   const home = tempDir("bfly-acp-home-")
@@ -858,9 +891,11 @@ test("a timed-out permission renders as a timeout, never as 'User denied'", asyn
     }),
   )
 
+  // On the wire (what the editor user reads)...
   const wire = JSON.stringify(parsed(sent))
   expect(wire).toContain("timed out")
   expect(wire).not.toContain("User denied")
+  // ...and in the model transcript (what it reasons from next step).
   const request = provider.requests[provider.requests.length - 1]
   const toolMessage = request?.messages.find((m) => m.role === "tool")
   expect(toolMessage && "output" in toolMessage ? toolMessage.output : "").toContain("timed out")
@@ -958,6 +993,7 @@ test("an explicit Reject from the client still reads as the user's decision", as
   expect(existsSync(join(cwd, "a.txt"))).toBe(false)
 }, 20_000)
 
+// `retries` wiring + doomed-attempt card retraction
 
 /** A classified-retryable stream failure with a ZERO backoff, so the retry
  * path runs instantly instead of sleeping out a jittered 0-2s ceiling. */
@@ -971,6 +1007,10 @@ function retryableFailure(message = "overloaded"): TurnEvent[] {
   ]
 }
 
+/**
+ * `retries` from butterfly.jsonc must reach the runner: `retries: 0`
+ * suppresses the retry the default (3) would perform.
+ */
 test("butterfly.jsonc `retries: 0` reaches the runner — a retryable failure is NOT retried", async () => {
   const home = tempDir("bfly-acp-home-")
   const cwd = gitCwd("bfly-acp-cwd-")
@@ -1036,6 +1076,11 @@ test("butterfly.jsonc `retries: 1` reaches the runner — exactly one retry, the
   expect(response.result.stopReason).toBe("end_turn")
 }, 20_000)
 
+/**
+ * A failed attempt's tool_call card was already sent as pending/in_progress.
+ * No result will come for it, so it must be closed as failed rather than
+ * spin forever in the editor.
+ */
 test("a retried step marks the doomed attempt's tool_call card failed instead of leaving it in_progress", async () => {
   const home = tempDir("bfly-acp-home-")
   const cwd = gitCwd("bfly-acp-cwd-")
@@ -1074,6 +1119,8 @@ test("a retried step marks the doomed attempt's tool_call card failed instead of
     .filter((m) => m.method === "session/update")
     .map((m) => m.params.update)
   const ghostUpdates = updates.filter((u) => u.toolCallId === "ghost")
+  // The card was opened (pending -> in_progress) and then closed as failed;
+  // its last state is never in_progress.
   expect(ghostUpdates.length).toBeGreaterThanOrEqual(3)
   expect(ghostUpdates.at(-1).status).toBe("failed")
   const response = parsed(sent).find((m) => m.id === 2)

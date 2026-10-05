@@ -20,6 +20,8 @@ import { nonRepoDir } from "./helpers/temp"
 
 const usage = { input: 500, output: 50, cacheRead: 0, cacheWrite: 0 }
 
+/** A copy of the TUI's interactive defaults (mutation asks, secrets deny):
+ * worktree isolation must stay reachable under them. */
 const TUI_LIKE_RULES: PermissionRules = {
   "*": "allow",
   bash: "ask",
@@ -76,6 +78,7 @@ test("task subagent runs isolated and returns only a summary", async () => {
 
   expect(result.isError).toBeFalsy()
   expect(result.output).toContain("FOUND: the answer.")
+  // Summary cap: parent context stays clean (<=2k + a short usage note).
   expect(result.output.length).toBeLessThanOrEqual(2_200)
   // The subagent got its own journal in sessionsDir.
   expect(readdirSync(sessionsDir).some((f) => f.endsWith(".jsonl"))).toBe(true)
@@ -371,7 +374,11 @@ test("worktree isolation is denied harness-side when the caller's rules deny edi
   expect(existsSync(worktreesRoot(dir))).toBe(false)
 }, 20_000)
 
+// fail-safe cleanup, merged permission rules, honest cleanup reporting,
+// HEAD-only-checkout warning, wired mutating set
 
+/** The mutating toolset every isolated worktree subagent gets (shared by the
+ * CLI and TUI call sites). */
 test("mutatingSubagentRegistry is the read-only set PLUS edit+bash, and takes caller extras", () => {
   const registry = mutatingSubagentRegistry((sub) => {
     sub.register({
@@ -405,6 +412,8 @@ test("mergeWorktreeRules: the session's DENY rules survive inside the worktree, 
   expect(resolvePermission(merged, "memory", undefined)).toBe("deny")
   // The worktree defaults' own secret-file protection is kept.
   expect(resolvePermission(merged, "edit", ".env")).toBe("deny")
+  // User "ask" is not inherited: an isolated subagent has no approval seam
+  // (the ask is answered once at entry), so ordinary work proceeds.
   expect(resolvePermission(merged, "edit", "app.ts")).toBe("allow")
   expect(resolvePermission(merged, "bash", "ls")).toBe("allow")
   // The session's ROOT posture is not inherited either.
@@ -431,6 +440,8 @@ test("worktree isolation: the session's deny rules are enforced INSIDE the workt
       },
       { type: "finish", reason: "tool-calls", usage },
     ],
+    // A second, allowed edit leaves the worktree dirty (so it survives) and
+    // proves the deny above was targeted, not blanket.
     [
       {
         type: "tool-call",
@@ -596,6 +607,9 @@ test("worktree isolation: a FAILED cleanup is reported honestly (still on disk, 
     makeRegistry: () => new ToolRegistry(),
     makeMutatingRegistry: () =>
       mutatingSubagentRegistry((sub) => {
+        // Simulates a lingering child holding the worktree (common on
+        // Windows): `git worktree remove --force` refuses while `git status`
+        // still reports clean.
         sub.register({
           name: "lockit",
           description: "Locks this worktree.",

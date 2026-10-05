@@ -113,6 +113,7 @@ test("the runner feeds failing post-edit checks back to the model", async () => 
   expect(output).toContain("Edited ok")
   expect(output).toContain("typecheck FAILED")
   expect(result && "isError" in result ? result.isError : false).toBe(true)
+  // The same failing feedback hook also gets a hook.run record.
   const run = events.find((e) => e.type === "hook.run")
   expect(run && "feedback" in run ? run.feedback : false).toBe(true)
   expect(run && "exitCode" in run ? run.exitCode : -1).toBe(1)
@@ -167,10 +168,12 @@ test("the runner denies tool calls that a pre.tool hook blocks", async () => {
   const result = events.find((e) => e.type === "tool.result")
   expect(result && "isError" in result ? result.isError : false).toBe(true)
   expect(result && "output" in result ? result.output : "").toContain("hook")
+  // The blocking pre.tool hook also gets a hook.run record.
   const run = events.find((e) => e.type === "hook.run")
   expect(run && "blocked" in run ? run.blocked : false).toBe(true)
 }, 40_000)
 
+// hook observability (journal `hook.run` events)
 
 test("runHooks reports a run record via onRun for a passing hook", async () => {
   const runs: HookRunRecord[] = []
@@ -194,9 +197,14 @@ test("runHooks reports a run record via onRun for a passing hook", async () => {
 
 test("runHooks reports a failing hook that neither blocks nor gives feedback", async () => {
   const runs: HookRunRecord[] = []
-  await runHooks([{ event: "turn.end", command: "exit 3" }], "turn.end", { cwd: dir() }, {
-    onRun: (run) => runs.push(run),
-  })
+  await runHooks(
+    [{ event: "turn.end", command: "exit 3" }],
+    "turn.end",
+    { cwd: dir() },
+    {
+      onRun: (run) => runs.push(run),
+    },
+  )
   expect(runs[0]).toMatchObject({ exitCode: 3, blocked: false, feedback: false })
 }, 30_000)
 

@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { SessionJournal, saveHandoff } from "@butterfly/core"
 import { applyResumeHandoff } from "../src/run"
 
+/** `butterfly run --resume-handoff`, tested without spinning up runHeadless. */
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix))
